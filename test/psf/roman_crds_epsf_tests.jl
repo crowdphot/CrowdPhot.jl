@@ -132,15 +132,20 @@ end
         # < oversample^2 / 2). Must be convolved with the pixel-response
         # kernel and scaled by oversample^2 before use.
         oversample = 4
-        nx, ny = 15, 15
+        # The stamp must be wide enough for the full kernel support to fit
+        # around the central sample, or the `:zero` border drops flux and the
+        # flux-conservation check below fails for reasons that have nothing to
+        # do with the loader. The :exact kernel has half-width 4 * oversample.
+        nx, ny = 41, 41
+        cen = (nx + 1) ÷ 2
         old_stamp = zeros(Float32, nx, ny)
-        old_stamp[8, 8] = 1.0f0 # sums to ~1
+        old_stamp[cen, cen] = 1.0f0 # sums to ~1
 
         # "New format": stamps already pixel-integrated, summing to
         # ~oversample^2. Must be used unchanged (no convolution, no extra
         # scaling).
         new_stamp = zeros(Float32, nx, ny)
-        new_stamp[8, 8] = Float32(oversample^2) # sums to oversample^2
+        new_stamp[cen, cen] = Float32(oversample^2) # sums to oversample^2
 
         data_old = reshape(old_stamp, nx, ny, 1, 1, 1)
         data_new = reshape(new_stamp, nx, ny, 1, 1, 1)
@@ -156,6 +161,15 @@ end
             @test model_old.psfs[1].data ≈ expected_old
             @test sum(model_old.psfs[1].data) ≈ oversample^2 # convolution preserves total flux, then scaled
 
+            # `pixel_integration` selects the quadrature; :box reproduces
+            # romancal's Box2DKernel convolution.
+            model_box = roman_crds_gridded_epsf(path_old; pixel_integration = :box)
+            expected_box = Float32(oversample^2) .* CrowdPhot.correlate(
+                permutedims(old_stamp), Float32.(pixel_response_kernel(oversample; type = :box)), :zero,
+            )
+            @test model_box.psfs[1].data ≈ expected_box
+            @test !(model_box.psfs[1].data ≈ model_old.psfs[1].data)
+
             path_new = _write_synthetic_epsf(dir, data_new; pixel_x = [0.0], pixel_y = [0.0],
                 spectral_type = ["G2V"], defocus = [0], oversample, name = "new_format.asdf")
             model_new = roman_crds_gridded_epsf(path_new; defocus = 0)
@@ -163,18 +177,61 @@ end
         end
     end
 
-    @testset "_pixel_response_kernel matches astropy Box2DKernel" begin
+    @testset "pixel_response_kernel type=:box matches astropy Box2DKernel" begin
         # Hardcoded from astropy.convolution.Box2DKernel(width=n).array,
         # verified earlier (see gridded_psf_crds_plan.md, "Pixel-response
         # convolution"). n=3 (odd) is a naive uniform 3x3 box; n=4 (even)
         # is a tapered 5x5 kernel, not a naive 4x4 box.
-        k3 = pixel_response_kernel(3)
+        k3 = pixel_response_kernel(3; type = :box)
         @test k3 ≈ fill(1 / 9, 3, 3)
 
-        k4 = pixel_response_kernel(4)
+        k4 = pixel_response_kernel(4; type = :box)
         @test size(k4) == (5, 5)
         marginal4 = [0.125, 0.25, 0.25, 0.25, 0.125]
         @test k4 ≈ marginal4 * marginal4'
         @test sum(k4) ≈ 1.0
+    end
+
+    @testset "pixel_response_kernel type=:exact implements sinc(n f)" begin
+        for n in (2, 3, 4, 8)
+            k = pixel_response_kernel(n) # :exact is the default
+            @test size(k) == (8n + 1, 8n + 1)
+            @test sum(k) ≈ 1.0
+            @test k ≈ k' # separable and symmetric
+            @test k ≈ reverse(k; dims = 1)
+
+            # The 1D marginal's DTFT must be the transfer function of a box of
+            # width n, sinc(n f). The Hann window costs accuracy only in the
+            # last few percent of the band, so test the interior tightly and
+            # the band edge loosely.
+            w = k[:, (8n + 1) ÷ 2 + 1]
+            w = w ./ sum(w)
+            j = -(4n):(4n)
+            dtft(f) = sum(w .* cospi.(2 * f .* j))
+            @test dtft(0) ≈ 1 atol = 1e-12 # unit gain at DC: preserves total flux
+            for f in range(-0.45, 0.45; length = 101)
+                @test dtft(f) ≈ sinc(n * f) atol = 0.015
+            end
+            for f in range(-0.5, 0.5; length = 11)
+                @test dtft(f) ≈ sinc(n * f) atol = 0.08
+            end
+        end
+    end
+
+    @testset "pixel_response_kernel edge cases" begin
+        # n == 1: nothing to integrate over, identity for either type.
+        @test pixel_response_kernel(1) == fill(1.0, 1, 1)
+        @test pixel_response_kernel(1; type = :box) == fill(1.0, 1, 1)
+
+        @test_throws "type must be :exact or :box" pixel_response_kernel(4; type = :sinc)
+        @test_throws "must be positive" pixel_response_kernel(0)
+
+        # :box is broader than :exact by an extra box of one oversampled
+        # sample. Correlating a delta function with either kernel returns the
+        # kernel itself, so comparing their peaks compares the quadratures.
+        n = 4
+        kb = pixel_response_kernel(n; type = :box)
+        ke = pixel_response_kernel(n; type = :exact)
+        @test maximum(kb) < maximum(ke)
     end
 end
