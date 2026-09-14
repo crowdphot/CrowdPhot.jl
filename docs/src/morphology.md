@@ -115,49 +115,46 @@ none of these statistics flags them.  Such issues are better identified
 by a PSF-fit residual.
 
 !!! note "Correspondence with DAOPHOT and photutils"
-The ellipticity components `e_1` and `e_2` are closely related to
-the DAOPHOT SROUND and GROUND statistics (photutils `roundness1` and
-`roundness2`), but they are not numerically equivalent:
+    The ellipticity components `e_1` and `e_2` are closely related to
+    the DAOPHOT SROUND and GROUND statistics (photutils `roundness1` and
+    `roundness2`), but they are not numerically equivalent:
 
-```
-| CrowdPhot | DAOPHOT | photutils | Shape component |
-|---|---|---|---|
-| ``e_1`` (`ellipticity1_*`) | GROUND | `roundness2` | axis-aligned elongation |
-| ``e_2`` (`ellipticity2_*`) | SROUND | `roundness1` | diagonal (``45^\circ``) elongation |
+    | CrowdPhot | DAOPHOT | photutils | Shape component |
+    |---|---|---|---|
+    | ``e_1`` (`ellipticity1_*`) | GROUND | `roundness2` | axis-aligned elongation |
+    | ``e_2`` (`ellipticity2_*`) | SROUND | `roundness1` | diagonal (``45^\circ``) elongation |
 
-**The numbering is crossed.** SROUND (`roundness1`) measures diagonal
-asymmetry and therefore corresponds most closely to ``e_2``, whereas
-GROUND (`roundness2`) compares the axis-aligned widths and therefore
-corresponds most closely to ``e_1``.
+    **The numbering is crossed.** SROUND (`roundness1`) measures diagonal
+    asymmetry and therefore corresponds most closely to ``e_2``, whereas
+    GROUND (`roundness2`) compares the axis-aligned widths and therefore
+    corresponds most closely to ``e_1``.
 
-There are several important differences between the statistics:
+    There are several important differences between the statistics:
 
-- **Range.** The DAOPHOT roundness statistics use a normalization with
-  values spanning approximately ``[-2, 2]``. The ellipticity components
-  ``e_1`` and ``e_2`` lie in ``[-1, 1]``, with
-  ``|e| = \sqrt{e_1^2 + e_2^2}`` giving the rotationally invariant
-  distortion.
-- **Parameterization.** GROUND compares axis-aligned widths,
-  approximately
-  ``2(\sqrt{\sigma^2_{yy}}-\sqrt{\sigma^2_{xx}})/
-  (\sqrt{\sigma^2_{yy}}+\sqrt{\sigma^2_{xx}})``, whereas ``e_1``
-  compares the corresponding second moments directly. The two are
-  monotonically related for an axis-aligned elliptical source but are
-  not numerically equal.
-- **Estimator.** SROUND is based on a sign-quadrant comparison of the
-  image around the source center, while GROUND is based on fitted
-  curvature along the coordinate axes. In contrast, ``e_1`` and
-  ``e_2`` are components of the second-moment tensor. They therefore
-  provide a unified spin-2 description of quadrupole shape rather than
-  two separately defined roundness statistics.
-
-```
+    - **Range.** The DAOPHOT roundness statistics use a normalization with
+      values spanning approximately ``[-2, 2]``. The ellipticity components
+      ``e_1`` and ``e_2`` lie in ``[-1, 1]``, with
+      ``|e| = \sqrt{e_1^2 + e_2^2}`` giving the rotationally invariant
+      distortion.
+    - **Parameterization.** GROUND compares axis-aligned widths,
+      approximately
+      ``2(\sqrt{\sigma^2_{yy}}-\sqrt{\sigma^2_{xx}})/
+      (\sqrt{\sigma^2_{yy}}+\sqrt{\sigma^2_{xx}})``, whereas ``e_1``
+      compares the corresponding second moments directly. The two are
+      monotonically related for an axis-aligned elliptical source but are
+      not numerically equal.
+    - **Estimator.** SROUND is based on a sign-quadrant comparison of the
+      image around the source center, while GROUND is based on fitted
+      curvature along the coordinate axes. In contrast, ``e_1`` and
+      ``e_2`` are components of the second-moment tensor. They therefore
+      provide a unified spin-2 description of quadrupole shape rather than
+      two separately defined roundness statistics.
 
 ### Normalized Curvature
 
 The `normalized_curvature` field returned by [`centroid_poly`](@ref)
 is the negated Laplacian of the quadratic fit divided by the fitted
-amplitude above `background` ``-(2d+2f) / I_0``.  For a Gaussian this approximates
+amplitude above the background.  For a Gaussian this approximates
 ``16\log(2)/\mathrm{FWHM}^2`` and is independent of flux, making it a fast
 discriminator: cosmic rays (single bright pixels) produce larger values
 than stellar PSFs of the expected width. Saturated stars produce lower values
@@ -178,11 +175,12 @@ where ``\sigma_x^2`` and ``\sigma_y^2`` are the inverse‑variance‑weighted
 second central moments of the pixel values about the estimated centroid,
 taken over the 3×3 core (`compactness_core`) or the full cutout
 (`compactness_aperture`).  For a Gaussian profile this quantity is
-proportional to the inverse of the FWHM squared, so larger values
-indicate more compact (sharper) profiles.  Cosmic rays and hot pixels,
-with negligible spatial extent, produce very large values.
+proportional to the inverse of the FWHM squared, similar to the
+normalized curvature above, but using a moment statistic rather than
+the Laplacian. Larger values indicate more compact, sharper profiles.
+Cosmic rays and hot pixels, with negligible spatial extent, produce very large values.
 
-!!! note "`compactness_core` needs the background removed"
+!!! note "Subtract background or pass `background` keyword"
     The compactness moments are weighted by the (background-subtracted)
     pixel values, so a sky pedestal that is *not* removed biases them.  A
     flat background has second central moment ``2/3`` per axis on the 3×3
@@ -212,16 +210,13 @@ be rejected with a simple `isfinite` check.
 
 ```math
 \mathtt{sharpness} = \frac{D_\mathrm{peak} - \bar{D}_\mathrm{neighbors}}{H},
-\qquad H = \mathtt{matched\_filter\_flux} \times \max(P)
+\qquad H = \mathtt{Flux} \times \max(P)
 ```
 
 The numerator is measured on the **raw** image over the kernel footprint
 with the center pixel excluded; ``H`` is the source's fitted central
-height, obtained by scaling the matched-filter flux estimate by the peak
-pixel fraction of the PSF template ``P``.  That is DAOPHOT's
-normalization: convolving with a zero-summed template returns the
-least-squares amplitude of a source of that shape, which is exactly
-``H``.
+height, obtained by scaling the flux estimate by the peak
+pixel fraction of the PSF template ``P``.
 
 It measures how much of the flux sits in one pixel relative to what the
 PSF would put there.  Large values indicate a cosmic ray or hot pixel,
@@ -230,9 +225,9 @@ between (``\approx 0.9`` for a source matched to the template).
 
 Two practical notes.  A spatially flat background cancels from the
 numerator, so `sharpness` needs no `background` argument and is unbiased
-by an un-subtracted sky — unlike `normalized_curvature`, which is
+by an un-subtracted sky, unlike `normalized_curvature`, which is
 suppressed by a pedestal through its division by the fitted peak.  And
-it requires no quadratic fit, so it remains available where that fit
+`sharpness` requires no quadratic fit, so it remains available where that fit
 degenerates.
 
 The `compactness_core` and `normalized_curvature` fields remain
@@ -249,22 +244,21 @@ floor on how tight a stellar locus can be.
 
 The aperture statistics are ratios of *linear* moment sums taken about
 the center of mass.  The reference point ``(y_0, x_0)`` therefore cancels
-identically — passing the integer peak pixel costs nothing — and Poisson
+identically -- passing the integer peak pixel costs nothing -- and Poisson
 summation bounds the residual phase dependence at roughly
 ``e^{-2\pi^2\sigma^2}`` with ``\sigma`` the profile width in pixels.
-Measured on noiseless round sources scanned over every sub-pixel phase:
+Measured on noiseless round sources scanned over many sub-pixel phases:
 
 | statistic | FWHM 1.2 px | FWHM 1.6 px | FWHM 2.0 px | FWHM 3.5 px |
 |---|---|---|---|---|
 | `fwhm`, `compactness_aperture`, `ellipticity1_aperture`, `ellipticity2_aperture` (fractional scatter) | ``10^{-2}`` | ``2\times10^{-4}`` | ``<10^{-6}`` | ``<10^{-6}`` |
 | `normalized_curvature` (fractional scatter) | 0.092 | 0.079 | 0.070 | 0.036 |
-| ``|e|`` over the 3×3 core (*mean*, for a circular source) | 0.011 | 0.024 | 0.017 | 0.003 |
+| ``\|e\|`` over the 3×3 core (*mean*, for a circular source) | 0.011 | 0.024 | 0.017 | 0.003 |
 | `poly` centroid (px) | 0.079 | 0.051 | 0.035 | 0.013 |
 
 The split is structural.  Everything derived from the 3×3 *quadratic fit*
-— `normalized_curvature` and the `poly` centroid — is affected, because a
-parabola fit over ``\pm1`` pixel recovers
-``f''(-\phi) + \tfrac{1}{12}f''''(-\phi) + \dots``, the profile curvature
+-- `normalized_curvature` and the `poly` centroid -- is affected, because a
+parabola fit over ``\pm1`` pixel recovers the profile curvature
 at the sampling phase ``\phi`` rather than at the peak.  Both the
 Laplacian and the fitted amplitude vary with ``\phi``, so renormalizing
 does not help.
@@ -273,8 +267,8 @@ Practical guidance:
 
 - Prefer the aperture statistics for any absolute threshold.
 - Use the quadratic-fit core diagnostics as relative, sigma-clipped
-  quantities within a magnitude bin — which is what
-  [`CrowdPhot.PSF.pick_psf_stars`](@ref) does — never against a fixed cut.
+  quantities within a magnitude bin -- which is what
+  [`CrowdPhot.PSF.pick_psf_stars`](@ref) does == never against a fixed cut.
 - Treat all core morphology as unreliable on undersampled data.
 - `poly.y_err` / `poly.x_err` propagate pixel noise only and do not
   include the phase term in the table above, so for bright stars the
@@ -291,16 +285,49 @@ Practical guidance:
 | Shape accuracy | Limited by 3×3 sampling; ``e_1``/``e_2`` saturate for broad PSFs | Integrates over full profile |
 | FWHM | Not available (use `compactness_core`) | Marginal moment widths (Gaussian approx.) |
 | Compactness / ellipticity | From the 3×3 moment tensor | From the full-profile moment covariance |
-| Background | `background` kwarg (centroid unaffected; needed for the diagnostics) | `background` kwarg (subtracted, clamped at 0) |
+| Background | `background` kwarg (centroid unaffected; needed for the diagnostics) | `background` kwarg (subtracted; residuals kept signed) |
 | Best use | Fast pre-filter at detection time | Candidate evaluation before PSF fitting |
 
-Note that moment-based morphological measures like the FWHM are biased when
-image cutouts contain many background-dominated pixels. For this reason we
-recommend the `half_width` keyword argument to `measure_star_shapes` should
-not be too large; $\mathrm{half\_width} = \mathrm{FWHM}$ is often a reasonable value.
 The returned `fwhm.y` and `fwhm.x` are row/column marginal widths, not
 principal-axis widths; for a rotated source, use `fwhm.theta` only as the
 covariance major-axis orientation.
+
+### Windowed aperture moments
+
+An unweighted second moment over a fixed box is dominated by sky noise
+which grows with the box area. This can be mitigated by tapering the moments
+by a Gaussian window, which bounds the noise growth.
+
+The taper is matched to the PSF, which is the width that maximizes sensitivity
+to a small departure from the PSF. [`measure_star_shapes`](@ref) derives it from
+the detection kernel automatically, and
+`fit_all_stars_simultaneous_multipass` from its PSF model;
+[`measure_star_shape`](@ref) defaults to [`FlatWindow`](@ref) (no taper) since it
+has no PSF to measure against. Pass `window` to override.
+
+Two practical consequences:
+
+- **`half_width` no longer needs to be kept tight.** It only has to be wide
+  enough to contain the source; the window handles the sky pixels. Sizing the
+  box to exclude a *neighbor* is a separate problem, and still unsolved -- see
+  below.
+- **Use background-only inverse-variance weights.** A map that includes the
+  source's own Poisson noise down-weights the bright core, and the reported
+  `fwhm` then grows with flux. Total inverse variance is right for
+  `aperture_sum_err` and for PSF fitting, not for anything built from weighted
+  moments.
+
+The window compresses the moments by a known factor, which is divided back out
+internally, so `fwhm`, `fwhm.theta`, the ellipticity components and
+`compactness_aperture` are absolute either way. For a non-Gaussian profile the
+recovered moments are Gaussian-equivalent rather than exact, which is a fixed
+offset rather than a flux-dependent bias.
+
+```@docs
+AbstractMomentWindow
+FlatWindow
+GaussianWindow
+```
 
 ### Crowded fields
 
@@ -343,17 +370,24 @@ its reference cannot be given different weights, anchors or normalizations:
 
 ```julia
 r = res.phot.morphology[i]
-r.sharpness / r.psf_ref.sharpness                    # 1 for a PSF-like source
+r.sharpness / r.psf_ref.sharpness # 1 for a PSF-like source
 r.core.normalized_curvature / r.psf_ref.core.normalized_curvature
 r.aperture.compactness_aperture / r.psf_ref.aperture.compactness_aperture
 r.aperture.ellipticity1_aperture - r.psf_ref.aperture.ellipticity1_aperture
 ```
 
-For a noiseless PSF-like source every ratio is exactly 1 and every difference
-exactly 0, by construction.  On a source that is *not* the PSF, the
+For a noiseless PSF-like source **every ratio is exactly 1 and every difference
+exactly 0**, by construction.  On a source that is *not* the PSF, the
 normalization suppresses phase-induced scatter by a factor of 2 to 16, largest
 on undersampled data, and compresses the PSF-width dependence by roughly 2.5x,
-so a single cutoff becomes portable across images.
+Such PSF-corrected quantities make star/galaxy separation cuts on the morphological
+parameters portable across images with different PSFs.
+
+They have additional value for quantifying spatial PSF irregularities. A spatial trend
+across an image in a quantity like
+`r.aperture.compactness_aperture / r.psf_ref.aperture.compactness_aperture`
+indicates there is spatial variation in the image PSF that your PSF model is not
+taking into account.
 
 The right comparison differs by quantity, so the components are returned rather
 than pre-formed combinations:
@@ -380,12 +414,6 @@ of the PSF model: a coherent pattern across the field in raw `ellipticity1_apert
 disappears in the differenced version means the model is capturing that variation, while
 structure remaining in the differenced version means it is not.
 
-```@docs
-measure_star_shape
-measure_star_shape_ref
-measure_star_shapes
-```
-
 ### Moment Normalization and Aperture Sums
 
 The aperture result includes `moment_norm`, the weighted zeroth moment
@@ -397,15 +425,19 @@ as a photometric prior.
 
 The result also includes `aperture_sum`, `aperture_area`, and
 `aperture_sum_err`.  These are quick rectangular-cutout diagnostics over
-unmasked pixels (`inv_var > 0`): `aperture_sum` is the unweighted sum of
+unmasked pixels (`inv_var > 0`). `aperture_sum` is the unweighted sum of
 `image - background`, `aperture_area` is the number of contributing
 pixels, and `aperture_sum_err` is the formal propagated uncertainty
 ``\sqrt{\sum 1/\mathtt{inv\_var}}`` under the assumption of independent
 pixel errors.  Mask invalid pixels by setting their inverse variance to
 zero.  They are useful flux proxies, but are not aperture-corrected and
 should not be used for anything requiring precision.
-We generally prefer the `flux` field returned alongside them, an explicit
-aperture photometry routine, or a PSF-fit flux for calibrated photometry.
+
+```@docs
+measure_star_shape
+measure_star_shape_ref
+measure_star_shapes
+```
 
 ## References
 This page cites the following references:

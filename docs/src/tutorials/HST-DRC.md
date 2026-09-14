@@ -134,47 +134,24 @@ fig
 
 ## Morphological Measurements
 
-For morphological measurements the inverse-variance weights should include
-*all* error sources, not just the background.  The Poisson noise of a source
-contributes to the uncertainty in its own pixels and must be included for
-correct centroid and shape estimation.  We use
-[`calc_total_error`](@ref) to combine the background RMS with the source
-Poisson term.  The data are in ``\mathrm{e}^- / \mathrm{s}``
-(``\mathtt{BUNIT} = \mathrm{ELECTRONS}/\mathrm{S}``), so the effective
-gain is the exposure time, ``g_{\mathrm{eff}} = \mathtt{EXPTIME}``, which
-converts to countable units (electrons).
+Shape statistics want **background-only** inverse-variance weights. `mf`
+already carries them (`inv_var_bkg`, above), so pass it straight to
+[`measure_star_shapes`](@ref) and let the default apply. Do **not** substitute a
+map that includes source Poisson noise, that down-weights the bright
+core and biases statistics like the FWHM.
 
-```@example hst-drc
-# Extract exposure time from the primary header for the effective gain.
-exptime = hdr["EXPTIME"]
+[`measure_star_shapes`](@ref) extracts a cutout around each peak, computes
+sub-pixel centroids via [`centroid_poly`](@ref), and measures aperture-based
+FWHM, ellipticity components, moment normalization, and rectangular aperture-sum
+diagnostics via [`measure_star_shape`](@ref).
 
-# Compute total 1-sigma error including source Poisson noise.
-total_err = calc_total_error.(img_sub_f64, bkg.background_rms, exptime)
-
-# Build inverse-variance map with NaN regions clipped to zero weight.
-inv_var = fill(0.0, size(img_sub_f64))
-valid_total = @. isfinite(total_err) & (total_err > 0)
-@. inv_var[valid_total] = 1 / total_err[valid_total]^2
-
-# Use the same MatchedFilterResult but with corrected inv_var for morphology.
-using ConstructionBase
-mf_morph = ConstructionBase.setproperties(mf, (inv_var = inv_var,))
-```
-
-We feed the matched-filter result to
-[`measure_star_shapes`](@ref), which extracts a cutout around each peak,
-computes sub-pixel centroids via [`centroid_poly`](@ref), and measures
-aperture-based FWHM, ellipticity components, moment normalization, and rectangular
-aperture-sum diagnostics via [`measure_star_shape`](@ref).
-
-Moment-based statistics can be biased if the cutout includes many
-background-dominated pixels. Here we use a `half_width=2` so the full
-width of the cutout is 5 pixels, just over twice the FWHM of the kernel we used
-for detection, which gives good results.
+It tapers the aperture moments with a Gaussian window matched to the detection
+kernel, which bounds the sky-noise contribution, so `half_width` only needs to
+be wide enough to contain the source.
 
 ```@example hst-drc
 # Measure morphology for all detected sources
-results = measure_star_shapes(mf_morph; half_width = 2)
+results = measure_star_shapes(mf; half_width = 2)
 keys(results[1])
 ```
 
@@ -284,63 +261,69 @@ fig = Figure(size = (900, 1250))
 # Panel 1: FWHM y vs magnitude
 ax1 = Axis(fig[1, 1]; xlabel = "Small-aperture ST magnitude",
            ylabel = "FWHM y (pix)", title = "FWHM (y-axis)")
-h1 = hexbin!(ax1, mags, fwhm_y; bins = 80)
+mask = 0.0 .<= fwhm_y .<= 5
+scatter!(ax1, mags[mask], fwhm_y[mask]; markersize = 2, color = :black, rasterize = true)
+h1 = hexbin!(ax1, mags[mask], fwhm_y[mask]; bins = 80, threshold = 100, colorscale = log10)
 Colorbar(fig[1, 2], h1; label = "Counts")
 
 # Panel 2: FWHM x vs magnitude
 ax2 = Axis(fig[1, 3]; xlabel = "Small-aperture ST magnitude",
            ylabel = "FWHM x (pix)", title = "FWHM (x-axis)")
-h2 = hexbin!(ax2, mags, fwhm_x; bins = 80)
+mask = 0.0 .<= fwhm_x .<= 5
+scatter!(ax2, mags[mask], fwhm_x[mask]; markersize = 2, color = :black, rasterize = true)
+h2 = hexbin!(ax2, mags[mask], fwhm_x[mask]; bins = 80, threshold = 100, colorscale = log10)
 Colorbar(fig[1, 4], h2; label = "Counts")
 
 # Panel 3: e1 (axis-aligned ellipticity component) vs magnitude
 ax3 = Axis(fig[2, 1]; xlabel = "Small-aperture ST magnitude",
            ylabel = "e1", title = "ellipticity1_aperture")
-scatter!(ax3, mags, e1; markersize = 2, color = :black, rasterize = true)
-h3 = hexbin!(ax3, mags, e1; bins = 80, threshold = 100, colorscale = log10)
+mask = -1 .<= e1 .<= 1 # Restrict range for plotting
+scatter!(ax3, mags[mask], e1[mask]; markersize = 2, color = :black, rasterize = true)
+h3 = hexbin!(ax3, mags[mask], e1[mask]; bins = 80, threshold = 100, colorscale = log10)
 Colorbar(fig[2, 2], h3; label = "Counts")
 
 # Panel 4: e2 (45-degree ellipticity component) vs magnitude
 ax4 = Axis(fig[2, 3]; xlabel = "Small-aperture ST magnitude",
            ylabel = "e2", title = "ellipticity2_aperture")
-scatter!(ax4, mags, e2; markersize = 2, color = :black, rasterize = true)
-h4 = hexbin!(ax4, mags, e2; bins = 80, threshold = 100, colorscale = log10)
+mask = -1 .<= e2 .<= 1 # Restrict range for plotting
+scatter!(ax4, mags[mask], e2[mask]; markersize = 2, color = :black, rasterize = true)
+h4 = hexbin!(ax4, mags[mask], e2[mask]; bins = 80, threshold = 100, colorscale = log10)
 Colorbar(fig[2, 4], h4; label = "Counts")
 
 # Panel 5: normalized curvature vs magnitude
 ax5 = Axis(fig[3, 1]; xlabel = "Small-aperture ST magnitude",
            ylabel = "normalized curvature", title = "Normalized Core Curvature (2/FWHM²) / I_0")
 ylims!(ax5, -2, 10)
-idxs = findall(x -> -2 < x < 10, normalized_curvature)
-scatter!(ax5, mags[idxs], normalized_curvature[idxs]; markersize = 2, color = :black, rasterize = true)
-h5 = hexbin!(ax5, mags[idxs], normalized_curvature[idxs]; bins = 80, colorscale=log10, threshold = 100)
+mask = -2 .<= normalized_curvature .<= 10
+scatter!(ax5, mags[mask], normalized_curvature[mask]; markersize = 2, color = :black, rasterize = true)
+h5 = hexbin!(ax5, mags[mask], normalized_curvature[mask]; bins = 80, colorscale=log10, threshold = 100)
 Colorbar(fig[3, 2], h5; label = "Counts")
 
 # Panel 6: compactness vs magnitude
 ax6 = Axis(fig[3, 3]; xlabel = "Small-aperture ST magnitude",
            ylabel = "compactness", title = "Compactness 1 / (σ_x² + σ_y²)")
-ylims!(ax6, 0, 10)
-idxs = findall(x -> 0 < x < 10, compactness)
-scatter!(ax6, mags[idxs], compactness[idxs]; markersize = 2, color = :black, rasterize = true)
-h6 = hexbin!(ax6, mags[idxs], compactness[idxs]; bins = 80, colorscale=log10, threshold = 100)
+ylims!(ax6, 0, 5)
+mask = 0 .<= compactness .<= 5
+scatter!(ax6, mags[mask], compactness[mask]; markersize = 2, color = :black, rasterize = true)
+h6 = hexbin!(ax6, mags[mask], compactness[mask]; bins = 80, colorscale=log10, threshold = 100)
 Colorbar(fig[3, 4], h6; label = "Counts")
 
 # Panel 7: Core vs Aperture e1
 ax7 = Axis(fig[4, 1]; xlabel = "e1 aperture",
            ylabel = "e1 core", title = "Core vs Aperture e1",
            limits = ((-1, 1), (-1, 1)))
-idxs = findall( (-1 .< e1) .& (e1 .< 1) .& (-1 .< e1_core) .& (e1_core .< 1) )
-scatter!(ax7, e1[idxs], e1_core[idxs]; markersize = 2, color = :black, rasterize = true)
-h7 = hexbin!(ax7, e1[idxs], e1_core[idxs]; bins = 80, colorscale=log10, threshold = 100)
+mask = findall( (-1 .< e1) .& (e1 .< 1) .& (-1 .< e1_core) .& (e1_core .< 1) )
+scatter!(ax7, e1[mask], e1_core[mask]; markersize = 2, color = :black, rasterize = true)
+h7 = hexbin!(ax7, e1[mask], e1_core[mask]; bins = 80, colorscale=log10, threshold = 100)
 Colorbar(fig[4, 2], h7; label = "Counts")
 
 # Panel 8: Core vs Aperture e2
 ax8 = Axis(fig[4, 3]; xlabel = "e2 aperture",
            ylabel = "e2 core", title = "Core vs Aperture e2",
            limits = ((-1, 1), (-1, 1)))
-idxs = findall( (-1 .< e2) .& (e2 .< 1) .& (-1 .< e2_core) .& (e2_core .< 1) )
-scatter!(ax8, e2[idxs], e2_core[idxs]; markersize = 2, color = :black, rasterize = true)
-h8 = hexbin!(ax8, e2[idxs], e2_core[idxs]; bins = 80, colorscale=log10, threshold = 100)
+mask = findall( (-1 .< e2) .& (e2 .< 1) .& (-1 .< e2_core) .& (e2_core .< 1) )
+scatter!(ax8, e2[mask], e2_core[mask]; markersize = 2, color = :black, rasterize = true)
+h8 = hexbin!(ax8, e2[mask], e2_core[mask]; bins = 80, colorscale=log10, threshold = 100)
 Colorbar(fig[4, 4], h8; label = "Counts")
 
 # Panel 9: median FWHM per magnitude bin
@@ -368,9 +351,9 @@ axislegend(ax9; position = :rt)
 ax10 = Axis(fig[5, 3]; xlabel = "Small-aperture ST magnitude",
             ylabel = "sharpness", title = "SHARP (DAOPHOT)")
 ylims!(ax10, -1, 3)
-idxs = findall(x -> -1 < x < 3, sharpness)
-scatter!(ax10, mags[idxs], sharpness[idxs]; markersize = 2, color = :black, rasterize = true)
-h10 = hexbin!(ax10, mags[idxs], sharpness[idxs]; bins = 80, colorscale = log10, threshold = 100)
+mask = findall(x -> -1 < x < 3, sharpness)
+scatter!(ax10, mags[mask], sharpness[mask]; markersize = 2, color = :black, rasterize = true)
+h10 = hexbin!(ax10, mags[mask], sharpness[mask]; bins = 80, colorscale = log10, threshold = 100)
 Colorbar(fig[5, 4], h10; label = "Counts")
 
 fig
@@ -564,6 +547,26 @@ aper_corr = 2.5 * log10(encircled_energy(reference_cog(:WFC, :F814W), psf_rad))
 ```
 
 ## PSF Fitting Photometry
+
+We prepare to fit our detected sources by preparing the total error
+map using [`calc_total_error`](@ref) to add the source Poisson term to the background RMS.
+The data are in ``\mathrm{e}^- / \mathrm{s}``
+(``\mathtt{BUNIT} = \mathrm{ELECTRONS}/\mathrm{S}``), so the effective gain is
+the exposure time, ``g_{\mathrm{eff}} = \mathtt{EXPTIME}``, which converts to
+countable units (electrons).
+
+```@example hst-drc
+# Extract exposure time from the primary header for the effective gain.
+exptime = hdr["EXPTIME"]
+
+# Total 1-sigma error including source Poisson noise, for the PSF fit below.
+total_err = calc_total_error.(img_sub_f64, bkg.background_rms, exptime)
+
+# Build inverse-variance map with NaN regions clipped to zero weight.
+inv_var = fill(0.0, size(img_sub_f64))
+valid_total = @. isfinite(total_err) & (total_err > 0)
+@. inv_var[valid_total] = 1 / total_err[valid_total]^2;
+```
 
 We now run [`fit_all_stars`](@ref) on every source in a 250×250 region,
 using the empirical PSF we just constructed.  After measuring all sources

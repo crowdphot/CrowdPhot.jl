@@ -6,7 +6,192 @@
 # (see centroids.jl).
 
 # ---------------------------------------------------------------------------
-# Internal: raw weighted second moments
+# Moment windows
+# ---------------------------------------------------------------------------
+
+"""
+    AbstractMomentWindow
+
+A multiplicative weight ``g(y, x)`` applied to the moment accumulators in
+`_moments2`, on top of `inv_var`.
+
+Unweighted second moments over a fixed box are unusable in the presence of
+noise: the noise contribution accumulates as ``\\sum r^2``, so it grows with
+the box area and swamps the source.  A smooth taper bounds it.  See
+[`GaussianWindow`](@ref) for the width that follows from that, and
+[`FlatWindow`](@ref) for the untapered limit.
+
+Concrete subtypes implement
+
+- `yfactor(w, dy)`, `xfactor(w, dx)`: the separable factors of ``g`` at integer
+  offsets from the anchor pixel, returning zero outside the window's support.
+- `inv_window_var(w)`: ``1/\\sigma_w^2``, zero for an infinitely wide window.
+
+`deconvolve_moments` needs no per-type method: it is written once in terms of
+`inv_window_var`.
+
+Dispatch is the point of the hierarchy: `_moments2` is specialized on the
+window type, so [`FlatWindow`](@ref) folds its factors to `one` at compile
+time and reduces to an untapered loop with no per-pixel branch.
+"""
+abstract type AbstractMomentWindow end
+
+"""
+    FlatWindow()
+
+The untapered limit, ``g \\equiv 1``: moments are weighted by `inv_var` alone.
+
+Formally the ``\\sigma_w \\to \\infty`` limit of [`GaussianWindow`](@ref), so
+`inv_window_var` is zero, which makes `deconvolve_moments` the identity.
+The factors return `Bool` `true` so that multiplying
+through preserves the caller's float type exactly.
+
+Correct only where the source fills the box: the noise term the window exists
+to bound is unbounded here, growing with box area.  Retained because it is the
+historical behaviour, because the rectangular `aperture_sum` diagnostics are
+defined on it, and because it is the right choice when the moments are wanted
+over a deliberately compact cutout.
+"""
+struct FlatWindow <: AbstractMomentWindow end
+@inline yfactor(::FlatWindow, ::Integer) = true
+@inline xfactor(::FlatWindow, ::Integer) = true
+
+"""
+    inv_window_var(w::AbstractMomentWindow)
+
+``1/\\sigma_w^2`` for the window, zero for [`FlatWindow`](@ref).
+"""
+@inline inv_window_var(::FlatWindow) = false
+
+
+@doc raw"""
+    GaussianWindow(fwhm::Real; hw::Integer = ...) -> GaussianWindow
+
+A circular Gaussian taper of the given FWHM, centered on the anchor pixel,
+tabulated separably as `gy`/`gx` over integer offsets `-hw:hw`.
+Non-finite or non-positive `fwhm` throws an `ArgumentError`.
+
+# Width
+
+For a Gaussian source ``\sigma_s`` and Gaussian window ``\sigma_w`` the
+windowed second moment is
+``\sigma^{-2}_\mathrm{meas} = \sigma^{-2}_s + \sigma^{-2}_w``, so the window
+compresses the response by ``[\sigma_w^2/(\sigma_s^2+\sigma_w^2)]^2`` while
+suppressing the noise faster.  Maximizing the signal-to-noise on a *small*
+departure in size, evaluated at the source scale, gives a figure of merit
+``\propto u^{3/2}/[(1+u)^2\sqrt{u^2+1}]`` with ``u = \sigma_w^2/\sigma_s^2``.
+That function is invariant under ``u \to 1/u``, so its unique interior maximum
+is the fixed point ``u = 1``:
+
+**The sensitivity-optimal window is matched to the scale being measured**,
+``\sigma_w = \sigma_s``.  For star-likeness that is the PSF scale, hence
+`GaussianWindow(psf_fwhm)`.  The optimum is flat -- a factor ``\sqrt 2`` either
+way costs 18% -- so the width needs no per-field tuning.  Weak-lensing
+adaptive-moments schemes are the generalization of this, for when each
+object has a different optimum scale.
+
+# Support
+
+`hw` defaults to ``\lceil 5\sigma_w \rceil``, where the taper has fallen to
+``< 4\times10^{-6}``.  Offsets beyond the table return exactly zero.
+"""
+struct GaussianWindow{T} <: AbstractMomentWindow
+    gy::Vector{T}
+    gx::Vector{T}
+    hw::Int
+    inv_var_w::T
+end
+
+function GaussianWindow{T}(fwhm, hw) where {T}
+    (isfinite(fwhm) && fwhm > 0) ||
+        throw(ArgumentError("`fwhm` must be finite and positive; got $fwhm"))
+    hw >= 1 || throw(ArgumentError("`hw` must be at least 1; got $hw"))
+    sigma = T(fwhm) / T(2 * sqrt(2 * log(2)))
+    n = 2 * Int(hw) + 1
+    g = Vector{T}(undef, n)
+    for (k, d) in enumerate(-Int(hw):Int(hw))
+        g[k] = exp(-T(d)^2 / (2 * sigma * sigma))
+    end
+    # `gy` and `gx` are equal for a circular window, but kept as separate
+    # vectors so an anisotropic window can be added without touching callers.
+    return GaussianWindow{T}(g, copy(g), Int(hw), inv(sigma * sigma))
+end
+
+function GaussianWindow(fwhm::Real; hw::Union{Nothing, Integer} = nothing)
+    (isfinite(fwhm) && fwhm > 0) ||
+        throw(ArgumentError("`fwhm` must be finite and positive; got $fwhm"))
+    T = float(typeof(fwhm))
+    sigma = T(fwhm) / T(2 * sqrt(2 * log(2)))
+    h = hw === nothing ? max(1, ceil(Int, 5 * sigma)) : Int(hw)
+    return GaussianWindow{T}(fwhm, h)
+end
+
+@inline function yfactor(w::GaussianWindow{T}, d::Integer) where {T}
+    k = Int(d) + w.hw + 1
+    return (1 <= k <= length(w.gy)) ? (@inbounds w.gy[k]) : zero(T)
+end
+@inline function xfactor(w::GaussianWindow{T}, d::Integer) where {T}
+    k = Int(d) + w.hw + 1
+    return (1 <= k <= length(w.gx)) ? (@inbounds w.gx[k]) : zero(T)
+end
+
+@inline inv_window_var(w::GaussianWindow) = w.inv_var_w
+
+@doc raw"""
+    deconvolve_moments(w, sig2_yy, sig2_xx, sig2_xy) -> (; yy, xx, xy)
+
+Undo a window's known bias on a measured second-moment tensor, recovering the
+source's own moments:
+
+```math
+\Sigma_s = \left(\Sigma_\mathrm{meas}^{-1} - \sigma_w^{-2} I\right)^{-1}
+```
+
+Exact for a Gaussian source and a circular Gaussian window.
+
+This has to be done on the **whole tensor**.  The relation is diagonal in the
+eigenbasis, not in the pixel axes, so deconvolving ``\sigma^2_{yy}`` and
+``\sigma^2_{xx}`` separately is only correct when ``\sigma^2_{xy} = 0``; for a
+rotated elliptical source it is wrong by 2% at a moment correlation of 0.25 and
+11% at 0.53.  For the same reason there is no shortcut on the trace, so
+`compactness_aperture` cannot be corrected without the cross moment either.
+
+Returns `NaN` for all three when the deconvolution has no solution: a measured
+tensor that is not positive definite, or a source at least as broad as the
+window in some direction, where the window gives no purchase on the width.
+
+Needs no per-window method.  An infinitely wide window has
+`inv_window_var == 0`, which short-circuits to the identity -- returned
+unchanged rather than round-tripped through two matrix inversions, so
+[`FlatWindow`](@ref) stays bitwise exact.
+"""
+function deconvolve_moments(w::AbstractMomentWindow, σ²_yy::Real, σ²_xx::Real,
+                            σ²_xy::Real)
+    FT = float(promote_type(typeof(σ²_yy), typeof(σ²_xx), typeof(σ²_xy)))
+    a, b, c = FT(σ²_yy), FT(σ²_xx), FT(σ²_xy)
+    k = inv_window_var(w)
+    iszero(k) && return (; yy = a, xx = b, xy = c)
+
+    # Closed form of the 2x2 inverse above.  With `D = det(Sigma_meas)` and
+    # `Q = D * det(Sigma_meas^-1 - k I)`, the result is
+    # `[(a - kD)/Q  c/Q; c/Q  (b - kD)/Q]`; `Q = 1` when `k = 0`, which is the
+    # identity the short circuit returns exactly.
+    kf = FT(k)
+    nan = FT(NaN)
+    D = a * b - c * c
+    D > 0 || return (; yy = nan, xx = nan, xy = nan)
+    Q = 1 - kf * (a + b) + kf * kf * D
+    Q > 0 || return (; yy = nan, xx = nan, xy = nan)
+    yy = (a - kf * D) / Q
+    xx = (b - kf * D) / Q
+    # `Q > 0` and a positive diagonal are together enough for positive
+    # definiteness, since `det(Sigma_s) = D / Q`.
+    (yy > 0 && xx > 0) || return (; yy = nan, xx = nan, xy = nan)
+    return (; yy, xx, xy = c / Q)
+end
+
+# ---------------------------------------------------------------------------
+# Internal: weighted second moments about a reference point
 # ---------------------------------------------------------------------------
 
 # TODO: accept two inverse-variance maps -- background-only for the shape and
@@ -18,13 +203,15 @@
 # rather than a second map.
 
 """
-    _moments2(image, inv_var, background, y0, x0) -> NamedTuple
+    _moments2(image, inv_var, background, y0, x0 [, window]) -> NamedTuple
 
-Compute raw (non-central) inverse-variance-weighted second moments of
-`max(0, image .- background)` about the reference point `(y0, x0)`.
+Compute inverse-variance-weighted second moments of `image .- background`
+about the reference point `(y0, x0)`, optionally tapered
+by a multiplicative `window` (see [`AbstractMomentWindow`](@ref); defaults to
+[`FlatWindow`](@ref), i.e. no taper).
 Mask invalid image pixels by setting their inverse variance to zero.
 
-The returned moments are **not** centralised — the caller must compute
+The returned moments are **not** centralized -- the caller must compute
 the centroid offset `μ_y = M10 / M00`, `μ_x = M01 / M00` and subtract
 to obtain central moments.
 
@@ -33,23 +220,36 @@ to obtain central moments.
     aperture_sum, aperture_area, aperture_sum_err)`
 where each flux moment is
 ```math
-M_{pq} = \\sum_{y,x} w_{y,x} \\; \\max(0, z_{y,x}) \\; (y - y_0)^p \\; (x - x_0)^q
+M_{pq} = \\sum_{y,x} w_{y,x} \\; g_{y,x} \\; z_{y,x} \\; (y - y_0)^p \\; (x - x_0)^q
 ```
-with ``w = \\mathtt{inv\\_var}`` and ``z = \\mathtt{image} - \\mathtt{background}``.
-The ``W_{pq}`` fields are the corresponding weight-only moments
-``\\sum w_{y,x}(y-y_0)^p(x-x_0)^q`` over the same included pixels, used
-for delta-method centroid covariance propagation.
-Pixels with ``w \\le 0`` are skipped.  If ``M_{00} \\le 0`` (all pixels
-below background or fully masked), `M00 = 0` and higher moments are
-meaningless; the caller should guard against this.
+with ``w = \\mathtt{inv\\_var}``, ``z = \\mathtt{image} - \\mathtt{background}``
+and ``g`` the window, so the effective moment weight is ``w g``.
+The ``W_{pq}`` fields are the matching *variance* moments
+``\\sum w_{y,x} g^2 (y-y_0)^p(x-x_0)^q`` over the same included pixels, used
+for delta-method covariance propagation: with ``u = wg`` and
+``\\mathrm{Var}(z) = 1/w``, ``\\mathrm{Var}(\\sum u z \\cdots) = \\sum w g^2 \\cdots``.
+The extra factor of ``g`` is why ``W`` is not simply ``\\sum w``; the two
+coincide only for [`FlatWindow`](@ref).
+Pixels with ``w \\le 0`` are skipped, as are pixels outside the window's
+support.  If ``M_{00} \\le 0`` (a non-detection, or fully masked), `M00 = 0`
+and higher moments are meaningless; the caller should guard against this.
 
-Because every reported shape statistic is built from *central* moments,
-the choice of reference point ``(y_0, x_0)`` cancels exactly, so passing
-the integer peak pixel introduces no bias.
+Signed residuals are kept: there is **no** positivity clip.  Dropping
+``z \\le 0`` would retain only the upward noise excursions in the wings, each
+with its full ``r^2`` lever arm, biasing every second moment by an amount that
+grows with the box area.
 
-`aperture_sum` is the unweighted rectangular-cutout sum of
+Callers centralize these moments, and central moments are
+translation-invariant, so ``(y_0, x_0)`` cancels out of the lever arms
+algebraically, for any source.  It does **not** cancel out of the window anchor,
+which ``(y_0, x_0)`` also sets: moving it 2 px shifts `compactness_aperture` by
+~14% for a Moffat profile.  A Gaussian source is the exception, being
+offset-invariant against a Gaussian window to ~1e-5.  So pass the peak pixel!
+
+`aperture_sum` is the unweighted, **unwindowed** rectangular-cutout sum of
 ``z = \\mathtt{image} - \\mathtt{background}`` over pixels with positive
-inverse variance.  `aperture_area` is the number of pixels in that sum,
+inverse variance (a tapered sum would be a matched-filter flux, a different
+quantity).  `aperture_area` is the number of pixels in that sum,
 and `aperture_sum_err` is the formal propagated uncertainty
 ``\\sqrt{\\sum 1/w}`` assuming independent pixel errors.
 """
@@ -59,6 +259,7 @@ function _moments2(
         background::Real,
         y0::Real,
         x0::Real,
+        window::AbstractMomentWindow = FlatWindow(),
     ) where {T}
     FT = float(T)
     M00 = zero(FT)
@@ -86,34 +287,47 @@ function _moments2(
     bg = FT(background)
     fy0 = FT(y0)
     fx0 = FT(x0)
-    @inbounds for idx in CartesianIndices(image)
-        w = inv_var[idx]
-        w > 0 || continue
-        fw = FT(w)
-        z = FT(image[idx]) - bg
+    # The window is anchored on the integer pixel nearest `(y0, x0)`
+    iy0 = round(Int, y0)
+    jx0 = round(Int, x0)
 
-        # Aperture sums keep signed residuals over the same unmasked cutout.
-        aperture_sum += z
-        aperture_area += 1
-        aperture_var += inv(fw)
+    @inbounds for j in axes(image, 2)
+        dx = FT(j) - fx0
+        gxj = FT(xfactor(window, j - jx0))
+        for i in axes(image, 1)
+            w = inv_var[i, j]
+            w > 0 || continue
+            fw = FT(w)
+            z = FT(image[i, j]) - bg
 
-        # From here, moments only use pixels above background.
-        z > 0 || continue
-        dy = FT(idx[1]) - fy0
-        dx = FT(idx[2]) - fx0
-        wz = fw * z
-        M00 += wz
-        M10 += wz * dy
-        M01 += wz * dx
-        M20 += wz * dy * dy
-        M02 += wz * dx * dx
-        M11 += wz * dx * dy
-        W00 += fw
-        W10 += fw * dy
-        W01 += fw * dx
-        W20 += fw * dy * dy
-        W02 += fw * dx * dx
-        W11 += fw * dx * dy
+            # Aperture sums keep signed residuals over the same unmasked cutout,
+            # and are deliberately *unwindowed*: a tapered sum is a
+            # matched-filter flux, which is a different quantity.
+            aperture_sum += z
+            aperture_area += 1
+            aperture_var += inv(fw)
+
+            g = gxj * FT(yfactor(window, i - iy0))
+            iszero(g) && continue
+            dy = FT(i) - fy0
+            # Moments carry w*g; their variances carry w*g^2, because
+            # Var(sum u z) = sum u^2 / w with u = w*g.
+            u = fw * g
+            uv = u * g
+            wz = u * z
+            M00 += wz
+            M10 += wz * dy
+            M01 += wz * dx
+            M20 += wz * dy * dy
+            M02 += wz * dx * dx
+            M11 += wz * dx * dy
+            W00 += uv
+            W10 += uv * dy
+            W01 += uv * dx
+            W20 += uv * dy * dy
+            W02 += uv * dx * dx
+            W11 += uv * dx * dy
+        end
     end
     return (; M00, M10, M01, M20, M02, M11,
              W00, W10, W01, W20, W02, W11,
@@ -132,7 +346,7 @@ cutout using inverse-variance-weighted second central moments.
 
 # Arguments
 - `image::AbstractMatrix`: image cutout of a single star.
-- `y0::Real, x0::Real`: approximate centroid around which raw moments
+- `y0::Real, x0::Real`: approximate centroid about which the moments
   are accumulated.  Integer pixel coordinates (e.g. the peak pixel) are
   usually sufficient; the function computes the precise center-of-mass
   from the moments themselves.
@@ -146,6 +360,12 @@ cutout using inverse-variance-weighted second central moments.
   are excluded from the moment sum.
 - `fwhm_factor::Real`: scale factor from Gaussian σ to FWHM.
   Defaults to ``2\sqrt{2\log 2} \approx 2.35482``.
+- `window::AbstractMomentWindow = FlatWindow()`: multiplicative taper applied
+  to the moment accumulators on top of `inv_var`, to bound the wing noise that
+  otherwise grows with the box area.  Its known compression is divided back out
+  through deconvolution, so `fwhm`, `theta`, the ellipticities and
+  `compactness_aperture` stay absolute. For a non-Gaussian profile
+  the recovered moments are Gaussian-equivalent rather than exact.
 - `y_offset::Real = 0`, `x_offset::Real = 0`: origin of `image` in the
   caller's coordinate frame.  Added to the returned `centroid.y` and
   `centroid.x`, so a caller working on a cutout extracted at
@@ -191,19 +411,19 @@ cutout using inverse-variance-weighted second central moments.
 - `centroid::NamedTuple (; y, x, y_err, x_err, cov)`: center-of-mass
   centroid, 1-σ uncertainties, and 2×2 `SMatrix` covariance.
 
-  !!! note "Ellipticity"
-      The ellipticity ``1 - b/a = 1 - \sqrt{(1-|e|)/(1+|e|)}`` with ``|e| = \sqrt{e_1^2 + e_2^2}``,
-      with position angle
-      ``\theta = \tfrac{1}{2}\arctan(e_2, -e_1)``, is a one-liner from the
-      pair above and is deliberately not returned.  It rectifies: component
-      scatter cannot cancel, so noise and residual
-      sub-pixel phase both push it up and never down, and a round source has a positive
-      expectation of order ``\\sigma\\sqrt{\\pi/2}`` in the component
-      error.  It is also the one
-      shape statistic that cannot be corrected against a PSF model from its
-      own value, because the magnitude does not commute with the subtraction:
-      the correction has to be applied to ``e_1`` and ``e_2`` *before*
-      taking the magnitude.
+!!! note "Ellipticity"
+    The ellipticity ``1 - b/a = 1 - \sqrt{(1-|e|)/(1+|e|)}`` with ``|e| = \sqrt{e_1^2 + e_2^2}``,
+    with position angle
+    ``\theta = \tfrac{1}{2}\arctan(e_2, -e_1)``, is a one-liner from the
+    pair above and is deliberately not returned.  It rectifies: component
+    scatter cannot cancel, so noise and residual
+    sub-pixel phase both push it up and never down, and a round source has a positive
+    expectation of order ``\sigma\sqrt{\pi/2}`` in the component
+    error.  It is also the one
+    shape statistic that cannot be corrected against a PSF model from its
+    own value, because the magnitude does not commute with the subtraction:
+    the correction has to be applied to ``e_1`` and ``e_2`` *before*
+    taking the magnitude.
 
 If ``M_{00} \le 0`` (all pixels at or below background), shape and
 centroid fields are `NaN`; aperture-sum diagnostics are still reported.
@@ -256,10 +476,11 @@ function measure_star_shape(
         fwhm_factor::Real = 2.3548200450309493,
         y_offset::Real = 0,
         x_offset::Real = 0,
+        window::AbstractMomentWindow = FlatWindow(),
     ) where {T}
     FT = float(T)
 
-    mom = _moments2(image, inv_var, background, y0, x0)
+    mom = _moments2(image, inv_var, background, y0, x0, window)
     FT_M00 = FT(mom.M00)
 
     if FT_M00 <= zero(FT)
@@ -287,6 +508,18 @@ function measure_star_shape(
     # Clamp negative variances (possible from noise on faint sources).
     σ²_yy = max(zero(FT), σ²_yy)
     σ²_xx = max(zero(FT), σ²_xx)
+
+    # Divide the window's known compression back out, so every size and shape
+    # statistic below is absolute rather than window-relative.
+    # Deconvolution is exact only for a Gaussian
+    # source, so these will not be exact for non-Gaussian profiles. The solution
+    # is to measure the same quantities on the windowed PSF render, deconvolve,
+    # and then use a psf-relative quantity for downstream analysis
+    # (see measure_star_shape_ref)
+    dm = deconvolve_moments(window, σ²_yy, σ²_xx, σ²_xy)
+    σ²_yy = FT(dm.yy)
+    σ²_xx = FT(dm.xx)
+    σ²_xy = FT(dm.xy)
 
     ff = FT(fwhm_factor)
     fwhm_y = σ²_yy > 0 ? ff * sqrt(σ²_yy) : FT(NaN)
@@ -398,8 +631,9 @@ holds both, and renders once for the pair rather than a second time here.  See
   (default) for unit weights.
 - `sharp_half_width::Integer = 2`: half-width of the `sharpness` footprint.
   See `_sharp_half_width`.
-- `background::Real = 0`, `fwhm_factor::Real`: as for
-  [`measure_star_shape`](@ref).
+- `background::Real = 0`, `fwhm_factor::Real`, `window`: as for
+  [`measure_star_shape`](@ref).  `window` is applied to **both** halves, which
+  is what keeps the `psf_ref` comparison exact; see the note below.
 - `y_offset`, `x_offset`: added to every returned coordinate, to lift cutout
   indices into the frame `clean` was cut from.
 
@@ -413,7 +647,7 @@ render is noiseless, so it carries no `sharpness_err`.
 
 !!! note "Why both halves live in one function"
     The measurement and its reference must share `inv_var`, the anchor pixel,
-    `background` and `height`, or the comparison stops being exact: with
+    `background`, `height` and `window`, or the comparison stops being exact: with
     `clean == rend` every ratio below must come out at exactly 1 and every
     difference at exactly 0, which is what cancels the sub-pixel phase and
     PSF-width dependence instead of modeling it away.  Computing the two halves
@@ -429,6 +663,7 @@ function measure_star_shape_ref(clean::AbstractMatrix, rend::AbstractMatrix,
         fwhm_factor::Real = 2.3548200450309493,
         y_offset::Real = 0,
         x_offset::Real = 0,
+        window::AbstractMomentWindow = FlatWindow(),
     )
     axes(clean) == axes(rend) ||
         throw(DimensionMismatch("`clean` and `rend` must have the same `axes`; " *
@@ -441,7 +676,7 @@ function measure_star_shape_ref(clean::AbstractMatrix, rend::AbstractMatrix,
     centroid = choose_centroid(core)
     aperture = measure_star_shape(clean, i, j;
                                   inv_var = ivar, background, fwhm_factor,
-                                  y_offset, x_offset)
+                                  y_offset, x_offset, window)
     sharpness, sharpness_err = _sharpness(clean, i, j, shw, shw, h, ivar)
 
     # The same measurement on the noiseless render: what each statistic would
@@ -452,7 +687,7 @@ function measure_star_shape_ref(clean::AbstractMatrix, rend::AbstractMatrix,
         core = centroid_poly(rend, i, j, ivar; background, y_offset, x_offset),
         aperture = measure_star_shape(rend, i, j;
                                       inv_var = ivar, background, fwhm_factor,
-                                      y_offset, x_offset),
+                                      y_offset, x_offset, window),
     )
     return (; sharpness, sharpness_err, core, centroid, aperture, psf_ref)
 end
@@ -711,6 +946,7 @@ function measure_star_shapes(
         fwhm_factor::Real = 2.3548200450309493,
         peaks::Union{AbstractVector{Int}, Nothing} = nothing,
         min_significance::Union{Real, Nothing} = nothing,
+        window::Union{Nothing, AbstractMomentWindow} = nothing,
     ) where {T}
 
     if !isnothing(inv_var)
@@ -739,6 +975,20 @@ function measure_star_shapes(
     peak_fraction = maximum(template)
     # DAOPHOT's 0.72*FWHM footprint, not the kernel size
     khy = khx = _sharp_half_width(PSF.effective_fwhm(template))
+    # Taper the aperture moments at the detection kernel's own width.  That is
+    # the sensitivity-optimal choice for a PSF-like source (see
+    # `GaussianWindow`), and the kernel is picked to be PSF-scale, which is
+    # close enough given how flat the optimum is. Because
+    # the width is then known, `measure_star_shape` divides it back out of
+    # `fwhm`, so tapering costs no absolute meaning there.
+    kfwhm = PSF.effective_fwhm(template)
+    win = if window !== nothing
+        window
+    elseif isfinite(kfwhm) && kfwhm > 0
+        GaussianWindow(FT(kfwhm))
+    else
+        FlatWindow()
+    end
     return map(all_peak_idx) do pidx
         pixel = result.peaks[pidx]
         i0, j0 = Tuple(pixel)  # row, column
@@ -777,7 +1027,8 @@ function measure_star_shapes(
         # 3. Aperture morphology.
         aperture = measure_star_shape(cutout, i0_cut, j0_cut;
                                       inv_var = ivar_cutout, background, fwhm_factor,
-                                      y_offset = dy_global, x_offset = dx_global)
+                                      y_offset = dy_global, x_offset = dx_global,
+                                      window = win)
 
         # 4. DAOPHOT SHARP from the raw cutout and the matched-filter flux.
         #    Measured on the full frame, so the full-frame weights go with it.
