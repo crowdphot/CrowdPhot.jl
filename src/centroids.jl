@@ -79,18 +79,6 @@ ellipticity1_core, ellipticity2_core)`:
   diagonal.  Both are `0` for a circular core.  `NaN` when the weighted
   second-moment sum is non-positive.
 
-  !!! note "Ellipticity"
-      The ellipticity ``1 - b/a = 1 - \\sqrt{(1-|e|)/(1+|e|)}`` with
-      ``|e| = \\sqrt{e_1^2 + e_2^2}`` is a one-liner from the two
-      components, and is deliberately not returned.  It rectifies:
-      component scatter cannot cancel, so noise and residual phase error
-      both push it up and never down, and a round source has a positive
-      expectation of order ``\\sigma\\sqrt{\\pi/2}`` in the component
-      error.  It is also the one shape statistic that cannot be corrected
-      against a PSF model from its own value, because the magnitude does not
-      commute with the subtraction: the correction has to be applied to
-      ``e_1`` and ``e_2`` *before* taking the magnitude.
-
 The design matrix is fixed (local coordinates `{-1,0,1}²`), so the
 only free inputs are the 9 pixel values and 9 inverse-variance weights.
 

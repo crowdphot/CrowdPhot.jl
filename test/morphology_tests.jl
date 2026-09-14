@@ -5,8 +5,9 @@ using CrowdPhot.PSF: CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, Circ
     evaluate, add_star!, fwhm as psf_fwhm
 using FillArrays: Fill
 using LinearAlgebra: I
+import StaticArrays
 using StableRNGs: StableRNG
-using Statistics: median, std
+using Statistics: mean, median, std
 using Test
 
 # ---------------------------------------------------------------------------
@@ -552,6 +553,163 @@ end
                 @test std(e1) ≈ median(p1) rtol=tol
                 @test std(e2) ≈ median(p2) rtol=tol
                 @test std(cc) ≈ median(pc) rtol=tol
+            end
+        end
+    end
+
+    @testset "ellipticity_sq_resid" begin
+        sky = 20.0
+        src, _ = _make_elliptical_gaussian(; y_fwhm=3.6, x_fwhm=2.6, theta=30.0,
+                                           flux=10000.0, shape=(11,11))
+        psf, _ = _make_elliptical_gaussian(; y_fwhm=3.0, x_fwhm=3.0, theta=0.0,
+                                           flux=10000.0, shape=(11,11))
+        win = GaussianWindow(3.0)
+        iv = Fill(1 / sky, size(src))
+
+        @testset "built from the components, not from psf_ref's own |e|^2" begin
+            sr = measure_star_shape_ref(src, psf, 6, 6, maximum(psf);
+                                        inv_var=iv, background=0, window=win)
+            a, b = sr.aperture, sr.psf_ref.aperture
+            d1 = a.ellipticity1_aperture - b.ellipticity1_aperture
+            d2 = a.ellipticity2_aperture - b.ellipticity2_aperture
+            C = a.ellipticity_cov_aperture
+            @test sr.ellipticity_sq_resid ≈
+                d1^2 + d2^2 - C[1, 1] - C[2, 2] rtol=1e-12
+            # and is emphatically NOT the difference of the two |e|^2 values
+            @test !isapprox(sr.ellipticity_sq_resid,
+                            a.ellipticity_sq_aperture - b.ellipticity_sq_aperture;
+                            rtol=1e-6)
+        end
+
+        @testset "clean == rend leaves only the debiasing" begin
+            sr = measure_star_shape_ref(psf, psf, 6, 6, maximum(psf);
+                                        inv_var=iv, background=0, window=win)
+            C = sr.aperture.ellipticity_cov_aperture
+            @test sr.ellipticity_sq_resid ≈ -(C[1, 1] + C[2, 2]) rtol=1e-12
+        end
+
+        @testset "unbiased on noisy data, both null and non-null" begin
+            for (lbl, truth, ref) in (("null", psf, psf), ("resolved", src, psf))
+                rng = StableRNG(60613)
+                sr0 = measure_star_shape_ref(truth, ref, 6, 6, maximum(ref);
+                                             inv_var=iv, background=0, window=win)
+                a0, b0 = sr0.aperture, sr0.psf_ref.aperture
+                want = (a0.ellipticity1_aperture - b0.ellipticity1_aperture)^2 +
+                       (a0.ellipticity2_aperture - b0.ellipticity2_aperture)^2
+                got = Float64[]
+                for _ in 1:3000
+                    sr = measure_star_shape_ref(truth .+ sqrt(sky) .* randn(rng, size(truth)),
+                                                ref, 6, 6, maximum(ref);
+                                                inv_var=iv, background=0, window=win)
+                    push!(got, sr.ellipticity_sq_resid)
+                end
+                @test abs(mean(got) - want) < 4 * std(got) / sqrt(length(got))
+            end
+        end
+
+        @testset "the batch path carries the field, as NaN" begin
+            # Same field set as the ref path, so a caller can handle both, but
+            # there is no PSF model at detection time to reference against.
+            img = zeros(41, 41)
+            add_star!(img, CircularGaussianPSF(y=21.0, x=21.0, fwhm=3.0,
+                                               flux=5000.0, bkg=0.0))
+            mfr = matched_filter(img, 3.0; sigma = 5.0)
+            out = measure_star_shapes(mfr)
+            @test !isempty(out)
+            @test all(r -> isnan(r.ellipticity_sq_resid), out)
+            @test all(r -> isnan(r.ellipticity_sq_resid_err), out)
+            # and the field set matches what measure_star_shape_ref returns
+            sr = measure_star_shape_ref(psf, psf, 6, 6, maximum(psf);
+                                        inv_var=iv, background=0, window=win)
+            @test issubset(keys(sr), keys(first(out)))
+        end
+    end
+
+    @testset "ellipticity_sq_aperture" begin
+        sky = 20.0
+        rnd, _ = _make_elliptical_gaussian(; y_fwhm=3.0, x_fwhm=3.0, theta=0.0,
+                                           flux=1000.0, shape=(11,11))
+        elo, _ = _make_elliptical_gaussian(; y_fwhm=3.2, x_fwhm=2.9, theta=20.0,
+                                           flux=1000.0, shape=(11,11))
+        win = GaussianWindow(3.0)
+        iv = Fill(1 / sky, size(rnd))
+
+        @testset "equals the sum of the debiased component squares" begin
+            r = measure_star_shape(elo, 6, 6; inv_var=iv, background=0, window=win)
+            @test r.ellipticity_sq_aperture ≈
+                (r.ellipticity1_aperture^2 - r.ellipticity1_aperture_err^2) +
+                (r.ellipticity2_aperture^2 - r.ellipticity2_aperture_err^2) rtol=1e-12
+        end
+
+        @testset "is not clamped at zero" begin
+            # A round source measured at low SNR must be able to come out
+            # negative; clamping would restore the rectification bias.
+            r = measure_star_shape(rnd, 6, 6; inv_var=Fill(1 / 500.0, size(rnd)),
+                                   background=0, window=win)
+            @test r.ellipticity_sq_aperture < 0
+        end
+
+        @testset "removes the noise pedestal on a round source" begin
+            rng = StableRNG(31415)
+            raw = Float64[]; deb = Float64[]; prd = Float64[]
+            for _ in 1:4000
+                noisy = rnd .+ sqrt(sky) .* randn(rng, size(rnd))
+                r = measure_star_shape(noisy, 6, 6; inv_var=iv, background=0, window=win)
+                push!(raw, r.ellipticity1_aperture^2 + r.ellipticity2_aperture^2)
+                push!(deb, r.ellipticity_sq_aperture)
+                push!(prd, r.ellipticity_sq_aperture_err)
+            end
+            # The uncorrected statistic carries a clearly positive pedestal ...
+            @test mean(raw) > 20 * std(raw) / sqrt(length(raw))
+            # ... which the correction removes to within the standard error.
+            @test abs(mean(deb)) < 4 * std(deb) / sqrt(length(deb))
+            # and the correction is what accounts for essentially all of it
+            @test abs(mean(deb)) < 0.05 * mean(raw)
+            @test std(deb) ≈ median(prd) rtol=0.15
+        end
+
+        @testset "recovers a nonzero |e|^2 that the raw statistic overstates" begin
+            rng = StableRNG(27182)
+            truth = measure_star_shape(elo, 6, 6; inv_var=iv, background=0, window=win)
+            esq_true = truth.ellipticity1_aperture^2 + truth.ellipticity2_aperture^2
+            raw = Float64[]; deb = Float64[]
+            for _ in 1:4000
+                noisy = elo .+ sqrt(sky) .* randn(rng, size(elo))
+                r = measure_star_shape(noisy, 6, 6; inv_var=iv, background=0, window=win)
+                push!(raw, r.ellipticity1_aperture^2 + r.ellipticity2_aperture^2)
+                push!(deb, r.ellipticity_sq_aperture)
+            end
+            @test mean(raw) > 1.2 * esq_true          # >20% high without the fix
+            @test mean(deb) ≈ esq_true rtol=0.03
+        end
+
+        @testset "NaN and element type" begin
+            r = measure_star_shape(fill(1.0, 5, 5), 3, 3; background=1.0)
+            @test isnan(r.ellipticity_sq_aperture)
+            @test isnan(r.ellipticity_sq_aperture_err)
+            r32 = measure_star_shape(Float32.(elo), 6, 6; background=0f0)
+            @test r32.ellipticity_sq_aperture isa Float32
+            @test r32.ellipticity_sq_aperture_err isa Float32
+        end
+
+        @testset "ellipticity_cov_aperture" begin
+            r = measure_star_shape(elo, 6, 6; inv_var=iv, background=0, window=win)
+            C = r.ellipticity_cov_aperture
+            @test C isa StaticArrays.SMatrix{2, 2, Float64}
+            @test C[1, 1] ≈ r.ellipticity1_aperture_err^2 rtol=1e-14
+            @test C[2, 2] ≈ r.ellipticity2_aperture_err^2 rtol=1e-14
+            @test C[1, 2] == C[2, 1]                 # symmetric
+            @test C[1, 2]^2 <= C[1, 1] * C[2, 2]     # Cauchy-Schwarz
+            n = measure_star_shape(fill(1.0, 5, 5), 3, 3; background=1.0)
+            @test all(isnan, n.ellipticity_cov_aperture)
+        end
+
+        @testset "the error is non-negative everywhere it is finite" begin
+            rng = StableRNG(99999)
+            for _ in 1:200
+                noisy = rnd .+ sqrt(sky) .* randn(rng, size(rnd))
+                r = measure_star_shape(noisy, 6, 6; inv_var=iv, background=0, window=win)
+                @test r.ellipticity_sq_aperture_err >= 0
             end
         end
     end
