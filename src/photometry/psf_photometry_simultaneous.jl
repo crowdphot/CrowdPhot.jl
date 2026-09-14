@@ -937,7 +937,15 @@ error.
 - `λ_down::Real = 10.0`: damping decrease factor on a successful trial
 - `λ_min::Real = 1.0e-12`: minimum damping factor
 - `λ_max::Real = 1.0e12`: maximum damping factor
-- `damping`: [`MarquardtDamping`](@ref) or [`AdaptiveDamping`](@ref) instance
+
+  !!! note
+      The damping *form* is not selectable here (there is no `damping` keyword,
+      and `damp!` is never called).  `λ` is applied as the Krylov solver's own
+      Tikhonov term, and since the operator works in column-equilibrated
+      coordinates (`δ_scaled = D·δ`), penalizing `λ‖δ_scaled‖²` is exactly
+      Marquardt's `λ‖D·δ‖²`.  `LevenbergDamping`'s uniform `λI` would require
+      dropping the equilibration or appending explicit penalty rows, since
+      Krylov's `λ` only supports an isotropic penalty in the solved variable.
 - `show_trace::Bool = false`: print a trace of the fitting process
 - `covariance_estimator`: a [`CovarianceEstimator`](@ref) instance to compute the covariance of the final fit.  If `nothing`, no covariance is computed.
 
@@ -975,7 +983,6 @@ function fit_all_stars_simultaneous(
         λ_down::Real = 10.0,
         λ_min::Real = 1.0e-12,
         λ_max::Real = 1.0e12,
-        damping = MarquardtDamping(),
         show_trace::Bool = false,
         covariance_estimator = nothing,
     ) where {T}
@@ -990,10 +997,6 @@ function fit_all_stars_simultaneous(
     model_rad_max >= fit_rad || throw(ArgumentError("model_rad_max must be >= fit_rad"))
     model_rad_nsigma > 0 || throw(ArgumentError("model_rad_nsigma must be positive"))
     solver in (:lsqr, :lsmr) || throw(ArgumentError("solver must be :lsqr or :lsmr, got $(repr(solver))"))
-    damping isa LevenbergDamping && throw(ArgumentError(
-        "LevenbergDamping is not supported by fit_all_stars_simultaneous: it " *
-        "conflicts with the column-equilibrated x_tol scaling. Use MarquardtDamping."
-    ))
     fit_rad > 0 || throw(ArgumentError("fit_rad must be positive"))
 
     # Same default-selection rule as `lm_irls` (levenberg_marquardt.jl); there is

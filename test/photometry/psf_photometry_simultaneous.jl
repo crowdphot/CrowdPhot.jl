@@ -299,9 +299,6 @@ end
         cat = (; y=sources.y, x=sources.x, flux=copy(sources.flux))
         # bkg left free -> fwhm also free -> error.
         @test_throws ArgumentError fit_all_stars_simultaneous(image, psf, cat, 5)
-        # LevenbergDamping rejected.
-        @test_throws ArgumentError fit_all_stars_simultaneous(image, psf, cat, 5;
-            fixed=(; fwhm=2.0, bkg=0.0), damping=CrowdPhot.LevenbergDamping())
         # Bad solver.
         @test_throws ArgumentError fit_all_stars_simultaneous(image, psf, cat, 5;
             fixed=(; fwhm=2.0, bkg=0.0), solver=:foo)
