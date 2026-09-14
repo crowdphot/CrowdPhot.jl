@@ -281,7 +281,7 @@ Practical guidance:
 | Aspect | Core (`centroid_poly`) | Aperture (`measure_star_shape`) |
 |--------|----------------------|--------------------------------|
 | Scale | 3×3 central patch | Full cutout |
-| Cost | ~200 ns (free with centroid) | ~1.5 μs (21×21), scales with pixel count |
+| Cost | ~200 ns (free with centroid) | ~2 μs (21×21), scales with pixel count |
 | Shape accuracy | Limited by 3×3 sampling; ``e_1``/``e_2`` saturate for broad PSFs | Integrates over full profile |
 | FWHM | Not available (use `compactness_core`) | Marginal moment widths (Gaussian approx.) |
 | Compactness / ellipticity | From the 3×3 moment tensor | From the full-profile moment covariance |

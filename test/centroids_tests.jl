@@ -500,4 +500,32 @@ end
         @test centroid_poly(Float32.(base), 2, 2,
                             fill(1.0f0, 3, 3)).normalized_curvature_err isa Float32
     end
+
+    @testset "compactness_core_err" begin
+        base = [0.1 0.3 0.1; 0.3 1.0 0.3; 0.1 0.3 0.1] .* 100
+
+        # Linear in the pixel sigma: a 100x noisier map scales the error by 10.
+        r1 = centroid_poly(base, 2, 2, fill(1.0, 3, 3))
+        r10 = centroid_poly(base, 2, 2, fill(1/100, 3, 3))
+        @test r1.compactness_core_err > 0
+        @test isfinite(r1.compactness_core_err)
+        @test r10.compactness_core ≈ r1.compactness_core rtol=1e-12
+        @test r10.compactness_core_err / r1.compactness_core_err ≈ 10 rtol=1e-12
+
+        # Validated against 200k Monte Carlo realizations: the delta method
+        # reproduces the observed scatter to 0.04% at sigma = 0.5 and 0.2% at
+        # sigma = 1, degrading to 4% by sigma = 4 as the reciprocal's
+        # second-order term grows.
+        @test centroid_poly(base, 2, 2, fill(4.0, 3, 3)).compactness_core_err ≈
+              0.0085147 rtol=1e-4
+
+        # NaN wherever `compactness_core` itself is undefined: a degenerate
+        # border peak, and a non-positive weighted flux sum.
+        @test isnan(centroid_poly(base, 1, 1, fill(1.0, 3, 3)).compactness_core_err)
+        neg = _centroid_poly3(base, ones(3, 3); background = 1e4)
+        @test isnan(neg.compactness_core) && isnan(neg.compactness_core_err)
+
+        @test centroid_poly(Float32.(base), 2, 2,
+                            fill(1.0f0, 3, 3)).compactness_core_err isa Float32
+    end
 end

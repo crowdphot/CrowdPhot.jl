@@ -217,6 +217,7 @@ to obtain central moments.
 
 # Returns
 `(; M00, M10, M01, M20, M02, M11, W00, W10, W01, W20, W02, W11,
+    W30, W03, W21, W12, W40, W04, W31, W13, W22,
     aperture_sum, aperture_area, aperture_sum_err)`
 where each flux moment is
 ```math
@@ -229,7 +230,10 @@ The ``W_{pq}`` fields are the matching *variance* moments
 for delta-method covariance propagation: with ``u = wg`` and
 ``\\mathrm{Var}(z) = 1/w``, ``\\mathrm{Var}(\\sum u z \\cdots) = \\sum w g^2 \\cdots``.
 The extra factor of ``g`` is why ``W`` is not simply ``\\sum w``; the two
-coincide only for [`FlatWindow`](@ref).
+coincide only for [`FlatWindow`](@ref).  Every ``M_{pq}`` is linear in ``z``, so
+``\\mathrm{Cov}(M_{pq}, M_{rs}) = W_{p+r,\\,q+s}``, therefore the moments through second
+order need ``W`` through fourth order, which is why all nine of
+``W_{30} \\ldots W_{22}`` are carried.
 Pixels with ``w \\le 0`` are skipped, as are pixels outside the window's
 support.  If ``M_{00} \\le 0`` (a non-detection, or fully masked), `M00 = 0`
 and higher moments are meaningless; the caller should guard against this.
@@ -280,6 +284,19 @@ function _moments2(
     W20 = zero(FT)
     W02 = zero(FT)
     W11 = zero(FT)
+    # Third- and fourth-order weight moments.  The flux moments are all linear
+    # in `z`, so Cov(M_pq, M_rs) = W_{p+r, q+s}; propagating the second central
+    # moments needs the covariance of (M00, M10, M01, M20, M02, M11), whose
+    # highest entry is Cov(M20, M20) = W40.
+    W30 = zero(FT)
+    W03 = zero(FT)
+    W21 = zero(FT)
+    W12 = zero(FT)
+    W40 = zero(FT)
+    W04 = zero(FT)
+    W31 = zero(FT)
+    W13 = zero(FT)
+    W22 = zero(FT)
     # Unweighted rectangular aperture diagnostics over valid pixels.
     aperture_sum = zero(FT)
     aperture_area = 0
@@ -293,6 +310,10 @@ function _moments2(
 
     @inbounds for j in axes(image, 2)
         dx = FT(j) - fx0
+        # Column-invariant powers of `dx`, hoisted off the inner loop.
+        dx2 = dx * dx
+        dx3 = dx2 * dx
+        dx4 = dx2 * dx2
         gxj = FT(xfactor(window, j - jx0))
         for i in axes(image, 1)
             w = inv_var[i, j]
@@ -327,11 +348,109 @@ function _moments2(
             W20 += uv * dy * dy
             W02 += uv * dx * dx
             W11 += uv * dx * dy
+            # Third and fourth order, sharing partial products across the
+            # nine sums.  Deliberately not folded into the lines above: the
+            # different multiplication order would perturb them at the ulp.
+            dy2 = dy * dy
+            uvy = uv * dy
+            ty = uv * dy2
+            t30 = ty * dy
+            W30 += t30
+            W03 += uv * dx3
+            W21 += ty * dx
+            W12 += uvy * dx2
+            W40 += t30 * dy
+            W04 += uv * dx4
+            W31 += t30 * dx
+            W13 += uvy * dx3
+            W22 += ty * dx2
         end
     end
     return (; M00, M10, M01, M20, M02, M11,
              W00, W10, W01, W20, W02, W11,
+             W30, W03, W21, W12, W40, W04, W31, W13, W22,
              aperture_sum, aperture_area, aperture_sum_err = sqrt(aperture_var))
+end
+
+@doc raw"""
+    _shape_errors(mom, inv_M00, mu_y, mu_x, m_yy, m_xx, m_xy, window,
+                  s_yy, s_xx, s_xy) -> NamedTuple
+
+1-sigma uncertainties on the deconvolved aperture shape statistics
+`ellipticity1_aperture`, `ellipticity2_aperture` and `compactness_aperture`,
+by the delta method.
+
+`mom` is a `_moments2` return, `inv_M00`, `mu_y` and `mu_x` its normalization
+and centroid offsets, `m_*` the *measured* (windowed) second central moments
+and `s_*` the same moments after `deconvolve_moments`.
+
+The propagation has three links, each a Jacobian:
+
+1. ``(M_{00}, M_{10}, M_{01}, M_{20}, M_{02}, M_{11}) \to (m_{yy}, m_{xx}, m_{xy})``,
+   the normalize-and-subtract that centralizes the moments.  Its input
+   covariance is read straight off the ``W`` accumulators, since every ``M``
+   is linear in the pixel residuals.
+2. ``(m_{yy}, m_{xx}, m_{xy}) \to (s_{yy}, s_{xx}, s_{xy})``, the window
+   deconvolution.  The identity for [`FlatWindow`](@ref), and skipped there.
+3. ``(s_{yy}, s_{xx}, s_{xy}) \to`` each scalar statistic.
+
+The clamp on negative measured variances in the caller is treated as the
+identity here, so an error reported alongside a clamped moment is a
+linearization about the clamped point rather than about the raw one.
+
+# Returns
+
+`(; ellipticity1_err, ellipticity2_err, compactness_err)`, all `NaN` when
+``s_{yy} + s_{xx} \le 0`` -- exactly the condition under which the caller
+reports the statistics themselves as `NaN`.
+"""
+function _shape_errors(mom, inv_M00::FT, mu_y::FT, mu_x::FT, m_yy::FT,
+        m_xx::FT, m_xy::FT, window::AbstractMomentWindow, s_yy::FT, s_xx::FT,
+        s_xy::FT) where {FT}
+    S = s_yy + s_xx
+    if !(S > zero(FT))
+        n = FT(NaN)
+        return (; ellipticity1_err = n, ellipticity2_err = n, compactness_err = n)
+    end
+    z = zero(FT)
+    # Cov(M_pq, M_rs) = W_{p+r, q+s}, ordered (M00, M10, M01, M20, M02, M11).
+    ΣM = @SMatrix [mom.W00 mom.W10 mom.W01 mom.W20 mom.W02 mom.W11
+                   mom.W10 mom.W20 mom.W11 mom.W30 mom.W12 mom.W21
+                   mom.W01 mom.W11 mom.W02 mom.W21 mom.W03 mom.W12
+                   mom.W20 mom.W30 mom.W21 mom.W40 mom.W22 mom.W31
+                   mom.W02 mom.W12 mom.W03 mom.W22 mom.W04 mom.W13
+                   mom.W11 mom.W21 mom.W12 mom.W31 mom.W13 mom.W22]
+    # d(m_yy)/d(M00) = (mu_y^2 - m_yy)/M00, and likewise for the other rows.
+    JA = @SMatrix [(mu_y*mu_y - m_yy)*inv_M00 -2*mu_y*inv_M00 z               inv_M00 z       z
+                   (mu_x*mu_x - m_xx)*inv_M00 z               -2*mu_x*inv_M00 z       inv_M00 z
+                   (mu_y*mu_x - m_xy)*inv_M00 -mu_x*inv_M00   -mu_y*inv_M00   z       z       inv_M00]
+    Σm = JA * ΣM * JA'
+
+    k = FT(inv_window_var(window))
+    Σs = if iszero(k)
+        Σm
+    else
+        # Differentiate s = (m - k*det(m)*I) / Q with Q = 1 - k*tr(m) + k^2*det(m),
+        # the closed form `deconvolve_moments` evaluates.
+        D = m_yy * m_xx - m_xy * m_xy
+        invQ = inv(1 - k * (m_yy + m_xx) + k * k * D)
+        Qy = k * (k * m_xx - 1)
+        Qx = k * (k * m_yy - 1)
+        Qc = -2 * k * k * m_xy
+        JB = @SMatrix [(1 - k*m_xx - s_yy*Qy)*invQ (-k*m_yy - s_yy*Qx)*invQ    (2*k*m_xy - s_yy*Qc)*invQ
+                       (-k*m_xx - s_xx*Qy)*invQ    (1 - k*m_yy - s_xx*Qx)*invQ (2*k*m_xy - s_xx*Qc)*invQ
+                       -s_xy*Qy*invQ               -s_xy*Qx*invQ               (1 - s_xy*Qc)*invQ]
+        JB * Σm * JB'
+    end
+
+    invS = inv(S)
+    invS2 = invS * invS
+    j1 = @SVector [2*s_xx*invS2, -2*s_yy*invS2, z]      # e1 = (s_yy - s_xx)/S
+    j2 = @SVector [-2*s_xy*invS2, -2*s_xy*invS2, 2*invS] # e2 = 2*s_xy/S
+    jc = @SVector [-invS2, -invS2, z]                    # compactness = 1/S
+    return (; ellipticity1_err = sqrt(max(z, dot(j1, Σs * j1))),
+             ellipticity2_err = sqrt(max(z, dot(j2, Σs * j2))),
+             compactness_err = sqrt(max(z, dot(jc, Σs * jc))))
 end
 
 # ---------------------------------------------------------------------------
@@ -375,9 +494,10 @@ cutout using inverse-variance-weighted second central moments.
   translation-invariant and unaffected.
 
 # Returns
-`(; fwhm, ellipticity1_aperture, ellipticity2_aperture,
-    compactness_aperture, moment_norm, aperture_sum, aperture_area,
-    aperture_sum_err, centroid)` where
+`(; fwhm, ellipticity1_aperture, ellipticity1_aperture_err,
+    ellipticity2_aperture, ellipticity2_aperture_err,
+    compactness_aperture, compactness_aperture_err, moment_norm,
+    aperture_sum, aperture_area, aperture_sum_err, centroid)` where
 
 - `fwhm::NamedTuple (; y, x, theta)`: moment-based, axis-aligned marginal
   full width at half maximum along the ``y`` (row) and ``x`` (column)
@@ -400,6 +520,14 @@ cutout using inverse-variance-weighted second central moments.
   ``1/(\sigma^2_{yy} + \sigma^2_{xx})``.  Proportional to
   ``1/\mathrm{FWHM}^2`` for a Gaussian; larger for more compact profiles.
   `NaN` when ``\sigma^2_{yy} + \sigma^2_{xx} \le 0``.
+- `ellipticity1_aperture_err::T`, `ellipticity2_aperture_err::T`,
+  `compactness_aperture_err::T`: 1-σ uncertainties on the three statistics
+  above, propagated from `inv_var` by the delta method through the moment
+  covariance, the centralization and the window deconvolution.  They are
+  Gaussian first-order errors on ratios of moment sums, so they are reliable
+  where the moments are well determined and optimistic where they are not.
+  `fwhm` and `theta` carry no error: they are one-to-one functions of moments already
+  covered by the pair `compactness_aperture` and `ellipticity1_aperture`.
 - `moment_norm::T`: weighted zeroth moment ``M_{00}`` used to normalize
   the shape moments.  When `inv_var` is not uniform this is not a physical
   source flux and should not be used for photometric calibration.
@@ -430,7 +558,8 @@ centroid fields are `NaN`; aperture-sum diagnostics are still reported.
 If ``\sigma^2_{yy} \le 0`` or ``\sigma^2_{xx} \le 0``
 (the distribution has no measurable width, e.g. a single bright pixel),
 `fwhm.y` and `fwhm.x` are `NaN`, and `ellipticity1_aperture`,
-`ellipticity2_aperture` and `compactness_aperture` are `NaN`.
+`ellipticity2_aperture` and `compactness_aperture` are `NaN`, as are their
+`_err` counterparts.
 
 !!! note "Robustness to sub-pixel phase"
     Every shape statistic here is a ratio of linear moment sums taken
@@ -486,8 +615,9 @@ function measure_star_shape(
     if FT_M00 <= zero(FT)
         n = FT(NaN)
         return (; fwhm = (; y = n, x = n, theta = n),
-                 ellipticity1_aperture = n, ellipticity2_aperture = n,
-                 compactness_aperture = n,
+                 ellipticity1_aperture = n, ellipticity1_aperture_err = n,
+                 ellipticity2_aperture = n, ellipticity2_aperture_err = n,
+                 compactness_aperture = n, compactness_aperture_err = n,
                  moment_norm = FT_M00,
                  aperture_sum = FT(mom.aperture_sum),
                  aperture_area = mom.aperture_area,
@@ -516,6 +646,9 @@ function measure_star_shape(
     # is to measure the same quantities on the windowed PSF render, deconvolve,
     # and then use a psf-relative quantity for downstream analysis
     # (see measure_star_shape_ref)
+    # Retained for the error Jacobian: the deconvolution is a link in the chain,
+    # so propagation needs the moments on its input side too.
+    m_yy, m_xx, m_xy = σ²_yy, σ²_xx, σ²_xy
     dm = deconvolve_moments(window, σ²_yy, σ²_xx, σ²_xy)
     σ²_yy = FT(dm.yy)
     σ²_xx = FT(dm.xx)
@@ -560,6 +693,9 @@ function measure_star_shape(
     ellipticity1_aperture = total_moment > 0 ? (σ²_yy - σ²_xx) / total_moment : FT(NaN)
     ellipticity2_aperture = total_moment > 0 ? 2 * σ²_xy / total_moment : FT(NaN)
 
+    errs = _shape_errors(mom, inv_M00, μ_y, μ_x, m_yy, m_xx, m_xy, window,
+                         σ²_yy, σ²_xx, σ²_xy)
+
     # Centroid covariance from the delta method for the ratio estimator.
     inv_M00_sq = inv_M00 * inv_M00
     cent_cov_yy = (FT(mom.W20) - 2 * μ_y * FT(mom.W10) +
@@ -570,7 +706,12 @@ function measure_star_shape(
                    μ_y * μ_x * FT(mom.W00)) * inv_M00_sq
 
     return (; fwhm = (; y = fwhm_y, x = fwhm_x, theta),
-             ellipticity1_aperture, ellipticity2_aperture, compactness_aperture,
+             ellipticity1_aperture,
+             ellipticity1_aperture_err = errs.ellipticity1_err,
+             ellipticity2_aperture,
+             ellipticity2_aperture_err = errs.ellipticity2_err,
+             compactness_aperture,
+             compactness_aperture_err = errs.compactness_err,
              moment_norm = FT_M00,
              aperture_sum = FT(mom.aperture_sum),
              aperture_area = mom.aperture_area,
@@ -907,7 +1048,8 @@ has the following fields:
 - `centroid`: the chosen centroid `(; y, x, source)` from
   [`choose_centroid`](@ref) in global pixels.  `source` is `:poly` or `:com`.
 - `aperture`: the full [`measure_star_shape`](@ref) result — `(; fwhm,
-  ellipticity1_aperture, ellipticity2_aperture, compactness_aperture,
+  ellipticity1_aperture, ellipticity1_aperture_err, ellipticity2_aperture,
+  ellipticity2_aperture_err, compactness_aperture, compactness_aperture_err,
   moment_norm, aperture_sum, aperture_area, aperture_sum_err, centroid)`
   with coordinates in global pixels.
 - `psf_ref`: `nothing` for this method.  There is no PSF model at detection
