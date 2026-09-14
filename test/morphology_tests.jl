@@ -6,6 +6,7 @@ using CrowdPhot.PSF: CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, Circ
 using FillArrays: Fill
 using LinearAlgebra: I
 using StableRNGs: StableRNG
+using Statistics: median, std
 using Test
 
 # ---------------------------------------------------------------------------
@@ -481,6 +482,78 @@ end
         @test r.fwhm.x > 0
         @test r.centroid.y_err > 0
         @test r.centroid.x_err > 0
+    end
+
+    @testset "shape uncertainties" begin
+        img, _ = _make_elliptical_gaussian(; flux=3000.0, shape=(11,11))
+        iv = Fill(1 / 20.0, size(img))
+
+        @testset "finite and positive on a clean measurement" begin
+            for win in (FlatWindow(), GaussianWindow(3.0))
+                r = measure_star_shape(img, 6, 6; inv_var=iv, background=0, window=win)
+                @test r.ellipticity1_aperture_err > 0
+                @test r.ellipticity2_aperture_err > 0
+                @test r.compactness_aperture_err > 0
+                @test all(isfinite, (r.ellipticity1_aperture_err,
+                                     r.ellipticity2_aperture_err,
+                                     r.compactness_aperture_err))
+            end
+        end
+
+        @testset "errors scale as 1/flux at fixed sky" begin
+            # The statistics are ratios of moments, so at fixed noise the
+            # fractional moment error, and hence every shape error, is ~1/flux.
+            e_lo = measure_star_shape(img, 6, 6; inv_var=iv, background=0)
+            bright, _ = _make_elliptical_gaussian(; flux=30000.0, shape=(11,11))
+            e_hi = measure_star_shape(bright, 6, 6; inv_var=iv, background=0)
+            for k in (:ellipticity1_aperture_err, :ellipticity2_aperture_err,
+                      :compactness_aperture_err)
+                @test getfield(e_lo, k) / getfield(e_hi, k) ≈ 10 rtol=0.05
+            end
+        end
+
+        @testset "NaN wherever the statistic is NaN" begin
+            r = measure_star_shape(fill(1.0, 5, 5), 3, 3; background=1.0)
+            @test isnan(r.compactness_aperture) && isnan(r.compactness_aperture_err)
+            @test isnan(r.ellipticity1_aperture) && isnan(r.ellipticity1_aperture_err)
+            @test isnan(r.ellipticity2_aperture) && isnan(r.ellipticity2_aperture_err)
+            single = zeros(5, 5); single[3, 3] = 10.0
+            rs = measure_star_shape(single, 3, 3; background=0)
+            @test isnan(rs.compactness_aperture) && isnan(rs.compactness_aperture_err)
+        end
+
+        @testset "element type follows the image" begin
+            r = measure_star_shape(Float32.(img), 6, 6; background=0f0)
+            @test r.ellipticity1_aperture_err isa Float32
+            @test r.ellipticity2_aperture_err isa Float32
+            @test r.compactness_aperture_err isa Float32
+        end
+
+        @testset "predicted errors match the Monte Carlo scatter" begin
+            # A round-trip check on the whole chain: moment covariance from the
+            # W accumulators, centralization, window deconvolution, and the
+            # three scalar Jacobians.  The windowed case is the one that
+            # exercises the deconvolution Jacobian (inv_window_var != 0).
+            sky = 20.0
+            truth, _ = _make_elliptical_gaussian(; y_fwhm=3.4, x_fwhm=2.2,
+                                                 theta=30.0, flux=3.0e4, shape=(11,11))
+            for (win, tol) in ((FlatWindow(), 0.06), (GaussianWindow(3.0), 0.06))
+                rng = StableRNG(20250912)
+                e1 = Float64[]; e2 = Float64[]; cc = Float64[]
+                p1 = Float64[]; p2 = Float64[]; pc = Float64[]
+                for _ in 1:3000
+                    noisy = truth .+ sqrt(sky) .* randn(rng, size(truth))
+                    r = measure_star_shape(noisy, 6, 6; inv_var=Fill(1 / sky, size(truth)),
+                                           background=0, window=win)
+                    push!(e1, r.ellipticity1_aperture); push!(p1, r.ellipticity1_aperture_err)
+                    push!(e2, r.ellipticity2_aperture); push!(p2, r.ellipticity2_aperture_err)
+                    push!(cc, r.compactness_aperture); push!(pc, r.compactness_aperture_err)
+                end
+                @test std(e1) ≈ median(p1) rtol=tol
+                @test std(e2) ≈ median(p2) rtol=tol
+                @test std(cc) ≈ median(pc) rtol=tol
+            end
+        end
     end
 end
 

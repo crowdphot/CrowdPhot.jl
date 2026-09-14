@@ -38,8 +38,8 @@ quantities are only meaningful on background-subtracted data.
 
 # Returns
 A `NamedTuple` with keys `(; poly, com, normalized_curvature,
-normalized_curvature_err, compactness_core, ellipticity1_core,
-ellipticity2_core)`:
+normalized_curvature_err, compactness_core, compactness_core_err,
+ellipticity1_core, ellipticity2_core)`:
 
 - `poly`: `NamedTuple` `(; y, x, peak, y_err, x_err, peak_err, cov)` with
   the polynomial centroid (row, column) relative to the patch center, the
@@ -64,6 +64,11 @@ ellipticity2_core)`:
   estimated variance sum is non‑positive, which occurs for spurious noise
   peaks, hot pixels, severely saturated detections, or an over‑subtracted
   background.
+- `compactness_core_err`: 1-σ uncertainty on `compactness_core`, from the
+  delta method on the five flux moments behind ``\\sigma_x^2 + \\sigma_y^2``.
+  Costs no extra accumulators: on the 3×3 the third- and fourth-order weight
+  moments it needs collapse onto ones already formed, since
+  ``x^3 = x`` and ``x^4 = x^2`` for ``x \\in \\{-1,0,1\\}``.
 - `ellipticity1_core`, `ellipticity2_core`: the two normalized quadrupole
   (ellipticity) components of the inverse-variance-weighted 3×3 second
   central moments,
@@ -316,8 +321,30 @@ function _centroid_poly3(image::AbstractMatrix, inv_var::AbstractMatrix; backgro
             compactness_core = 1 / var_sum
             ellipticity1_core = (var_y - var_x) / var_sum
             ellipticity2_core = 2 * cov_xy / var_sum
+
+            # σ(compactness_core).  `var_sum` is a smooth function of the five
+            # flux moments (R00, R10, R01, R20, R02), whose covariance is
+            # Cov(R_pq, R_rs) = S_{p+r, q+s}.  On the 3x3 every third- and
+            # fourth-order term collapses onto a sum already formed above,
+            # because x, y ∈ {-1,0,1} gives x³ = x and x⁴ = x²: S30 -> S10,
+            # S03 -> S01, S40 -> S20, S04 -> S02.  So this costs no new
+            # accumulators, only algebra.
+            Cm = @SMatrix [S00 S10 S01 S20 S02
+                           S10 S20 S11 S10 S12
+                           S01 S11 S02 S21 S01
+                           S20 S10 S21 S20 S22
+                           S02 S12 S01 S22 S02]
+            # ∂var_sum/∂(R00, R10, R01, R20, R02).  The R00 row collapses to
+            # -(var_sum - com_x² - com_y²)/R00 once the ratio terms are folded in.
+            jv = @SVector [-(var_sum - com_x * com_x - com_y * com_y) * invR00,
+                           -2 * com_x * invR00, -2 * com_y * invR00,
+                           invR00, invR00]
+            # compactness = 1/var_sum, so σ(compactness) = σ(var_sum)/var_sum².
+            compactness_core_err = sqrt(max(zero(FT), dot(jv, Cm * jv))) *
+                compactness_core * compactness_core
         else
             compactness_core = ellipticity1_core = ellipticity2_core = FT(NaN)
+            compactness_core_err = FT(NaN)
         end
     else
         nan = FT(NaN)
@@ -325,6 +352,7 @@ function _centroid_poly3(image::AbstractMatrix, inv_var::AbstractMatrix; backgro
         var_com_x = var_com_y = cov_com_xy = nan
         com_x_err = com_y_err = nan
         compactness_core = ellipticity1_core = ellipticity2_core = nan
+        compactness_core_err = nan
     end
     com_cov = @SMatrix [var_com_y cov_com_xy; cov_com_xy var_com_x]
 
@@ -333,7 +361,8 @@ function _centroid_poly3(image::AbstractMatrix, inv_var::AbstractMatrix; backgro
              com = (; y = com_y, x = com_x,
                      cov = com_cov,
                      y_err = com_y_err, x_err = com_x_err),
-             normalized_curvature, normalized_curvature_err, compactness_core,
+             normalized_curvature, normalized_curvature_err,
+             compactness_core, compactness_core_err,
              ellipticity1_core, ellipticity2_core)
 end
 
@@ -372,7 +401,7 @@ pixel coordinates.
 
 # Returns
 A `NamedTuple` with keys `(; poly, com, normalized_curvature,
-normalized_curvature_err, compactness_core,
+normalized_curvature_err, compactness_core, compactness_core_err,
 ellipticity1_core, ellipticity2_core)` where
 
 - `poly` — `NamedTuple` `(; y, x, peak, y_err, x_err, peak_err, cov)`
@@ -396,6 +425,8 @@ ellipticity1_core, ellipticity2_core)` where
   background‑subtracted pixel values.  Larger values indicate more
   compact (sharper) profiles.  Returns `NaN` if the weighted sum or the
   estimated variance sum is non‑positive.
+- `compactness_core_err` — 1-σ uncertainty on `compactness_core`, by the
+  delta method over the flux moments it is built from.
 - `ellipticity1_core`, `ellipticity2_core` — normalized quadrupole
   components of the 3×3 second central moments,
   ``e_1 = (\\sigma^2_{yy}-\\sigma^2_{xx})/(\\sigma^2_{yy}+\\sigma^2_{xx})``
@@ -414,7 +445,7 @@ neighborhood), every field is `NaN`:
    com = (; y = NaN, x = NaN, y_err = NaN, x_err = NaN,
           cov = @SMatrix [NaN NaN; NaN NaN]),
    normalized_curvature = NaN, normalized_curvature_err = NaN,
-   compactness_core = NaN,
+   compactness_core = NaN, compactness_core_err = NaN,
    ellipticity1_core = NaN, ellipticity2_core = NaN)
 ```
 
@@ -479,7 +510,7 @@ function centroid_poly(
                           cov = nan3),
                  com = nancom,
                  normalized_curvature = nan, normalized_curvature_err = nan,
-                 compactness_core = nan,
+                 compactness_core = nan, compactness_core_err = nan,
                  ellipticity1_core = nan, ellipticity2_core = nan)
     end
 
@@ -510,6 +541,7 @@ function centroid_poly(
              normalized_curvature = local_result.normalized_curvature,
              normalized_curvature_err = local_result.normalized_curvature_err,
              compactness_core = local_result.compactness_core,
+             compactness_core_err = local_result.compactness_core_err,
              ellipticity1_core = local_result.ellipticity1_core,
              ellipticity2_core = local_result.ellipticity2_core)
 end
