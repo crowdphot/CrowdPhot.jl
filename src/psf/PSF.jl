@@ -583,10 +583,9 @@ so the underlying continuous operation is convolution with a box of width
 !!! note
     The two types are not equivalent.  `:box` has transfer function
     `sinc(n f) * sinc(f)`, so it applies an extra box of one *oversampled*
-    sample on top of the pixel, over-smoothing the PSF; for `n = 4` this
-    depresses the modeled peak of a Roman ePSF by about 4% relative to
-    `:exact`.  `:box` exists to reproduce `romancal` results, not because
-    it is the better quadrature.
+    sample on top of the pixel, over-smoothing the PSF.
+    `:box` exists to reproduce reference results (e.g., those from `romancal`),
+    not because it is the better quadrature.
 """
 function pixel_response_kernel(n::Integer; type::Symbol = :exact)
     n > 0 || throw(ArgumentError("oversampling `n` must be positive (got $n)"))

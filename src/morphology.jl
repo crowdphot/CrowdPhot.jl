@@ -73,22 +73,11 @@ Non-finite or non-positive `fwhm` throws an `ArgumentError`.
 
 # Width
 
-For a Gaussian source ``\sigma_s`` and Gaussian window ``\sigma_w`` the
-windowed second moment is
-``\sigma^{-2}_\mathrm{meas} = \sigma^{-2}_s + \sigma^{-2}_w``, so the window
-compresses the response by ``[\sigma_w^2/(\sigma_s^2+\sigma_w^2)]^2`` while
-suppressing the noise faster.  Maximizing the signal-to-noise on a *small*
-departure in size, evaluated at the source scale, gives a figure of merit
-``\propto u^{3/2}/[(1+u)^2\sqrt{u^2+1}]`` with ``u = \sigma_w^2/\sigma_s^2``.
-That function is invariant under ``u \to 1/u``, so its unique interior maximum
-is the fixed point ``u = 1``:
-
-**The sensitivity-optimal window is matched to the scale being measured**,
-``\sigma_w = \sigma_s``.  For star-likeness that is the PSF scale, hence
-`GaussianWindow(psf_fwhm)`.  The optimum is flat -- a factor ``\sqrt 2`` either
-way costs 18% -- so the width needs no per-field tuning.  Weak-lensing
-adaptive-moments schemes are the generalization of this, for when each
-object has a different optimum scale.
+The sensitivity-optimal window is matched to the scale being measured,
+``\sigma_w = \sigma_s``, which for star-similarity is the PSF scale, hence
+`GaussianWindow(psf_fwhm)`.  The optimum is fairly flat and so tolerates
+rough approximations of `psf_fwhm`.  See the derivation under
+"Windowed aperture moments" in the Centroid Refinement and Morphology manual page.
 
 # Support
 
@@ -156,9 +145,9 @@ rotated elliptical source it is wrong by 2% at a moment correlation of 0.25 and
 11% at 0.53.  For the same reason there is no shortcut on the trace, so
 `compactness_aperture` cannot be corrected without the cross moment either.
 
-Returns `NaN` for all three when the deconvolution has no solution: a measured
-tensor that is not positive definite, or a source at least as broad as the
-window in some direction, where the window gives no purchase on the width.
+Returns `NaN` for all three when the input is not a positive-definite tensor, or
+when the deconvolution has no solution (e.g., a source much broader than the
+window in some direction).
 
 Needs no per-window method.  An infinitely wide window has
 `inv_window_var == 0`, which short-circuits to the identity -- returned
@@ -169,6 +158,14 @@ function deconvolve_moments(w::AbstractMomentWindow, σ²_yy::Real, σ²_xx::Rea
                             σ²_xy::Real)
     FT = float(promote_type(typeof(σ²_yy), typeof(σ²_xx), typeof(σ²_xy)))
     a, b, c = FT(σ²_yy), FT(σ²_xx), FT(σ²_xy)
+    # Ahead of the short circuit, so both window paths agree on which measured
+    # tensors are physical: an unwindowed one is still a covariance, and
+    # `sigma^2_xy` is not clamped upstream, so noise can push it past
+    # `sqrt(sigma^2_yy sigma^2_xx)` and make the ellipticity unbounded.
+    nan = FT(NaN)
+    D = a * b - c * c
+    D > 0 || return (; yy = nan, xx = nan, xy = nan)
+
     k = inv_window_var(w)
     iszero(k) && return (; yy = a, xx = b, xy = c)
 
@@ -177,9 +174,6 @@ function deconvolve_moments(w::AbstractMomentWindow, σ²_yy::Real, σ²_xx::Rea
     # `[(a - kD)/Q  c/Q; c/Q  (b - kD)/Q]`; `Q = 1` when `k = 0`, which is the
     # identity the short circuit returns exactly.
     kf = FT(k)
-    nan = FT(NaN)
-    D = a * b - c * c
-    D > 0 || return (; yy = nan, xx = nan, xy = nan)
     Q = 1 - kf * (a + b) + kf * kf * D
     Q > 0 || return (; yy = nan, xx = nan, xy = nan)
     yy = (a - kf * D) / Q
@@ -472,6 +466,8 @@ components themselves, and for `ellipticity_sq_resid`, where they are the
 components measured relative to the PSF.  The algebra is identical; only the
 point it is evaluated at differs.
 
+The uncertainty is never below the noise-only floor ``2\,\mathrm{tr}(\Sigma^2)``.
+
 ``\mathbb{E}[\hat{d}_i^2] = d_i^2 + v_i``, so subtracting the variances makes
 the value unbiased to first order.
 
@@ -485,8 +481,12 @@ function _debiased_sq(d1::FT, d2::FT, v1::FT, v2::FT, c12::FT) where {FT}
     z = zero(FT)
     p11 = d1 * d1 - v1
     p22 = d2 * d2 - v2
-    var = 2 * (v1 * v1 + v2 * v2 + 2 * c12 * c12) +
-          4 * (max(z, p11) * v1 + 2 * (d1 * d2 - c12) * c12 + max(z, p22) * v2)
+    # `mu' Sigma mu` is a quadratic form and cannot be negative, but its signed
+    # cross product can be, and left unclamped it can cancel the irreducible
+    # `2 tr(Sigma^2)` noise term and quote a zero uncertainty on a noisy
+    # statistic.  Clamping the form as a whole floors the error at the noise.
+    mu_term = max(z, p11) * v1 + 2 * (d1 * d2 - c12) * c12 + max(z, p22) * v2
+    var = 2 * (v1 * v1 + v2 * v2 + 2 * c12 * c12) + 4 * max(z, mu_term)
     return (p11 + p22, sqrt(max(z, var)))
 end
 
@@ -606,15 +606,10 @@ are `NaN`, as are their `_err` counterparts.
     Every shape statistic here is a ratio of linear moment sums taken
     about the center of mass, so the integer reference point `(y0, x0)`
     cancels identically and a sub-pixel shift of the source is suppressed
-    exponentially in the sampling ratio (roughly ``e^{-2\pi^2\sigma^2}``
-    with ``\sigma`` the profile width in pixels).  Measured on noiseless
-    round sources scanned over all sub-pixel phases, the fractional
-    scatter of `fwhm`, `compactness_aperture`, `ellipticity1_aperture`
-    and `ellipticity2_aperture` is ``\sim 1\%`` at
-    FWHM 1.2 px, ``2\times10^{-4}`` at FWHM 1.6 px, and below ``10^{-6}``
-    at FWHM 2 px and above.  The residual comes from the hard rectangular
-    cutout, whose edges move relative to the source; it is larger for a
-    PSF with power-law wings than for a Gaussian.
+    exponentially in the sampling ratio.  These are therefore better statistics
+    to use against an absolute threshold than the quadratic-fit core diagnostics
+    from [`centroid_poly`](@ref) are not.  See "Sub-pixel phase" in the
+    Centroid Refinement and Morphology manual page.
 
 # Examples
 ```jldoctest
@@ -848,9 +843,11 @@ to noisy data. Do not use
 `psf_ref.aperture.ellipticity_sq_aperture` for this -- it is the debiasing
 applied to a noiseless render, and is over-corrected by exactly
 ``\mathrm{Var}(e_1) + \mathrm{Var}(e_2)``.  See
-[`measure_star_shapes`](@ref) for the individual fields and for how to combine
-a statistic with its `psf_ref` counterpart.  `psf_ref` mirrors values only: the
-render is noiseless, so it carries no `sharpness_err`.
+[`measure_star_shape`](@ref) and [`centroid_poly`](@ref) for the individual
+fields, and "PSF-normalized statistics" in the Centroid Refinement and
+Morphology manual page for which comparison each statistic takes against its
+`psf_ref` counterpart.  `psf_ref` mirrors values only: the render is noiseless,
+so it carries no `sharpness_err`.
 
 !!! note "Why both halves live in one function"
     The measurement and its reference must share `inv_var`, the anchor pixel,
@@ -976,8 +973,11 @@ the raw peak pixel minus the mean of its neighbors over the
 the source's fitted central `height`.
 
 A spatially flat background cancels from the numerator, so no background
-argument is needed.  Non-finite neighbors are skipped; the footprint is
-clipped at the image border.
+argument is needed; it cancels over whatever subset of the footprint survives
+the masking below, so the image need not be background-subtracted either way.
+
+Non-finite neighbors are skipped, as are neighbors whose weight is
+non-positive or non-finite. The footprint is clipped at the image border.
 
 Returns the statistic and its 1-σ uncertainty, the latter propagated from
 `inv_var` (unit weights when omitted, giving a formal error) over exactly the
@@ -1001,9 +1001,9 @@ pixels that entered the value:
     instead of folding flux uncertainty into it.  Both call paths therefore
     agree on what `sharpness_err` means.
 
-Both returned values are `NaN` if `height` is non-positive or no valid neighbor
-exists; the error alone is `NaN` if any contributing pixel has a non-positive
-or non-finite weight.
+Both returned values are `NaN` if `height` is non-positive, if `(i0, j0)` is not
+a pixel of `image`, if the center pixel's own weight is non-positive or
+non-finite, or if no valid neighbor survives the masking above.
 """
 function _sharpness(image::AbstractMatrix{T}, i0::Int, j0::Int,
                     hy::Int, hx::Int, height::Real,
@@ -1012,31 +1012,35 @@ function _sharpness(image::AbstractMatrix{T}, i0::Int, j0::Int,
     nan = FT(NaN)
     (isfinite(height) && height > 0) || return (nan, nan)
     ny, nx = size(image)
+    # Callers may anchor off the image: a fitter keeps a source whose wider
+    # footprint still overlaps the frame (see `stamp_geometry`).
+    (1 <= i0 <= ny && 1 <= j0 <= nx) || return (nan, nan)
     s = zero(FT)
     n = 0
-    # Variance of the neighbor sum.  Accumulated over exactly the pixels that
-    # enter `s`, so a masked or non-finite weight anywhere in that set makes the
-    # error undefined (NaN) without perturbing the value.
+    # Variance of the neighbor sum, accumulated over exactly the pixels that
+    # enter `s`.
     svar = zero(FT)
     @inbounds for i in max(1, i0 - hy):min(ny, i0 + hy),
                   j in max(1, j0 - hx):min(nx, j0 + hx)
         (i == i0 && j == j0) && continue
         v = FT(image[i, j])
         isfinite(v) || continue
+        # Zero weight pixels must not enter the neighbor mean.
+        w = inv_var === nothing ? one(FT) : FT(inv_var[i, j])
+        (isfinite(w) && w > 0) || continue
         s += v
         n += 1
-        w = inv_var === nothing ? one(FT) : FT(inv_var[i, j])
-        svar += (isfinite(w) && w > 0) ? inv(w) : nan
+        svar += inv(w)
     end
     n == 0 && return (nan, nan)
-    h = FT(height)
-    sharpness = (FT(image[i0, j0]) - s / n) / h
     # `height` is taken as exact: in the reference path it comes from a noiseless
     # render, and in the batch path it shares pixels with the numerator, so
     # propagating its error would need a covariance rather than a variance.
     wc = inv_var === nothing ? one(FT) : FT(inv_var[i0, j0])
-    var_c = (isfinite(wc) && wc > 0) ? inv(wc) : nan
-    err = sqrt(var_c + svar / (n * n)) / h
+    (isfinite(wc) && wc > 0) || return (nan, nan)
+    h = FT(height)
+    sharpness = (FT(image[i0, j0]) - s / n) / h
+    err = sqrt(inv(wc) + svar / (n * n)) / h
     return (sharpness, err)
 end
 

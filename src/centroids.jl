@@ -102,16 +102,12 @@ broad, and use the core values for locality (a blend, a neighbor, a defect
 inside the 3×3) rather than for magnitude.
 
 !!! note "Sensitivity to sub-pixel phase"
-    The quantities derived from the *quadratic fit* — `normalized_curvature`
-    and the `poly` centroid — vary systematically with where the source falls
+    The quantities derived from the *quadratic fit* -- `normalized_curvature`
+    and the `poly` centroid -- vary systematically with where the source falls
     inside its peak pixel, because a parabola fit over ``\\pm 1`` pixel
     recovers the profile curvature at the sampling phase rather than at the
-    peak.  For a noiseless, perfectly round source scanned over all sub-pixel
-    phases, `normalized_curvature` has a scatter of 9% (FWHM 1.2 px) to 4%
-    (FWHM 3.5 px), and the polynomial centroid an error of 0.079 px to 0.013
-    px.  Use them as relative, sigma-clipped quantities within a magnitude
-    bin, not against absolute values.
-
+    peak.
+    
     The moment-based `ellipticity1_core` and `ellipticity2_core` are far less
     phase-sensitive (for a separable profile the cross moment behind ``e_2``
     cancels exactly at any offset), but the 3×3 box truncation still leaves
@@ -199,14 +195,25 @@ function _centroid_poly3(image::AbstractMatrix, inv_var::AbstractMatrix; backgro
 
     # The propagated covariance needs N⁻¹, so form it once and reuse it for
     # both the fitted coefficients and the output covariance.
-    # TODO: Make this robust to PosDefException from singular or nearly
-    # singular weighted 3×3 designs instead of relying on a pseudoinverse.
+    #
+    # A design matrix without enough positive-weight pixels to pin all six
+    # coefficients gives a singular `Nmat`.
+    # TODO: catch near-singular designs too, which pass Cholesky and give huge
+    # but finite errors, with a scale-relative determinant test.
     Ninv = try
         C = cholesky(Symmetric(Nmat))
         SMatrix{6,6,FT}(inv(C))
     catch err
         err isa PosDefException || rethrow()
-        SMatrix{6,6,FT}(pinv(Nmat))
+        nan = FT(NaN)
+        nan3 = @SMatrix [nan nan nan; nan nan nan; nan nan nan]
+        nan2 = @SMatrix [nan nan; nan nan]
+        return (; poly = (; y = nan, x = nan, peak = nan,
+                        y_err = nan, x_err = nan, peak_err = nan, cov = nan3),
+                com = (; y = nan, x = nan, cov = nan2, y_err = nan, x_err = nan),
+                normalized_curvature = nan, normalized_curvature_err = nan,
+                compactness_core = nan, compactness_core_err = nan,
+                ellipticity1_core = nan, ellipticity2_core = nan)
     end
 
     X = Ninv * rvec

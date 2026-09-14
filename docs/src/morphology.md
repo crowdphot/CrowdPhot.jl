@@ -146,11 +146,15 @@ which is squared magnitude with that pedestal subtracted,
 ```
 
 using the same component variances reported as `ellipticity1_aperture_err` and
-`ellipticity2_aperture_err`.  Because
+`ellipticity2_aperture_err`.  Those two variances and their cross term are also
+returned whole, as the ``2 \times 2`` `ellipticity_cov_aperture`.
+Note that it is indexed by
+*component* number rather than by axis, unlike `centroid.cov`.  Because
 ``\mathbb{E}[\hat{e}_i^2] = e_i^2 + \mathrm{Var}(\hat{e}_i)``, this is
-unbiased to first order, so a star sits at zero at every signal-to-noise and a
-fixed threshold becomes meaningful. Noise will cause round sources to scatter in
-a locus around zero, so this quantity should not be clampled or square rooted.
+unbiased to first order, so round sources scatter around zero at every
+signal-to-noise and a fixed threshold becomes meaningful. Note, however, that the
+scatter is asymmetric, with the positive side extending much farther than the
+negative side.
 
 There is no debiased magnitude at the **core** scale: `ellipticity1_core` and
 `ellipticity2_core` carry no uncertainties, and the component variances are
@@ -169,7 +173,11 @@ statistic above is
 ```
 
 the render being noiseless, so the residual carries the measurement's own
-variances unchanged.
+variances unchanged.  [`measure_star_shape_ref`](@ref) returns this as
+`ellipticity_sq_resid`, with `ellipticity_sq_resid_err` alongside it.  Do
+**not** try to assemble it from `psf_ref.aperture.ellipticity_sq_aperture`,
+which is the debiasing applied to a noiseless render and so is over-corrected
+by exactly ``\mathrm{Var}(e_1) + \mathrm{Var}(e_2)``.
 
 
 Because these are ratios of *linear* moment sums taken about the center of
@@ -336,6 +344,11 @@ Measured on noiseless round sources scanned over many sub-pixel phases:
 | ``\|e\|`` over the 3×3 core (*mean*, for a circular source) | 0.011 | 0.024 | 0.017 | 0.003 |
 | `poly` centroid (px) | 0.079 | 0.051 | 0.035 | 0.013 |
 
+The aperture row's residual is not a sampling artifact of the moments
+themselves -- it comes from the hard rectangular cutout, whose edges move
+relative to the source, and is larger for a PSF with power-law wings than for a
+Gaussian.
+
 The split is structural.  Everything derived from the 3×3 *quadratic fit*
 -- `normalized_curvature` and the `poly` centroid -- is affected, because a
 parabola fit over ``\pm1`` pixel recovers the profile curvature
@@ -379,7 +392,23 @@ which grows with the box area. This can be mitigated by tapering the moments
 by a Gaussian window, which bounds the noise growth.
 
 The taper is matched to the PSF, which is the width that maximizes sensitivity
-to a small departure from the PSF. [`measure_star_shapes`](@ref) derives it from
+to a small departure from the PSF.
+For a Gaussian source ``\sigma_s`` and a Gaussian window
+``\sigma_w`` the windowed second moment obeys
+``\sigma^{-2}_\mathrm{meas} = \sigma^{-2}_s + \sigma^{-2}_w``, so the window
+compresses the response by ``[\sigma_w^2/(\sigma_s^2+\sigma_w^2)]^2`` while
+suppressing the noise faster.  Maximizing the signal-to-noise on a *small*
+departure in size, evaluated at the source scale, gives a figure of merit
+``\propto u^{3/2}/[(1+u)^2\sqrt{u^2+1}]`` with ``u = \sigma_w^2/\sigma_s^2``.
+That function is invariant under ``u \to 1/u``, so its unique interior maximum
+is the fixed point ``u = 1``, i.e. ``\sigma_w = \sigma_s``.  For star-similarity
+the scale being measured is the PSF's, hence `GaussianWindow(psf_fwhm)`.  The
+optimum is flat -- a factor ``\sqrt 2`` either way costs 18% -- so the width
+tolerates reasonable approximations of `psf_fwhm`.
+Weak-lensing adaptive-moments schemes are the
+generalization of this, for when each object has a different optimum scale.
+
+[`measure_star_shapes`](@ref) derives it from
 the detection kernel automatically, and
 `fit_all_stars_simultaneous_multipass` from its PSF model;
 [`measure_star_shape`](@ref) defaults to [`FlatWindow`](@ref) (no taper) since it
@@ -457,9 +486,15 @@ r.aperture.ellipticity1_aperture - r.psf_ref.aperture.ellipticity1_aperture
 ```
 
 For a noiseless PSF-like source **every ratio is exactly 1 and every difference
-exactly 0**, by construction.  On a source that is *not* the PSF, the
+exactly 0**, by construction.  `ellipticity_sq_resid` is the one exception,
+being neither a ratio nor a difference: its components cancel exactly there but
+the debiasing still subtracts, so it reads
+``-(\mathrm{Var}(e_1) + \mathrm{Var}(e_2))`` rather than 0.  For a noise-free
+model, there is no noise for the correction to remove; on real data it is unbiased.
+
+On a source that is *not* the PSF, the
 normalization suppresses phase-induced scatter by a factor of 2 to 16, largest
-on undersampled data, and compresses the PSF-width dependence by roughly 2.5x,
+on undersampled data, and compresses the PSF-width dependence by roughly 2.5x.
 Such PSF-corrected quantities make star/galaxy separation cuts on the morphological
 parameters portable across images with different PSFs.
 
