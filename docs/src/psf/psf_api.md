@@ -58,6 +58,7 @@ ellipse_bounds
 render
 add_star!
 subtract_star!
+pixel_response_kernel
 ```
 
 ## API Internals

@@ -358,6 +358,9 @@ end
 # Covariance estimators
 # ---------------------------------------------------------------------------
 
+"""
+Abstract base type for covariance estimators used in Levenberg-Marquardt fits.
+"""
 abstract type AbstractCovarianceEstimator end
 
 """`KnownWeightsCovarianceEstimator()` assumes that the weights provided (e.g. via `inv_var`) are correct and returns the covariance as the inverse of the Gauss-Newton Hessian approximation.

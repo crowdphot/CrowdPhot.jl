@@ -47,8 +47,10 @@ per-star diagnostics computed on the final pass over exactly the fitting box:
   keyword. `spread_model` is only meaningful when `psf` is an accurate model of
   the true PSF with its shape parameters held fixed via `fixed`.
 
-## Fitting function
+## Fitting functions
 
 ```@docs
 fit_all_stars
+CrowdPhot.fit_all_stars_simultaneous
+CrowdPhot.fit_all_stars_simultaneous_multipass
 ```

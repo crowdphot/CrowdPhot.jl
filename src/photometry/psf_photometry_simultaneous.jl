@@ -543,6 +543,65 @@ function _fill_stamps!(
 end
 
 """
+    _source_errors!(errs, stamp, cov_est, cost, dof) -> errs
+
+Per-source 1-sigma parameter errors from the `p x p` diagonal block of the
+normal equations, for a catalog whose Jacobian is stored as `stamp`.
+
+`stamp` must already hold the derivatives at the final `θ`, filled with every
+source live (see [`_fill_stamps!`](@ref)): a source frozen during the fit has
+zeroed columns, and its reported errors must not inherit that.
+
+Each block is `D J' J D` restricted to source `j`'s stamp pixels, where `D` is
+the column equilibration `stamp.colnorm` applied at fill time and unwound here.
+The diagonal is then ridged by `1e-12 * tr` before inversion: a source whose
+stamp retains too few unmasked pixels gives a singular block, and the ridge
+keeps [`covariance!`](@ref) on its Cholesky path instead of the `pinv`
+fallback.
+
+`errs` is filled as `(p, n)` in the stamp's own column order, so `errs[k, j]`
+is the error on free parameter `k` (the `k`-th entry of `free_names`) of
+source `j`.  Callers scatter it into whatever layout they report.
+
+Shared by [`fit_all_stars_simultaneous`](@ref) and
+[`fit_all_stars_simultaneous_multipass`](@ref); `fit_all_stars` takes its
+errors from the per-star Levenberg-Marquardt covariance instead.
+"""
+function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT},
+                         cov_est, cost, dof) where {FT}
+    p, S2 = stamp.p, stamp.S2
+    n = size(stamp.values, 3)
+    size(errs) == (p, n) ||
+        throw(DimensionMismatch("`errs` must be ($p, $n); got $(size(errs))"))
+    # `covariance!` factors in place, so `blk` is rebuilt per source anyway.
+    blk = zeros(FT, p, p)
+    for j in 1:n
+        fill!(blk, zero(FT))
+        @inbounds for m in 1:S2
+            stamp.pixels[m, j] != 0 || continue
+            for k in 1:p, l in 1:p
+                blk[k, l] += stamp.values[k, m, j] * stamp.values[l, m, j]
+            end
+        end
+        for k in 1:p, l in 1:p
+            blk[k, l] *= stamp.colnorm[k, j] * stamp.colnorm[l, j]
+        end
+        tr = zero(FT)
+        for k in 1:p
+            tr += blk[k, k]
+        end
+        for k in 1:p
+            blk[k, k] += FT(1.0e-12) * tr
+        end
+        cov = covariance!(cov_est, blk, cost, dof)
+        for k in 1:p
+            errs[k, j] = sqrt(max(zero(FT), cov[k, k]))
+        end
+    end
+    return errs
+end
+
+"""
     _render_model!(model_img, model_template, free_names_val, fixed, θ, p,
                    model_R, anchor_y, anchor_x, ny, nx, live, render_buf, render_scratch)
 
@@ -875,7 +934,10 @@ error.
       dropping the equilibration or appending explicit penalty rows, since
       Krylov's `λ` only supports an isotropic penalty in the solved variable.
 - `show_trace::Bool = false`: print a trace of the fitting process
-- `covariance_estimator`: a [`CovarianceEstimator`](@ref) instance to compute the covariance of the final fit.  If `nothing`, no covariance is computed.
+- `covariance_estimator`: a [`AbstractCovarianceEstimator`](@ref) instance to
+  compute the covariance of the final fit.  If `nothing`, uses
+  [`KnownWeightsCovarianceEstimator`](@ref) if `inv_var` is not `nothing`, otherwise
+  [`ReweightedCovarianceEstimator`](@ref).
 
 # Returns
 
@@ -945,6 +1007,7 @@ function fit_all_stars_simultaneous(
     n_stars == 0 && return MultiPassPhotResult(
         FT[], FT[], FT[], FT[], FT[], FT[], FT[], FT[],
         falses(0), falses(0), FT[], FT[], FT[], FT[], FT[], FT[], FT[], Int[], Int(0), Int(0), String[], Matrix{FT}(undef, 0, 0),
+        NamedTuple[],
     )
 
     prop_names = collect(keys(ConstructionBase.getproperties(psf)))
@@ -1234,27 +1297,12 @@ function fit_all_stars_simultaneous(
     _fill_stamps!(stamp, psf, free_names_val, fixed, θ, w,
         grad_col, dy_off, dx_off, anchor_y, anchor_x, row_y, row_x, row_flux, trues(n_active), fill_scratch)
 
+    errs = Matrix{FT}(undef, p, n_active)
+    _source_errors!(errs, stamp, covariance_estimator, cost, dof)
     for (j, i) in enumerate(active)
-        blk = zeros(FT, p, p)
-        @inbounds for m in 1:S2
-            fi = pixels[m, j]
-            fi != 0 || continue
-            for k in 1:p, l in 1:p
-                blk[k, l] += stamp.values[k, m, j] * stamp.values[l, m, j]
-            end
-        end
-        for k in 1:p, l in 1:p
-            blk[k, l] *= stamp.colnorm[k, j] * stamp.colnorm[l, j]
-        end
-        tr = zero(FT)
         for k in 1:p
-            tr += blk[k, k]
+            errors[free_idx[k], i] = errs[k, j]
         end
-        for k in 1:p
-            blk[k, k] += FT(1.0e-12) * tr
-        end
-        cov = covariance!(covariance_estimator, blk, cost, dof)
-        _extract_errors!(errors, cov, free_idx, is_fixed, i)
     end
 
     # Final validity gate: non-finite or non-positive flux after convergence.
@@ -1273,19 +1321,16 @@ function fit_all_stars_simultaneous(
     _render_model!(model_img, psf, free_names_val, fixed, θ, p,
         model_R, anchor_y, anchor_x, ny, nx, trues(n_active), render_buf, render_scratch)
 
-    chisq = zeros(FT, n_stars)
-    qfit = fill(convert(FT, NaN), n_stars)
-    qfit_expected = fill(convert(FT, NaN), n_stars)
-    qfit_z = fill(convert(FT, NaN), n_stars)
-    crowding = fill(convert(FT, NaN), n_stars)
-    spread_model = fill(convert(FT, NaN), n_stars)
-    spread_model_err = fill(convert(FT, NaN), n_stars)
+    diag = _diagnostic_sinks(FT, n_stars)
 
     global_resid = data .- model_img
     resid_mat = reshape(global_resid, ny, nx)
     # Small per-star model-render buffer for the diagnostics, reused across
-    # stars.  A ±fit_rad box spans at most 2*ceil(fit_rad)+2 pixels per axis.
-    S_max = 2 * ceil(Int, fit_rad) + 2
+    # stars.  The diagnostics box is the fit's own `anchor +- R_fit`, so exactly
+    # this wide.  `dy_off` is the stamp footprint `_build_stamps!` laid out, so
+    # taking `R_fit` from it keeps the two from drifting apart.
+    R_fit = maximum(dy_off)
+    S_max = 2 * R_fit + 1
     model_stamp = Matrix{FT}(undef, S_max, S_max)
     # spread_model reference: one field-constant exponential-disk kernel + a
     # reused buffer for the per-star PSF-convolved-with-disk stamp.
@@ -1300,32 +1345,16 @@ function fit_all_stars_simultaneous(
     for (j, i) in enumerate(active)
         valid[i] || continue
         m = PSF.model_from_vector(psf, free_names_val, view(θ, (j - 1) * p + 1:j * p), fixed)
-        FT_fit = FT(fit_rad)
-        yr = floor(Int, m.y - FT_fit):ceil(Int, m.y + FT_fit)
-        xr = floor(Int, m.x - FT_fit):ceil(Int, m.x + FT_fit)
-        yr, xr = _clamp_inds(yr, xr, image)
+        # Use the box the fit actually used.
+        ay, ax = anchor_y[j], anchor_x[j]
+        yr, xr = _clamp_inds((ay - R_fit):(ay + R_fit), (ax - R_fit):(ax + R_fit), image)
         (isempty(yr) || isempty(xr)) && continue
         ms = PSF.render!(model_stamp, m, yr, xr)
         resid_stamp = view(resid_mat, yr, xr)
         ivv = inv_var === nothing ? nothing : view(inv_var, yr, xr)
         gs = spread_kernel === nothing ? nothing :
             correlate!(view(g_stamp, axes(ms)...), ms, spread_kernel, :zero)
-        _star_diagnostics!(qfit, qfit_expected, qfit_z, crowding,
-            spread_model, spread_model_err, i, m,
-            view(image, yr, xr), resid_stamp, ms, gs, ivv, p)
-        num = zero(FT)
-        n_pix_good = 0
-        for k in CartesianIndices(resid_stamp)
-            iv = ivv !== nothing ? ivv[k] : one(FT)
-            if isfinite(iv) && iv > 0
-                num += iv * resid_stamp[k]^2
-                n_pix_good += 1
-            end
-        end
-        den = n_pix_good - p
-        if den > 0
-            chisq[i] = num / den
-        end
+        _star_diagnostics!(diag, i, m, view(image, yr, xr), resid_stamp, ms, gs, ivv, p)
     end
 
     residual = reshape(global_resid, ny, nx)
@@ -1357,21 +1386,22 @@ function fit_all_stars_simultaneous(
 
     return MultiPassPhotResult(
         y, x, y_err, x_err, flux, flux_err, bkg, bkg_err,
-        converged, valid, chisq, qfit, qfit_expected, qfit_z, crowding,
-        spread_model, spread_model_err, n_iter, n_run, n_failed, failure_msgs, residual,
+        converged, valid, diag.chisq, diag.qfit, diag.qfit_expected, diag.qfit_z,
+        diag.crowding, diag.spread_model, diag.spread_model_err,
+        n_iter, n_run, n_failed, failure_msgs, residual, NamedTuple[],
     )
 end
 
 function _empty_simultaneous_result(n_stars, params, errors, row_y, row_x, row_flux, row_bkg, valid, failure_msgs, FT, ny, nx)
     bkg = row_bkg === nothing ? zeros(FT, n_stars) : params[row_bkg, :]
     bkg_err = row_bkg === nothing ? zeros(FT, n_stars) : errors[row_bkg, :]
+    diag = _diagnostic_sinks(FT, n_stars)
     return MultiPassPhotResult(
         params[row_y, :], params[row_x, :], errors[row_y, :], errors[row_x, :],
         params[row_flux, :], errors[row_flux, :], bkg, bkg_err,
-        falses(n_stars), valid, zeros(FT, n_stars),
-        fill(convert(FT, NaN), n_stars), fill(convert(FT, NaN), n_stars),
-        fill(convert(FT, NaN), n_stars), fill(convert(FT, NaN), n_stars),
-        fill(convert(FT, NaN), n_stars), fill(convert(FT, NaN), n_stars),
+        falses(n_stars), valid, diag.chisq, diag.qfit, diag.qfit_expected, diag.qfit_z,
+        diag.crowding, diag.spread_model, diag.spread_model_err,
         zeros(Int, n_stars), Int(0), n_stars, failure_msgs, zeros(FT, ny, nx),
+        NamedTuple[],
     )
 end

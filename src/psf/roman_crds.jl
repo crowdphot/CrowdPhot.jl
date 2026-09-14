@@ -26,7 +26,7 @@ the same `is_old_format` heuristic as `romancal`'s `get_gridded_psf_model`.
 See the package documentation for the full normalization discussion.
 
 `pixel_integration` selects how that convolution is discretized, and is
-forwarded to [`pixel_response_kernel`](@ref):
+forwarded to [`PSF.pixel_response_kernel`](@ref):
 
 - `:exact` (default) integrates over the pixel exactly, matching the
   continuous-pixel convolution GalSim applies when `romanisim` renders a

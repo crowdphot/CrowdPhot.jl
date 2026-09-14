@@ -10,7 +10,7 @@ using StaticArrays: SA, SVector, MMatrix
 using Statistics: median, mean, quantile, std
 
 export AbstractPSFModel, AiryPSF, CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, GaussianPRF, CircularMoffatPSF, MoffatPSF, ImagePSF, GriddedPSFModel, roman_crds_gridded_epsf
-export evaluate, evaluate_fg, centroid, integral, render, peak, amplitude, effective_area, fit_star, fit_psf
+export evaluate, evaluate_fg, centroid, integral, render, peak, amplitude, effective_area, effective_fwhm, fit_star, fit_psf
 export LMResult, MADScale, FixedScale, MScale, estimate_scale, TukeyLoss, weight, KnownWeightsCovarianceEstimator, ReweightedCovarianceEstimator
 
 """AbstractPSFModel{T}: Abstract type for PSF models with element type `T`. All PSF models should be subtypes of this abstract type, and implement the following methods:"""
@@ -174,7 +174,30 @@ the maximum likelihood estimate of the flux is
 where `D_i` is the observed data, `B_i` is the background, and `P_i` is the PSF
 value at pixel `i`. The variance of the flux measurement is `var(\hat{F}) = σ² * effective_area(P)`.
 """
-function effective_area(model::AbstractPSFModel) end
+function effective_area(model::AbstractPSFModel)
+    return effective_area(render(ConstructionBase.setproperties(model, (; bkg = zero(eltype(model))))))
+end
+
+"""
+    effective_area(image::AbstractMatrix)
+
+Effective area `sum(image)^2 / sum(abs2, image)` of a rendered PSF.  `image`
+must not contain a background pedestal, which does not cancel from the ratio.
+"""
+effective_area(image::AbstractMatrix) = sum(image)^2 / sum(abs2, image)
+
+"""
+    effective_fwhm(x)
+
+FWHM of the Gaussian with the same [`effective_area`](@ref) as `x`, which may be
+a PSF model, a rendered image, or an effective area.  Exact for a Gaussian, a
+width proxy for anything else.
+"""
+effective_fwhm(x::Union{AbstractPSFModel, AbstractMatrix}) = effective_fwhm(effective_area(x))
+function effective_fwhm(area::Real)
+    T = float(typeof(area))
+    return sqrt(T(area) * 2 * log(T(2)) / T(π))
+end
 
 """
     fwhm(model::AbstractPSFModel{T}) → (y_fwhm::T, x_fwhm::T)
@@ -588,19 +611,24 @@ function _pixel_response_box(n::Integer)
     return [clamp(min(c + 0.5, half) - max(c - 0.5, -half), 0, Inf) / n for c in centers]
 end
 
-# 1D marginal of the `:exact` kernel; see `pixel_response_kernel`.  The ideal
-# taps are the unit-bandwidth sinc integrated over the box,
+# 1D marginal of the `:exact` kernel; see `pixel_response_kernel`.
+# For a band-limited signal, sinc interpolation allows exact continuous
+# reconstruction from its samples. A pixel does not measure that continuous
+# signal at a single point, it averages over the pixel's finite
+# width. Therefore the ideal discrete kernel is obtained by integrating the
+# unit-bandwidth sinc over the pixel-width box. This gives
 # h[k] = (Si(pi*(k + n/2)) - Si(pi*(k - n/2))) / (pi*n), which is the inverse
 # DTFT of sinc(n f).  They decay only as 1/k, so truncation alone would ring;
-# the Hann window suppresses that at negligible cost in the passband.
+# the Hann window suppresses ringing by tapering towards zero at the edges.  
 # `halfwidth = 4n` is converged: doubling it changes a rendered Roman ePSF by
 # < 0.001% rms.
 function _pixel_response_exact(n::Integer, halfwidth::Integer)
     halfwidth > 0 || throw(ArgumentError("`halfwidth` must be positive (got $halfwidth)"))
     k = -halfwidth:halfwidth
-    h = [(sinint(pi * (j + n / 2)) - sinint(pi * (j - n / 2))) / (pi * n) for j in k]
-    h .*= (1 .+ cos.(pi .* k ./ (halfwidth + 1))) ./ 2
-    return h ./ sum(h)
+    h = @. (sinint(π * (k + n / 2)) - sinint(π * (k - n / 2))) / (π * n)
+    @. h *= (1 + cos(π * k / (halfwidth + 1))) / 2
+    h ./= sum(h)
+    return h
 end
 
 include("parametric_models.jl")

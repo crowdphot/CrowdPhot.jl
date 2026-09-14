@@ -164,7 +164,7 @@ mf_morph = ConstructionBase.setproperties(mf, (inv_var = inv_var,))
 We feed the matched-filter result to
 [`measure_star_shapes`](@ref), which extracts a cutout around each peak,
 computes sub-pixel centroids via [`centroid_poly`](@ref), and measures
-aperture-based FWHM, roundness, moment normalization, and rectangular
+aperture-based FWHM, ellipticity components, moment normalization, and rectangular
 aperture-sum diagnostics via [`measure_star_shape`](@ref).
 
 Moment-based statistics can be biased if the cutout includes many
@@ -180,14 +180,15 @@ keys(results[1])
 
 ### Flux Diagnostics
 
-At this point in processing we have two quick flux diagnostics. The
-`matched_filter_flux` is the amplitude of the PSF template at the detected
-peak; it is intended to estimate the source flux when the source matches the
-detection kernel and the local background is handled by the zero-sum filter.
+At this point in processing we have two quick flux diagnostics. The `flux`
+field holds the best estimate available at this stage, which at detection time
+is the matched-filter amplitude of the PSF template at the detected peak; it is
+intended to estimate the source flux when the source matches the detection
+kernel and the local background is handled by the zero-sum filter.
 It is not a full PSF fit, so blends, PSF mismatch, and structured backgrounds
 can bias it.
 
-The `morphology.aperture_sum` is the unweighted sum of `image - background`
+The `aperture.aperture_sum` is the unweighted sum of `image - background`
 over the small rectangular cutout used for shape measurement. It is useful
 because it is simple and tied to exactly the pixels used for the morphology,
 but it is not a robust circular aperture measurement. We have not performed
@@ -198,16 +199,16 @@ a PSF model.
 # Compute instrumental magnitudes from the rectangular count-rate aperture sum,
 # excluding stars with negative aperture sums.
 inst_mag = [
-    r.morphology.aperture_sum > 0 ?
-        -2.5 * log10(r.morphology.aperture_sum) :
+    r.aperture.aperture_sum > 0 ?
+        -2.5 * log10(r.aperture.aperture_sum) :
         NaN
     for r in results
 ]
 
 # Compute instrumental magnitudes from the matched-filter flux estimate.
 mf_inst_mag = [
-    r.matched_filter_flux > 0 ?
-        -2.5 * log10(r.matched_filter_flux) :
+    r.flux > 0 ?
+        -2.5 * log10(r.flux) :
         NaN
     for r in results
 ]
@@ -215,11 +216,11 @@ mf_inst_mag = [
 # Filter to sources with valid measurements
 good = findall(eachindex(results)) do i
     r = results[i]
-    r.morphology.fwhm.y > 0 &&
-    r.morphology.fwhm.x > 0 &&
+    r.aperture.fwhm.y > 0 &&
+    r.aperture.fwhm.x > 0 &&
     isfinite(r.core.compactness_core) &&
     isfinite(r.core.normalized_curvature) &&
-    r.morphology.moment_norm > 0 &&
+    r.aperture.moment_norm > 0 &&
     isfinite(inst_mag[i]) &&
     isfinite(mf_inst_mag[i])
 end
@@ -265,17 +266,18 @@ using Statistics
 mags = aperture_mags .- 0.4
 
 # Unpack data from `results`, which has array-of-structs layout
-fwhm_y  = [results[i].morphology.fwhm.y for i in good]
-fwhm_x  = [results[i].morphology.fwhm.x for i in good]
-fwhm_theta = [results[i].morphology.fwhm.theta for i in good]
-round1 = [results[i].morphology.roundness1_aperture for i in good]
-round2 = [results[i].morphology.roundness2_aperture for i in good]
-round1_core = [results[i].core.roundness1_core for i in good]
-round2_core = [results[i].core.roundness2_core for i in good]
+fwhm_y  = [results[i].aperture.fwhm.y for i in good]
+fwhm_x  = [results[i].aperture.fwhm.x for i in good]
+fwhm_theta = [results[i].aperture.fwhm.theta for i in good]
+e1 = [results[i].aperture.ellipticity1_aperture for i in good]
+e2 = [results[i].aperture.ellipticity2_aperture for i in good]
+e1_core = [results[i].core.ellipticity1_core for i in good]
+e2_core = [results[i].core.ellipticity2_core for i in good]
 compactness = [results[i].core.compactness_core for i in good]
 normalized_curvature = [results[i].core.normalized_curvature for i in good]
+sharpness = [results[i].sharpness for i in good]
 sig    = [results[i].significance for i in good]
-mf_flux = [results[i].matched_filter_flux for i in good]
+mf_flux = [results[i].flux for i in good]
 
 fig = Figure(size = (900, 1250))
 
@@ -291,24 +293,27 @@ ax2 = Axis(fig[1, 3]; xlabel = "Small-aperture ST magnitude",
 h2 = hexbin!(ax2, mags, fwhm_x; bins = 80)
 Colorbar(fig[1, 4], h2; label = "Counts")
 
-# Panel 3: roundness1 (SROUND) vs magnitude
+# Panel 3: e1 (axis-aligned ellipticity component) vs magnitude
 ax3 = Axis(fig[2, 1]; xlabel = "Small-aperture ST magnitude",
-           ylabel = "roundness1", title = "roundness1_aperture (SROUND)")
-h3 = hexbin!(ax3, mags, round1; bins = 80)
+           ylabel = "e1", title = "ellipticity1_aperture")
+scatter!(ax3, mags, e1; markersize = 2, color = :black, rasterize = true)
+h3 = hexbin!(ax3, mags, e1; bins = 80, threshold = 100, colorscale = log10)
 Colorbar(fig[2, 2], h3; label = "Counts")
 
-# Panel 4: roundness2 (GROUND) vs magnitude
+# Panel 4: e2 (45-degree ellipticity component) vs magnitude
 ax4 = Axis(fig[2, 3]; xlabel = "Small-aperture ST magnitude",
-           ylabel = "roundness2", title = "roundness2_aperture (GROUND)")
-h4 = hexbin!(ax4, mags, round2; bins = 80)
+           ylabel = "e2", title = "ellipticity2_aperture")
+scatter!(ax4, mags, e2; markersize = 2, color = :black, rasterize = true)
+h4 = hexbin!(ax4, mags, e2; bins = 80, threshold = 100, colorscale = log10)
 Colorbar(fig[2, 4], h4; label = "Counts")
 
 # Panel 5: normalized curvature vs magnitude
 ax5 = Axis(fig[3, 1]; xlabel = "Small-aperture ST magnitude",
            ylabel = "normalized curvature", title = "Normalized Core Curvature (2/FWHM²) / I_0")
-ylims!(ax5, -1, 3)
-idxs = findall(x -> -10 < x < 10, normalized_curvature)
-h5 = hexbin!(ax5, mags[idxs], normalized_curvature[idxs]; bins = 80, colorscale=log10)
+ylims!(ax5, -2, 10)
+idxs = findall(x -> -2 < x < 10, normalized_curvature)
+scatter!(ax5, mags[idxs], normalized_curvature[idxs]; markersize = 2, color = :black, rasterize = true)
+h5 = hexbin!(ax5, mags[idxs], normalized_curvature[idxs]; bins = 80, colorscale=log10, threshold = 100)
 Colorbar(fig[3, 2], h5; label = "Counts")
 
 # Panel 6: compactness vs magnitude
@@ -316,21 +321,26 @@ ax6 = Axis(fig[3, 3]; xlabel = "Small-aperture ST magnitude",
            ylabel = "compactness", title = "Compactness 1 / (σ_x² + σ_y²)")
 ylims!(ax6, 0, 10)
 idxs = findall(x -> 0 < x < 10, compactness)
-h6 = hexbin!(ax6, mags[idxs], compactness[idxs]; bins = 80, colorscale=log10)
+scatter!(ax6, mags[idxs], compactness[idxs]; markersize = 2, color = :black, rasterize = true)
+h6 = hexbin!(ax6, mags[idxs], compactness[idxs]; bins = 80, colorscale=log10, threshold = 100)
 Colorbar(fig[3, 4], h6; label = "Counts")
 
-# Panel 7: Core SROUND vs Aperture SROUND
-ax7 = Axis(fig[4, 1]; xlabel = "roundness1 aperture",
-           ylabel = "roundness1 core", title = "Core vs Aperture roundness1 (SROUND)",
-           limits = ((-2, 2), (-2, 2)))
-h7 = hexbin!(ax7, round1, round1_core; bins = 80, colorscale=log10)
+# Panel 7: Core vs Aperture e1
+ax7 = Axis(fig[4, 1]; xlabel = "e1 aperture",
+           ylabel = "e1 core", title = "Core vs Aperture e1",
+           limits = ((-1, 1), (-1, 1)))
+idxs = findall( (-1 .< e1) .& (e1 .< 1) .& (-1 .< e1_core) .& (e1_core .< 1) )
+scatter!(ax7, e1[idxs], e1_core[idxs]; markersize = 2, color = :black, rasterize = true)
+h7 = hexbin!(ax7, e1[idxs], e1_core[idxs]; bins = 80, colorscale=log10, threshold = 100)
 Colorbar(fig[4, 2], h7; label = "Counts")
 
-# Panel 8: Core GROUND vs Aperture GROUND
-ax8 = Axis(fig[4, 3]; xlabel = "roundness2 aperture",
-           ylabel = "roundness2 core", title = "Core vs Aperture roundness2 (GROUND)",
-           limits = ((-2, 2), (-2, 2)))
-h8 = hexbin!(ax8, round2, round2_core; bins = 80, colorscale=log10)
+# Panel 8: Core vs Aperture e2
+ax8 = Axis(fig[4, 3]; xlabel = "e2 aperture",
+           ylabel = "e2 core", title = "Core vs Aperture e2",
+           limits = ((-1, 1), (-1, 1)))
+idxs = findall( (-1 .< e2) .& (e2 .< 1) .& (-1 .< e2_core) .& (e2_core .< 1) )
+scatter!(ax8, e2[idxs], e2_core[idxs]; markersize = 2, color = :black, rasterize = true)
+h8 = hexbin!(ax8, e2[idxs], e2_core[idxs]; bins = 80, colorscale=log10, threshold = 100)
 Colorbar(fig[4, 4], h8; label = "Counts")
 
 # Panel 9: median FWHM per magnitude bin
@@ -351,6 +361,17 @@ scatterlines!(ax9, mag_centers, med_fwhm_y; label = "y", color = :blue)
 scatterlines!(ax9, mag_centers, med_fwhm_x; label = "x", color = :red)
 axislegend(ax9; position = :rt)
 
+# Panel 10: DAOPHOT SHARP vs magnitude.  Raw peak minus the mean of its
+# kernel-footprint neighbors, divided by the source's fitted central height.
+# Large for cosmic rays and hot pixels, small for blends and resolved
+# sources, tightly clustered for stars.
+ax10 = Axis(fig[5, 3]; xlabel = "Small-aperture ST magnitude",
+            ylabel = "sharpness", title = "SHARP (DAOPHOT)")
+ylims!(ax10, -1, 3)
+idxs = findall(x -> -1 < x < 3, sharpness)
+scatter!(ax10, mags[idxs], sharpness[idxs]; markersize = 2, color = :black, rasterize = true)
+h10 = hexbin!(ax10, mags[idxs], sharpness[idxs]; bins = 80, colorscale = log10, threshold = 100)
+Colorbar(fig[5, 4], h10; label = "Counts")
 
 fig
 ```
@@ -362,7 +383,7 @@ We select stars suitable for PSF fitting with
 the instrumental-magnitude distribution to exclude very bright (potentially
 saturated) and very faint stars, applies a hard constraint on normalized
 core curvature, and then sigma-clips morphological parameters
-(`fwhm.y`, `fwhm.x`, `roundness1_aperture`, `roundness2_aperture`,
+(`fwhm.y`, `fwhm.x`, `ellipticity1_aperture`, `ellipticity2_aperture`,
 `normalized_curvature`) within five instrumental-magnitude bins.
 
 ```@example hst-drc
@@ -568,7 +589,7 @@ region_sources = results[region_idx]
 println("$(length(region_sources)) sources in the display region")
 
 # Run single-pass PSF-fitting photometry
-phot_result = fit_all_stars(img_sub_f64, psf, region_sources, 2;
+phot_result = fit_all_stars(img_sub_f64, psf, region_sources, 3;
     n_passes = 1, inv_var, fixed = (; bkg = 0.0))
 
 n_good = sum(phot_result.valid)

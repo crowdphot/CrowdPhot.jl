@@ -1,4 +1,4 @@
-using CrowdPhot.PSF: CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, GaussianPRF, CircularMoffatPSF, MoffatPSF, evaluate, centroid, integral, evaluate_fg, evaluate_fgh, AbstractPSFModel, extent, render, theta, amplitude, background, fwhm, peak, effective_area, AiryPSF, ImagePSF, GriddedPSFModel, add_star!, subtract_star!, render!
+using CrowdPhot.PSF: CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, GaussianPRF, CircularMoffatPSF, MoffatPSF, evaluate, centroid, integral, evaluate_fg, evaluate_fgh, AbstractPSFModel, extent, render, theta, amplitude, background, fwhm, peak, effective_area, effective_fwhm, AiryPSF, ImagePSF, GriddedPSFModel, add_star!, subtract_star!, render!
 import ConstructionBase
 using Test
 
@@ -100,7 +100,15 @@ function test_common(model::AbstractPSFModel{T}) where {T}
     @test @inferred(peak(model)) isa T
     @test @inferred(amplitude(model)) isa T
     @test @inferred(background(model)) isa T
-    # @test effective_area(model) isa T # no generic method yet
+    ea = @inferred effective_area(model)
+    @test ea isa T
+    @test ea > 0
+    # The model method and the scalar method must agree, and both must preserve
+    # the model's float type (this loop runs Float32 models too).
+    @test @inferred(effective_fwhm(model)) isa T
+    @test @inferred(effective_fwhm(ea)) isa T
+    @test effective_fwhm(model) ≈ effective_fwhm(ea)
+    @test effective_fwhm(ea) > 0
     # @test fwhm(model) isa T # no generic method yet
     return @test @inferred(theta(model)) isa T
 end
@@ -290,7 +298,9 @@ end
     @test centroid(m) == (0.0, 0.0)
     @test integral(m) == 1.0
     @test fwhm(m) == (10.0, 10.0)
-    @test effective_area(m) ≈ 226.6180070913597 rtol = 1.0e-6
+    # Larger than the CircularGaussianPSF value (226.618...) because the PRF is
+    # pixel-integrated, which broadens the profile.
+    @test effective_area(m) ≈ 227.66592874914255 rtol = 1.0e-6
     @test background(m) == 10.0
     @test peak(m) ≈ amplitude(m) + background(m)
     @test theta(m) == 0.0
@@ -315,7 +325,8 @@ end
     @test centroid(m) == (0.0, 0.0)
     @test integral(m) == 1.0
     @test fwhm(m) == (6.0, 10.0)
-    @test effective_area(m) ≈ 135.9708042548158 rtol = 1.0e-6
+    # Larger than the GaussianPSF value (135.970...): pixel integration.
+    @test effective_area(m) ≈ 137.15649102556438 rtol = 1.0e-6
     @test background(m) == 10.0
     @test peak(m) ≈ amplitude(m) + background(m)
     @test theta(m) == 55.0
@@ -425,4 +436,84 @@ end
             end
         end
     end
+end
+
+@testset "effective_area / effective_fwhm" begin
+    # Exact for a Gaussian, via the analytic `effective_area` method.
+    for fw in (2.0, 3.0, 5.5)
+        @test effective_fwhm(CircularGaussianPSF(; y = 0.0, x = 0.0, fwhm = fw,
+                                                 flux = 1.0, bkg = 0.0)) ≈ fw rtol = 1e-12
+    end
+
+    # The generic fallback (render -> matrix) must reproduce the analytic value.
+    m = CircularGaussianPSF(; y = 2.4, x = 1.3, fwhm = 3.0, flux = 120.0, bkg = 10.0)
+    @test effective_area(render(ConstructionBase.setproperties(m, (; bkg = 0.0)))) ≈
+          effective_area(m) rtol = 1e-3
+
+    # It must ignore `flux` (cancels from the ratio) and `bkg` (does not, so the
+    # model method has to zero it before rendering).  Checked on a
+    # `GriddedPSFModel`, which has no analytic method and so exercises the
+    # fallback itself.
+    nodes(fw) = [CircularGaussianPRF(; y = gy, x = gx, fwhm = fw, flux = 1.0, bkg = 0.0)
+                 for (gy, gx) in ((0.0, 0.0), (0.0, 10.0), (10.0, 0.0), (10.0, 10.0))]
+    g = GriddedPSFModel(nodes(3.0), [0.0, 0.0, 10.0, 10.0], [0.0, 10.0, 0.0, 10.0];
+                        y = 5.0, x = 5.0, flux = 1.0, bkg = 0.0)
+    @test effective_area(g) ≈ effective_area(ConstructionBase.setproperties(g, (; flux = 1.0e6))) rtol = 1e-12
+    @test effective_area(g) ≈ effective_area(ConstructionBase.setproperties(g, (; bkg = 50.0))) rtol = 1e-12
+    # Above the nominal 3.0 because the nodes are PRFs: the profile is
+    # pixel-integrated and so broader than the underlying Gaussian.  The
+    # render-based fallback and the analytic PRF method now agree on this.
+    @test effective_fwhm(g) ≈ 3.0 rtol = 0.10
+    @test effective_fwhm(g) > 3.0
+    @test effective_area(g) ≈
+          effective_area(CircularGaussianPRF(; y = 0.0, x = 0.0, fwhm = 3.0,
+                                             flux = 1.0, bkg = 0.0)) rtol = 1e-6
+
+    # Spatially varying, non-zero origin: the value has to follow the local PSF,
+    # which is set by `y`/`x` alone.
+    gv = GriddedPSFModel(
+        [CircularGaussianPRF(; y = gy, x = gx, fwhm = fw, flux = 1.0, bkg = 0.0)
+         for ((gy, gx), fw) in zip(((100.0, 100.0), (100.0, 110.0), (110.0, 100.0), (110.0, 110.0)),
+                                   (2.0, 2.0, 6.0, 6.0))],
+        [100.0, 100.0, 110.0, 110.0], [100.0, 110.0, 100.0, 110.0];
+        y = 100.0, x = 105.0, flux = 1.0, bkg = 0.0)
+    lo = effective_fwhm(gv)
+    hi = effective_fwhm(ConstructionBase.setproperties(gv, (; y = 110.0)))
+    @test lo ≈ 2.0 rtol = 0.10       # pixel integration broadens the narrow node most
+    @test hi ≈ 6.0 rtol = 0.10
+    @test hi > lo
+
+    # PRF effective area is the pixel-integrated one, so it exceeds the PSF's,
+    # by more the worse the sampling.  Checked against a direct render, which is
+    # the definition; agreement is exact once the profile is well sampled.
+    for (fw, tol) in ((3.0, 1e-6), (5.0, 1e-7), (10.0, 1e-7))
+        pr = CircularGaussianPRF(; y = 25.0, x = 25.0, fwhm = fw, flux = 1.0, bkg = 0.0)
+        ps = CircularGaussianPSF(; y = 25.0, x = 25.0, fwhm = fw, flux = 1.0, bkg = 0.0)
+        @test effective_area(pr) > effective_area(ps)
+        @test effective_area(pr) ≈ effective_area(render(pr)) rtol = tol
+    end
+    # Broadening grows as sampling degrades: 1.02 at FWHM 5, 1.21 at FWHM 1.5.
+    ratio(fw) = effective_area(CircularGaussianPRF(; y = 0.0, x = 0.0, fwhm = fw, flux = 1.0, bkg = 0.0)) /
+                effective_area(CircularGaussianPSF(; y = 0.0, x = 0.0, fwhm = fw, flux = 1.0, bkg = 0.0))
+    @test ratio(5.0) ≈ 1.0185 rtol = 1e-3
+    @test ratio(1.5) ≈ 1.2111 rtol = 1e-3
+    @test ratio(1.5) > ratio(3.0) > ratio(5.0)
+
+    # GaussianPRF: `det(Σ + I/12)` is rotation invariant, so `theta` drops out.
+    ea_th(th) = effective_area(GaussianPRF(; y = 0.0, x = 0.0, y_fwhm = 3.0, x_fwhm = 5.0,
+                                           theta = th, flux = 1.0, bkg = 0.0))
+    for th in (30.0, 55.0, 90.0)
+        @test ea_th(th) ≈ ea_th(0.0) rtol = 1e-12
+    end
+    # It reduces to the circular case to within the Gaussian-pixel approximation
+    # (the circular method uses the exact form, hence the 1e-3 rather than 1e-12).
+    @test effective_area(GaussianPRF(; y = 0.0, x = 0.0, y_fwhm = 3.0, x_fwhm = 3.0,
+                                     theta = 0.0, flux = 1.0, bkg = 0.0)) ≈
+          effective_area(CircularGaussianPRF(; y = 0.0, x = 0.0, fwhm = 3.0,
+                                             flux = 1.0, bkg = 0.0)) rtol = 1e-3
+
+    # Scalar method: type preserving, and the inverse of the Gaussian relation.
+    @test effective_fwhm(1.0f0) isa Float32
+    @test effective_fwhm(1) isa Float64
+    @test effective_fwhm(pi * 3.0^2 / (2 * log(2))) ≈ 3.0 rtol = 1e-12
 end

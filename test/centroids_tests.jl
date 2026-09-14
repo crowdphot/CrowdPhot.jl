@@ -36,21 +36,21 @@ end
         @test result.poly.peak > 0
     end
 
-    @testset "normalized_curvature, roundness1_core, roundness2_core" begin
+    @testset "normalized_curvature, ellipticity components" begin
         # Wide PSF: low normalized_curvature, nearly circular/symmetric.
         img_wide, _ = _make_star(; fwhm=4.0)
         r_wide = centroid_poly(img_wide)
         @test r_wide.normalized_curvature > 0    # positive for a peak
         @test r_wide.normalized_curvature < 1.0
-        @test r_wide.roundness1_core ≈ 0 atol=1e-10  # SROUND ~0 for symmetric
-        @test r_wide.roundness2_core ≈ 0 atol=1e-10  # GROUND ~0 for circular
+        @test r_wide.ellipticity1_core ≈ 0 atol=1e-10  # circular ⇒ e1 = 0
+        @test r_wide.ellipticity2_core ≈ 0 atol=1e-10  # circular ⇒ e2 = 0
 
         # Narrow PSF: higher normalized_curvature.
         img_narrow, _ = _make_star(; fwhm=1.5)
         r_narrow = centroid_poly(img_narrow)
         @test r_narrow.normalized_curvature > r_wide.normalized_curvature
-        @test r_narrow.roundness1_core ≈ 0 atol=1e-10  # still symmetric
-        @test r_narrow.roundness2_core ≈ 0 atol=1e-10  # still circular
+        @test r_narrow.ellipticity1_core ≈ 0 atol=1e-10  # still circular
+        @test r_narrow.ellipticity2_core ≈ 0 atol=1e-10
     end
 
     @testset "border behaviour" begin
@@ -69,8 +69,8 @@ end
         @test isnan(result.com.y_err)
         @test all(isnan, result.com.cov)
         @test isnan(result.normalized_curvature)
-        @test isnan(result.roundness1_core)
-        @test isnan(result.roundness2_core)
+        @test isnan(result.ellipticity1_core)
+        @test isnan(result.ellipticity2_core)
 
         img2 = [100.0 0.0 0.0; 0.0 0.0 0.0; 0.0 0.0 0.0]
         result2 = centroid_poly(img2)
@@ -304,8 +304,8 @@ end
         @test result3.poly.x > -1e-6
     end
 
-    @testset "roundness1_core masks zero-weighted pixels" begin
-        # Masked neighbor pixels must not influence the SROUND numerator or denominator.
+    @testset "core ellipticity components mask zero-weighted pixels" begin
+        # Masked neighbor pixels must not influence the 3×3 moment tensor.
         patch = [0.1 0.3 0.1;
                  0.3 1.0 0.3;
                  0.1 0.3 0.1]
@@ -316,7 +316,8 @@ end
 
         r_reference = _centroid_poly3(patch, w)
         r_masked = _centroid_poly3(patch_bad, w)
-        @test r_masked.roundness1_core ≈ r_reference.roundness1_core
+        @test r_masked.ellipticity1_core ≈ r_reference.ellipticity1_core
+        @test r_masked.ellipticity2_core ≈ r_reference.ellipticity2_core
     end
 
     @testset "asymmetric GaussianPSF" begin
@@ -412,9 +413,14 @@ end
 
         # Diagnostics computed from background-subtracted values are restored
         # by passing `background`, and biased when the pedestal is left in.
-        for k in (:normalized_curvature, :compactness_core, :roundness2_core,
-                  :ellipticity_core)
+        for k in (:normalized_curvature, :compactness_core)
             @test getproperty(rB, k) ≈ getproperty(r0, k) rtol=1e-9
+        end
+        # The ellipticity components are ~0 for this circular source (1e-17), so
+        # they need an absolute tolerance; `rtol` between two near-zeros is
+        # meaningless.
+        for k in (:ellipticity1_core, :ellipticity2_core)
+            @test getproperty(rB, k) ≈ getproperty(r0, k) atol=1e-9
         end
         @test rB.com.y ≈ r0.com.y rtol=1e-10
         @test rB.com.x ≈ r0.com.x rtol=1e-10
@@ -431,12 +437,14 @@ end
         @test zk.normalized_curvature === z.normalized_curvature
         @test zk.com.x === z.com.x
 
-        # SROUND (non-uniform weights) is also restored by `background`.
+        # The moment-based core ellipticities (non-uniform weights) are also
+        # restored by `background`.
         rng = StableRNG(42)
         w = rand(rng, 9, 9) .+ 0.5
         s0 = centroid_poly(img, w)
         sB = centroid_poly(img .+ B, w; background = B)
-        @test sB.roundness1_core ≈ s0.roundness1_core rtol=1e-9
+        @test sB.ellipticity1_core ≈ s0.ellipticity1_core rtol=1e-9
+        @test sB.ellipticity2_core ≈ s0.ellipticity2_core rtol=1e-9
 
         # Over-subtracted background: COM and compactness are NaN, but the
         # polynomial centroid still succeeds.
@@ -465,5 +473,31 @@ end
         @test rf.poly.peak isa Float32
         @test rf.compactness_core isa Float32
         @inferred centroid_poly(f32; background = 10.0)
+    end
+
+    @testset "normalized_curvature_err" begin
+        base = [0.1 0.3 0.1; 0.3 1.0 0.3; 0.1 0.3 0.1] .* 100
+
+        # The error is linear in the pixel sigma, so a 10x noisier map scales it
+        # by exactly 10.  The statistic itself is invariant to a uniform weight
+        # rescaling only up to Cholesky rounding, hence `≈` rather than `==`.
+        r1 = centroid_poly(base, 2, 2, fill(1.0, 3, 3))
+        r10 = centroid_poly(base, 2, 2, fill(1/100, 3, 3))
+        @test r1.normalized_curvature_err > 0
+        @test isfinite(r1.normalized_curvature_err)
+        @test r10.normalized_curvature ≈ r1.normalized_curvature rtol=1e-12
+        @test r10.normalized_curvature_err / r1.normalized_curvature_err ≈ 10 rtol=1e-12
+
+        # Validated against 200k Monte Carlo realizations at sigma = 0.5, 1 and
+        # 2, which reproduce this to 0.3% (the residual is delta-method bias).
+        @test centroid_poly(base, 2, 2, fill(4.0, 3, 3)).normalized_curvature_err ≈
+              0.0062557 rtol=1e-4
+
+        # Degenerate border peak: NaN alongside the rest of the fit.
+        rb = centroid_poly(base, 1, 1, fill(1.0, 3, 3))
+        @test isnan(rb.normalized_curvature_err)
+
+        @test centroid_poly(Float32.(base), 2, 2,
+                            fill(1.0f0, 3, 3)).normalized_curvature_err isa Float32
     end
 end
