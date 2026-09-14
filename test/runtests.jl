@@ -27,4 +27,5 @@ import CrowdPhot
 @safetestset "Bessel functions" include("bessels.jl")
 @safetestset "Photometry" include("photometry/psf_photometry_single.jl")
 @safetestset "Simultaneous photometry" include("photometry/psf_photometry_simultaneous.jl")
+@safetestset "Multi-pass simultaneous photometry" include("photometry/psf_photometry_simultaneous_multipass.jl")
 @safetestset "Doctests" include("doctests.jl")

@@ -343,11 +343,12 @@ function fit_all_stars(
     # spread_model reference: one field-constant exponential-disk kernel, plus a
     # reused buffer for the per-star PSF-convolved-with-disk stamp.
     spread_fwhm = spread_model_fwhm === nothing ?
-        _spread_fwhm(psf, FT(params[row_y, 1]), FT(params[row_x, 1])) : FT(spread_model_fwhm)
+        FT(PSF.effective_fwhm(ConstructionBase.setproperties(psf,
+            (; y = FT(params[row_y, 1]), x = FT(params[row_x, 1]))))) : FT(spread_model_fwhm)
     # Resolved to tuple form once, which stops `correlate!` re-running its
-    # separability test -- an SVD for a matrix kernel -- on every source.
+    # separability test -- an SVD for a matrix kernel -- on every source
     spread_kernel = isfinite(spread_fwhm) && spread_fwhm > 0 ?
-        _canonicalize(_exp_disk_kernel_bandlimited(spread_fwhm, FT; half = ceil(Int, fit_rad))) : nothing
+        _canonicalize(_exp_disk_kernel_bandlimited(spread_fwhm, FT; half = R_fit)) : nothing
     g_stamp = Matrix{FT}(undef, S_max, S_max)
 
     # -------------------------------------------------------------------
