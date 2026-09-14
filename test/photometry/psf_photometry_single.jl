@@ -55,6 +55,18 @@ end
         @test params[5, :] == [0.0, 0.0]     # bkg (default)
     end
 
+    @testset "measure_star_shapes output" begin
+        # The `Vector{<:NamedTuple}` method reads `centroid.y`/`centroid.x` and
+        # the `flux` field of each element.
+        sources = [(; centroid = (; y = 10.0, x = 30.0), flux = 500.0),
+                   (; centroid = (; y = 20.0, x = 40.0), flux = 600.0)]
+        params, _ = CrowdPhot._extract_source_catalog(sources, psf, Float64)
+        @test params[1, :] == [10.0, 20.0]
+        @test params[2, :] == [30.0, 40.0]
+        @test params[4, :] == [500.0, 600.0]
+        @test params[5, :] == [0.0, 0.0]
+    end
+
     @testset "NamedTuple without optional fields" begin
         sources = (; y=[5.0], x=[15.0])
         params, errors = CrowdPhot._extract_source_catalog(sources, psf, Float64)

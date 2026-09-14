@@ -34,6 +34,16 @@ length (the number of input sources).
 - `failure_msgs::Vector{String}`: first few exception messages from failed fits,
   for diagnosis.  Empty when `n_failed == 0`.
 - `residual::Matrix{T}`: final residual image after all subtractions.
+- `morphology::Vector{<:NamedTuple}`: per-source shape measurements, one entry
+  per source in catalog order, measured on each source's neighbor-subtracted
+  cutout so the moments are not contaminated by its neighbors' light.  See
+  [`measure_star_shapes`](@ref) for the fields.
+
+  !!! note
+      Currently populated only by
+      [`fit_all_stars_simultaneous_multipass`](@ref).  [`fit_all_stars`](@ref)
+      and [`fit_all_stars_simultaneous`](@ref) leave it empty, so check
+      `isempty` rather than assuming one entry per source.
 
 # Goodness-of-fit diagnostics
 - `chisq::Vector{T}`: final reduced χ² for each source.  Uses squared residuals (L2 norm), so a
@@ -119,6 +129,7 @@ struct MultiPassPhotResult{T}
     n_failed::Int
     failure_msgs::Vector{String}
     residual::Matrix{T}
+    morphology::Vector{<:NamedTuple}
 end
 
 # ==============================================================================
@@ -153,13 +164,13 @@ end
 
 Extract initial source parameters from the output of
 [`measure_star_shapes`](@ref).  Uses `centroid.y`, `centroid.x`,
-`matched_filter_flux` as the initial flux guess; `bkg` defaults to zero.
+`flux` as the initial flux guess; `bkg` defaults to zero.
 """
 function _extract_source_catalog(sources::Vector{<:NamedTuple}, psf, ::Type{T}) where {T}
     n = length(sources)
     y  = T[s.centroid.y for s in sources]
     x  = T[s.centroid.x for s in sources]
-    flux = T[s.matched_filter_flux for s in sources]
+    flux = T[s.flux for s in sources]
     bkg = zeros(T, n)
     return _build_params_matrix(psf, (; y, x, flux, bkg), T)
 end
@@ -285,6 +296,8 @@ function fit_all_stars(
     FT = float(T)
     n_passes > 0 || throw(ArgumentError("n_passes must be positive, got $n_passes"))
 
+    # TODO: zero inv_var where !isfinite(image)
+
     # -------------------------------------------------------------------
     # 1. Extract source catalog into contiguous params/errors matrices
     # -------------------------------------------------------------------
@@ -293,6 +306,7 @@ function fit_all_stars(
     n_stars == 0 && return MultiPassPhotResult(
         FT[], FT[], FT[], FT[], FT[], FT[], FT[], FT[],
         falses(0), falses(0), FT[], FT[], FT[], FT[], FT[], FT[], FT[], Int[], Int(0), Int(0), String[], Matrix{FT}(undef, 0, 0),
+        NamedTuple[],
     )
 
     # Map PSF property names to matrix row indices.
@@ -321,10 +335,10 @@ function fit_all_stars(
     # 3. Copy image for progressive subtraction
     # -------------------------------------------------------------------
     residual = Matrix{FT}(image)
+    R_fit = ceil(Int, fit_rad)
     # Small per-star model-render buffer for the final-pass diagnostics, reused
-    # across stars.  A ±fit_rad box spans at most 2*ceil(fit_rad)+2 pixels per
-    # axis (worst case: a star centered on a half-integer coordinate).
-    S_max = 2 * ceil(Int, fit_rad) + 2
+    # across stars.  The fitting box is exactly (2 R_fit + 1)^2 pixels.
+    S_max = 2 * R_fit + 1
     model_stamp = Matrix{FT}(undef, S_max, S_max)
     # spread_model reference: one field-constant exponential-disk kernel, plus a
     # reused buffer for the per-star PSF-convolved-with-disk stamp.
@@ -341,13 +355,13 @@ function fit_all_stars(
     # -------------------------------------------------------------------
     valid = trues(n_stars)
     converged = falses(n_stars)
-    chisq = zeros(FT, n_stars)
-    qfit = fill(convert(FT, NaN), n_stars)
-    qfit_expected = fill(convert(FT, NaN), n_stars)
-    qfit_z = fill(convert(FT, NaN), n_stars)
-    crowding = fill(convert(FT, NaN), n_stars)
-    spread_model = fill(convert(FT, NaN), n_stars)
-    spread_model_err = fill(convert(FT, NaN), n_stars)
+    diag = _diagnostic_sinks(FT, n_stars)
+    # `chisq` comes from the fitter here, not from `_star_diagnostics!`: the LM
+    # solve already reports `cost / dof` over exactly the fitted pixels, and
+    # under IRLS it is rescaled by the final scale estimate, which a plain
+    # residual sum cannot reproduce.  Collected per star and copied over the
+    # sink once the fit loop is done.
+    chisq_fitter = fill(convert(FT, NaN), n_stars)
     n_iter = zeros(Int, n_stars)
     n_failed = 0
     failure_msgs = String[]
@@ -368,12 +382,13 @@ function fit_all_stars(
             all_vals = NamedTuple{Tuple(prop_names)}(ntuple(k -> params[k, idx], Val(n_params)))
             m = ConstructionBase.setproperties(psf, all_vals)
 
-            # Pixel footprint of ±fit_rad around the star center, clamped
-            # to image bounds.
-            FT_fit = FT(fit_rad)
-            yr = floor(Int, m.y - FT_fit):ceil(Int, m.y + FT_fit)
-            xr = floor(Int, m.x - FT_fit):ceil(Int, m.x + FT_fit)
-            yr, xr = _clamp_inds(yr, xr, residual)
+            # Pixel footprint of ±R_fit around the star's anchor pixel, clamped
+            # to image bounds.  Anchoring on the rounded position keeps the box
+            # at exactly (2 R_fit + 1)^2 pixels for every star, so `chisq` and
+            # `qfit` share a degree-of-freedom count that does not vary with
+            # subpixel phase, and matches the box the simultaneous fitters use.
+            ay, ax = round(Int, m.y), round(Int, m.x)
+            yr, xr = _clamp_inds((ay - R_fit):(ay + R_fit), (ax - R_fit):(ax + R_fit), residual)
             length(yr) * length(xr) < 3 && (valid[idx] = false; continue)
             inds = CartesianIndices((yr, xr))
 
@@ -406,7 +421,7 @@ function fit_all_stars(
                 end
 
                 converged[idx] = result.converged
-                chisq[idx] = result.chisq
+                chisq_fitter[idx] = result.chisq
                 n_iter[idx] += result.iterations
 
                 # Subtract the updated best-fit model.
@@ -421,9 +436,8 @@ function fit_all_stars(
                     ivv = inv_var === nothing ? nothing : view(inv_var, yr, xr)
                     gs = spread_kernel === nothing ? nothing :
                         correlate!(view(g_stamp, axes(ms)...), ms, spread_kernel, :zero)
-                    _star_diagnostics!(qfit, qfit_expected, qfit_z, crowding,
-                        spread_model, spread_model_err, idx, best,
-                        view(image, yr, xr), view(residual, yr, xr), ms, gs, ivv, length(free_idx))
+                    _star_diagnostics!(diag, idx, best, view(image, yr, xr),
+                        view(residual, yr, xr), ms, gs, ivv, length(free_idx))
                 end
             catch e
                 # Undo the add-back so the residual stays consistent.
@@ -461,6 +475,10 @@ function fit_all_stars(
     # -------------------------------------------------------------------
     # 6. Assemble result
     # -------------------------------------------------------------------
+    # The fitter's own reduced chi-squared wins over `_star_diagnostics!`'s
+    # residual sum; see where `chisq_fitter` is declared.
+    copyto!(diag.chisq, chisq_fitter)
+
     y = params[row_y, :]
     x = params[row_x, :]
     flux = params[row_flux, :]
@@ -473,7 +491,8 @@ function fit_all_stars(
 
     return MultiPassPhotResult(
         y, x, y_err, x_err, flux, flux_err, bkg, bkg_err,
-        converged, valid, chisq, qfit, qfit_expected, qfit_z, crowding,
-        spread_model, spread_model_err, n_iter, Int(n_passes), n_failed, failure_msgs, residual,
+        converged, valid, diag.chisq, diag.qfit, diag.qfit_expected, diag.qfit_z,
+        diag.crowding, diag.spread_model, diag.spread_model_err,
+        n_iter, Int(n_passes), n_failed, failure_msgs, residual, NamedTuple[],
     )
 end

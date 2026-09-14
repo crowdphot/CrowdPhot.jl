@@ -25,7 +25,7 @@ returned by [`measure_star_shapes`](@ref CrowdPhot.measure_star_shapes).
 The selection proceeds in three stages:
 
 1. **Faint-end magnitude clipping**: instrumental magnitudes are computed
-   from `morphology.aperture_sum` and the faintest stars (above
+   from `aperture.aperture_sum` and the faintest stars (above
    `mag_quantiles[2]`) are excluded.  There is no bright-end clip by
    default -- saturation is detected via the core curvature constraint
    (stage 2), which is independent of brightness and does not discard
@@ -41,7 +41,7 @@ The selection proceeds in three stages:
 3. **Sigma clipping by magnitude bin**: stars are partitioned into `nbins`
    magnitude bins via quantiles, and within each bin sequential
    sigma-clipping is applied to `fwhm.y`, `fwhm.x`,
-   `roundness1_aperture`, `roundness2_aperture`, and
+   `ellipticity1_aperture`, `ellipticity2_aperture`, and
    `normalized_curvature`.  Only stars within `σ_low`--`σ_high` standard
    deviations of the clipped median for each parameter are retained.
 
@@ -81,8 +81,8 @@ function pick_psf_stars(results; mag_quantiles::NTuple{2,<:Number}=(0.0, 0.95), 
     # Stage 1: Instrumental magnitude clipping
     # -----------------------------------------------------------------------
 
-    inst_mags = [r.morphology.aperture_sum > 0 ?
-        -2.5 * log10(r.morphology.aperture_sum) : NaN for r in results]
+    inst_mags = [r.aperture.aperture_sum > 0 ?
+        -2.5 * log10(r.aperture.aperture_sum) : NaN for r in results]
 
     # Keep only finite magnitudes.
     idxs = collect(eachindex(results))
@@ -117,10 +117,10 @@ function pick_psf_stars(results; mag_quantiles::NTuple{2,<:Number}=(0.0, 0.95), 
 
     # Morphological parameters to sigma-clip, in extraction order.
     param_extractors = (
-        r -> r.morphology.fwhm.y,
-        r -> r.morphology.fwhm.x,
-        r -> r.morphology.roundness1_aperture,
-        r -> r.morphology.roundness2_aperture,
+        r -> r.aperture.fwhm.y,
+        r -> r.aperture.fwhm.x,
+        r -> r.aperture.ellipticity1_aperture,
+        r -> r.aperture.ellipticity2_aperture,
         r -> r.core.normalized_curvature,
     )
 
@@ -153,7 +153,7 @@ function pick_psf_stars(results; mag_quantiles::NTuple{2,<:Number}=(0.0, 0.95), 
     end
 
     # Sort by instrumental magnitude so brighter stars appear first.
-    sort!(clipped; by = i -> -2.5 * log10(results[i].morphology.aperture_sum))
+    sort!(clipped; by = i -> -2.5 * log10(results[i].aperture.aperture_sum))
     return clipped
 end
 

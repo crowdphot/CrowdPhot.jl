@@ -27,8 +27,8 @@ The selection proceeds in three stages:
 
 3. **Sigma clipping by magnitude bin.** Stars are partitioned into `nbins`
    instrumental-magnitude bins, and within each bin sequential sigma-clipping
-   is applied to `fwhm.y`, `fwhm.x`, `roundness1_aperture`,
-   `roundness2_aperture`, and `normalized_curvature`.  Only stars within
+   is applied to `fwhm.y`, `fwhm.x`, `ellipticity1_aperture`,
+   `ellipticity2_aperture`, and `normalized_curvature`.  Only stars within
    `σ_low`--`σ_high` standard deviations of the clipped median for each
    parameter are retained.
 

@@ -68,9 +68,7 @@ PSF template.
   calculation.  **The weights should represent background-only error** (e.g.
   ``1 / \\sigma_{\\mathrm{bkg}}^2``); do not include source Poisson noise,
   which would inflate the noise estimate at source positions and reduce
-  detection sensitivity.  Source Poisson noise is correctly added later for
-  morphological measurements via [`calc_total_error`](@ref).  Defaults to
-  `nothing` (uniform weights).
+  detection sensitivity.
 - `normalize_zerosum` controls whether the kernel is renormalized to have
   zero sum, which cancels any uniform background offset in the correlation.
   The default (`true`) is the safe choice and should be used whenever the

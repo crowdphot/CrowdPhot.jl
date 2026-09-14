@@ -231,7 +231,7 @@ Base.@kwdef struct GaussianPSF{T} <: AbstractPSFModel{T}
     end
 end
 peak(model::GaussianPSF{T}) where {T} = model.flux / (π * model.x_fwhm * model.y_fwhm / -T(GAUSS_PRE)) + model.bkg
-effective_area(model::GaussianPSF) = π * model.x_fwhm * model.y_fwhm / (2 * log(2))
+effective_area(model::GaussianPSF{T}) where {T} = π * model.x_fwhm * model.y_fwhm / T(2 * log(2))
 
 function evaluate(model::GaussianPSF{T}, py, px) where {T}
     θ = deg2rad(model.theta)
@@ -458,7 +458,17 @@ end
 # Peak occurs when centroid is exactly at a pixel center: flux * erf(√ln2 / fwhm)² + bkg
 peak(model::CircularGaussianPRF{T}) where {T} =
     model.flux * erf(sqrt(T(log(2))) / model.fwhm)^2 + model.bkg
-effective_area(model::CircularGaussianPRF{T}) where {T} = π * model.fwhm^2 / T(2 * log(2))
+# Unlike the PSF, a PRF is pixel-integrated, and pixel integration broadens the
+# profile: its effective area is therefore *larger* than the underlying
+# Gaussian's `π*fwhm^2/(2log2)`.  Exact rather than approximate: the zero-lag
+# autocorrelation of (Gaussian * pixel) is `N(0, 2σ²)` integrated against the
+# unit triangle, which has a closed form.  Ratio to the Gaussian is 1.02 at
+# FWHM 5, 1.05 at FWHM 3 and 1.21 at FWHM 1.5.
+function effective_area(model::CircularGaussianPRF{T}) where {T}
+    σ = model.fwhm / (2 * sqrt(2 * T(log(2))))
+    a = erf(1 / (2σ)) - (2σ / sqrt(T(π))) * (1 - exp(-1 / (4 * σ^2)))
+    return inv(a * a)
+end
 
 function evaluate(model::CircularGaussianPRF{T}, py, px) where {T}
     α = 2 * sqrt(T(log(2))) / model.fwhm
@@ -568,7 +578,16 @@ end
 # Peak occurs when centroid is at a pixel center: flux * erf(√ln2/x_fwhm) * erf(√ln2/y_fwhm) + bkg
 peak(model::GaussianPRF{T}) where {T} =
     model.flux * erf(sqrt(T(log(2))) / model.x_fwhm) * erf(sqrt(T(log(2))) / model.y_fwhm) + model.bkg
-effective_area(model::GaussianPRF{T}) where {T} = π * model.x_fwhm * model.y_fwhm / T(2 * log(2))
+# Pixel-integrated, so broader than the Gaussian's `π*x_fwhm*y_fwhm/(2log2)`;
+# see `effective_area(::CircularGaussianPRF)`.  A rotated profile against an
+# axis-aligned pixel is not separable, so this uses the Gaussian approximation
+# to the pixel, which adds `1/12` to the variance along each axis (accurate to
+# <0.5% for FWHM >= 1.5).
+function effective_area(model::GaussianPRF{T}) where {T}
+    c = 8 * T(log(2))
+    v = inv(T(12))
+    return 4 * T(π) * sqrt((model.x_fwhm^2 / c + v) * (model.y_fwhm^2 / c + v))
+end
 
 function evaluate(model::GaussianPRF{T}, py, px) where {T}
     c = sqrt(-T(GAUSS_PRE)) # 2 * sqrt(T(log(2)))
@@ -900,7 +919,7 @@ end
 amplitude(model::AiryPSF{T}) where {T} = model.flux / (model.radius / T(AIRY_RZ))^2 * T(π) / 4
 peak(model::AiryPSF) = amplitude(model) + model.bkg
 # 0.919... is 16 ∫ besselj1(u)^4 / u^3 du from 0 to ∞, numerically integrated
-effective_area(model::AiryPSF{T}) where {T} = 8 * (model.radius / AIRY_RZ)^2 / π / T(0.9192407077670396)
+effective_area(model::AiryPSF{T}) where {T} = 8 * (model.radius / T(AIRY_RZ))^2 / π / T(0.9192407077670396)
 function fwhm(model::AiryPSF{T}) where {T}
     _f = T(0.8436659602162364) * model.radius
     return (_f, _f)

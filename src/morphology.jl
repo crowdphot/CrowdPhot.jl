@@ -1,13 +1,21 @@
 # morphology.jl — morphological measurements for stellar image cutouts.
 #
-# Provides `measure_star_shape` for aperture-based FWHM, roundness, and
+# Provides `measure_star_shape` for aperture-based FWHM, ellipticity, and
 # position angle from inverse-variance-weighted second moments.  The
-# 3×3 core sharpness and roundness are available from `centroid_poly`
+# 3×3 core sharpness and ellipticity are available from `centroid_poly`
 # (see centroids.jl).
 
 # ---------------------------------------------------------------------------
 # Internal: raw weighted second moments
 # ---------------------------------------------------------------------------
+
+# TODO: accept two inverse-variance maps -- background-only for the shape and
+# size statistics, which have to stay flux-independent, and total for
+# `aperture_sum_err`.  `aperture_sum` is the only unweighted value computed
+# here, so its variance really is `sum(1/w)` and the total map is exactly right
+# for it.  Every other quantity is a weighted estimator whose uncertainty is
+# tied to its own weights, so correcting those needs a sandwich covariance
+# rather than a second map.
 
 """
     _moments2(image, inv_var, background, y0, x0) -> NamedTuple
@@ -22,7 +30,7 @@ to obtain central moments.
 
 # Returns
 `(; M00, M10, M01, M20, M02, M11, W00, W10, W01, W20, W02, W11,
-    sum2, sum4, aperture_sum, aperture_area, aperture_sum_err)`
+    aperture_sum, aperture_area, aperture_sum_err)`
 where each flux moment is
 ```math
 M_{pq} = \\sum_{y,x} w_{y,x} \\; \\max(0, z_{y,x}) \\; (y - y_0)^p \\; (x - x_0)^q
@@ -35,11 +43,9 @@ Pixels with ``w \\le 0`` are skipped.  If ``M_{00} \\le 0`` (all pixels
 below background or fully masked), `M00 = 0` and higher moments are
 meaningless; the caller should guard against this.
 
-`sum2` and `sum4` are the raw SROUND accumulators (bilateral asymmetry
-and fourfold normalization) computed over all valid pixels with
-``w > 0``, using the reference point ``(y_0, x_0)`` as a proxy for the
-centroid.  The caller must divide ``2\\cdot\\mathrm{sum2}/\\mathrm{sum4}``
-to obtain the SROUND value.
+Because every reported shape statistic is built from *central* moments,
+the choice of reference point ``(y_0, x_0)`` cancels exactly, so passing
+the integer peak pixel introduces no bias.
 
 `aperture_sum` is the unweighted rectangular-cutout sum of
 ``z = \\mathtt{image} - \\mathtt{background}`` over pixels with positive
@@ -73,9 +79,6 @@ function _moments2(
     W20 = zero(FT)
     W02 = zero(FT)
     W11 = zero(FT)
-    # SROUND accumulators (bilateral asymmetry sums).
-    sum2 = zero(FT)
-    sum4 = zero(FT)
     # Unweighted rectangular aperture diagnostics over valid pixels.
     aperture_sum = zero(FT)
     aperture_area = 0
@@ -111,22 +114,9 @@ function _moments2(
         W20 += fw * dy * dy
         W02 += fw * dx * dx
         W11 += fw * dx * dy
-        # SROUND: exclude the central pixel (matching DAOPHOT/photutils).
-        if !(dy == 0 && dx == 0)
-            if dy <= 0 && dx > 0         # top-right + center-right (photutils quad1)
-                sum2 -= wz
-            elseif dy < 0 && dx <= 0     # top-left + top-center (photutils quad2)
-                sum2 += wz
-            elseif dy >= 0 && dx < 0     # bottom-left + center-left (photutils quad3)
-                sum2 -= wz
-            elseif dy > 0 && dx >= 0     # bottom-right + bottom-center (photutils quad4)
-                sum2 += wz
-            end
-            sum4 += abs(wz)
-        end
     end
     return (; M00, M10, M01, M20, M02, M11,
-             W00, W10, W01, W20, W02, W11, sum2, sum4,
+             W00, W10, W01, W20, W02, W11,
              aperture_sum, aperture_area, aperture_sum_err = sqrt(aperture_var))
 end
 
@@ -156,9 +146,16 @@ cutout using inverse-variance-weighted second central moments.
   are excluded from the moment sum.
 - `fwhm_factor::Real`: scale factor from Gaussian σ to FWHM.
   Defaults to ``2\sqrt{2\log 2} \approx 2.35482``.
+- `y_offset::Real = 0`, `x_offset::Real = 0`: origin of `image` in the
+  caller's coordinate frame.  Added to the returned `centroid.y` and
+  `centroid.x`, so a caller working on a cutout extracted at
+  `image[y_start:y_end, x_start:x_end]` passes `y_offset = y_start - 1`,
+  `x_offset = x_start - 1` and gets results in the original image's
+  coordinates.  Uncertainties, covariances, and all shape statistics are
+  translation-invariant and unaffected.
 
 # Returns
-`(; fwhm, roundness1_aperture, roundness2_aperture, ellipticity_aperture,
+`(; fwhm, ellipticity1_aperture, ellipticity2_aperture,
     compactness_aperture, moment_norm, aperture_sum, aperture_area,
     aperture_sum_err, centroid)` where
 
@@ -169,23 +166,16 @@ cutout using inverse-variance-weighted second central moments.
   measured counter-clockwise from the ``+x``-axis (column direction).
   ``\theta = 0`` means the major axis is aligned with columns;
   positive ``\theta`` rotates toward rows.
-- `roundness1_aperture::T`: DAOPHOT SROUND / photutils `roundness1`
-  over the full cutout: ``2\cdot\Sigma_2/\Sigma_4`` where
-  ``\Sigma_2`` is the weighted bilateral asymmetry and ``\Sigma_4``
-  the weighted fourfold normalization.
-  0 = symmetric, nonzero = asymmetric.
-- `roundness2_aperture::T`: DAOPHOT GROUND / photutils `roundness2`
-  convention: ``2(\sqrt{\sigma^2_{yy}} - \sqrt{\sigma^2_{xx}})/(\sqrt{\sigma^2_{yy}} + \sqrt{\sigma^2_{xx}})``.
-  0 = circular, negative = extended in x (columns),
-  positive = extended in y (rows).
-- `ellipticity_aperture::T`: rotationally invariant ellipticity
-  ``1 - \sqrt{\lambda_\mathrm{min}/\lambda_\mathrm{max}}``, where
-  ``\lambda_\mathrm{min} \le \lambda_\mathrm{max}`` are the eigenvalues of
-  the second-moment covariance ``\begin{bmatrix}\sigma^2_{yy} & \sigma^2_{xy}\\ \sigma^2_{xy} & \sigma^2_{xx}\end{bmatrix}``.
-  ``0`` for a circular source, approaching ``1`` as the source becomes
-  highly elongated.  Unlike `roundness2_aperture`, which compares
-  axis-aligned marginals, this registers elongation at any position
-  angle.  `NaN` when the covariance is not positive definite.
+- `ellipticity1_aperture::T`, `ellipticity2_aperture::T`: the two
+  normalized quadrupole (ellipticity) components of the second-moment
+  covariance,
+  ``e_1 = (\sigma^2_{yy} - \sigma^2_{xx})/(\sigma^2_{yy} + \sigma^2_{xx})``
+  and ``e_2 = 2\sigma^2_{xy}/(\sigma^2_{yy} + \sigma^2_{xx})``.
+  Both are ``0`` for a circular source.  ``e_1 > 0`` is extended in ``y``
+  (rows) and ``e_1 < 0`` extended in ``x`` (columns); ``e_2 > 0`` is
+  extended along the
+  ``+45°`` diagonal.  `NaN` when
+  ``\sigma^2_{yy} + \sigma^2_{xx} \le 0``.
 - `compactness_aperture::T`: inverse total second central moment
   ``1/(\sigma^2_{yy} + \sigma^2_{xx})``.  Proportional to
   ``1/\mathrm{FWHM}^2`` for a Gaussian; larger for more compact profiles.
@@ -201,13 +191,40 @@ cutout using inverse-variance-weighted second central moments.
 - `centroid::NamedTuple (; y, x, y_err, x_err, cov)`: center-of-mass
   centroid, 1-σ uncertainties, and 2×2 `SMatrix` covariance.
 
+  !!! note "Ellipticity"
+      The ellipticity ``1 - b/a = 1 - \sqrt{(1-|e|)/(1+|e|)}`` with ``|e| = \sqrt{e_1^2 + e_2^2}``,
+      with position angle
+      ``\theta = \tfrac{1}{2}\arctan(e_2, -e_1)``, is a one-liner from the
+      pair above and is deliberately not returned.  It rectifies: component
+      scatter cannot cancel, so noise and residual
+      sub-pixel phase both push it up and never down, and a round source has a positive
+      expectation of order ``\\sigma\\sqrt{\\pi/2}`` in the component
+      error.  It is also the one
+      shape statistic that cannot be corrected against a PSF model from its
+      own value, because the magnitude does not commute with the subtraction:
+      the correction has to be applied to ``e_1`` and ``e_2`` *before*
+      taking the magnitude.
+
 If ``M_{00} \le 0`` (all pixels at or below background), shape and
 centroid fields are `NaN`; aperture-sum diagnostics are still reported.
 If ``\sigma^2_{yy} \le 0`` or ``\sigma^2_{xx} \le 0``
 (the distribution has no measurable width, e.g. a single bright pixel),
-`fwhm.y` and `fwhm.x` are `NaN`, `roundness2_aperture` is `0`
-(the denominator vanishes → degenerate, treated as isotropic), and
-`ellipticity_aperture` and `compactness_aperture` are `NaN`.
+`fwhm.y` and `fwhm.x` are `NaN`, and `ellipticity1_aperture`,
+`ellipticity2_aperture` and `compactness_aperture` are `NaN`.
+
+!!! note "Robustness to sub-pixel phase"
+    Every shape statistic here is a ratio of linear moment sums taken
+    about the center of mass, so the integer reference point `(y0, x0)`
+    cancels identically and a sub-pixel shift of the source is suppressed
+    exponentially in the sampling ratio (roughly ``e^{-2\pi^2\sigma^2}``
+    with ``\sigma`` the profile width in pixels).  Measured on noiseless
+    round sources scanned over all sub-pixel phases, the fractional
+    scatter of `fwhm`, `compactness_aperture`, `ellipticity1_aperture`
+    and `ellipticity2_aperture` is ``\sim 1\%`` at
+    FWHM 1.2 px, ``2\times10^{-4}`` at FWHM 1.6 px, and below ``10^{-6}``
+    at FWHM 2 px and above.  The residual comes from the hard rectangular
+    cutout, whose edges move relative to the source; it is larger for a
+    PSF with power-law wings than for a Gaussian.
 
 # Examples
 ```jldoctest
@@ -237,6 +254,8 @@ function measure_star_shape(
         inv_var::AbstractMatrix = Fill(one(float(T)), size(image)),
         background::Real = zero(float(T)),
         fwhm_factor::Real = 2.3548200450309493,
+        y_offset::Real = 0,
+        x_offset::Real = 0,
     ) where {T}
     FT = float(T)
 
@@ -246,8 +265,8 @@ function measure_star_shape(
     if FT_M00 <= zero(FT)
         n = FT(NaN)
         return (; fwhm = (; y = n, x = n, theta = n),
-                 roundness1_aperture = n, roundness2_aperture = n,
-                 ellipticity_aperture = n, compactness_aperture = n,
+                 ellipticity1_aperture = n, ellipticity2_aperture = n,
+                 compactness_aperture = n,
                  moment_norm = FT_M00,
                  aperture_sum = FT(mom.aperture_sum),
                  aperture_area = mom.aperture_area,
@@ -286,43 +305,27 @@ function measure_star_shape(
         theta = FT(rad2deg(atan(num, den) / 2))
     end
 
-    fwhm_cen = FT(y0) + μ_y
-    fwhm_cen_x = FT(x0) + μ_x
+    # `*_offset` shifts the cutout's origin into the caller's frame so no
+    # caller has to translate the result.
+    fwhm_cen = FT(y0) + FT(y_offset) + μ_y
+    fwhm_cen_x = FT(x0) + FT(x_offset) + μ_x
 
-    # roundness1_aperture: SROUND from the sums accumulated in _moments2.
-    # Uses the reference point (y0,x0) as a proxy for the centroid; the
-    # error from the centroid offset is negligible for well-centered cutouts.
-    roundness1_aperture = if mom.sum4 > eps(FT)
-        2 * FT(mom.sum2) / FT(mom.sum4)
-    else
-        zero(FT)
-    end
-
-    # roundness2_aperture in the DAOPHOT GROUND / photutils roundness2
-    # convention: 0 = circular, negative = extended in x, positive =
-    # extended in y.
-    sqrt_σyy = sqrt(σ²_yy)
-    sqrt_σxx = sqrt(σ²_xx)
-    denom_a = sqrt_σyy + sqrt_σxx
-    roundness2_aperture = if denom_a > eps(FT)
-        2 * (sqrt_σyy - sqrt_σxx) / denom_a
-    else
-        zero(FT)
-    end
-
-    # Rotationally invariant shape statistics from the 2×2 second-moment
-    # covariance [σ²_yy σ²_xy; σ²_xy σ²_xx].  Its eigenvalues are the
-    # variances along the minor and major principal axes, so
-    # ellipticity_aperture = 1 - sqrt(minor/major) = 1 - b/a registers
-    # elongation at any position angle, unlike roundness2_aperture (which
-    # compares axis-aligned marginals).  compactness_aperture is the
-    # inverse total second central moment, ∝ 1/FWHM² for a Gaussian.
+    # compactness_aperture is the inverse total second central moment,
+    # ∝ 1/FWHM² for a Gaussian.
     total_moment = σ²_yy + σ²_xx
-    moment_anisotropy = hypot((σ²_yy - σ²_xx) / 2, σ²_xy)
-    minor_axis_var = total_moment / 2 - moment_anisotropy
-    major_axis_var = total_moment / 2 + moment_anisotropy
-    ellipticity_aperture = minor_axis_var > 0 ? 1 - sqrt(minor_axis_var / major_axis_var) : FT(NaN)
     compactness_aperture = total_moment > 0 ? inv(total_moment) : FT(NaN)
+
+    # Normalized quadrupole (ellipticity) components.  These are ratios of
+    # linear moment sums about the center of mass, so a sub-pixel shift of
+    # the source cancels out of them (see the docstring); that is why they
+    # replace the DAOPHOT SROUND/GROUND statistics: SROUND's quadrant
+    # boundaries were anchored to the integer peak pixel and responded to
+    # phase at first order, and GROUND's sqrt-of-variance marginals are a
+    # less natural parameterization of the same axis e1 covers.  e2 carries
+    # the 45-degree information SROUND was meant to supply, with none of its
+    # cross-talk from axis-aligned elongation.
+    ellipticity1_aperture = total_moment > 0 ? (σ²_yy - σ²_xx) / total_moment : FT(NaN)
+    ellipticity2_aperture = total_moment > 0 ? 2 * σ²_xy / total_moment : FT(NaN)
 
     # Centroid covariance from the delta method for the ratio estimator.
     inv_M00_sq = inv_M00 * inv_M00
@@ -334,8 +337,7 @@ function measure_star_shape(
                    μ_y * μ_x * FT(mom.W00)) * inv_M00_sq
 
     return (; fwhm = (; y = fwhm_y, x = fwhm_x, theta),
-             roundness1_aperture, roundness2_aperture,
-             ellipticity_aperture, compactness_aperture,
+             ellipticity1_aperture, ellipticity2_aperture, compactness_aperture,
              moment_norm = FT_M00,
              aperture_sum = FT(mom.aperture_sum),
              aperture_area = mom.aperture_area,
@@ -362,6 +364,100 @@ function measure_star_shape(image::AbstractMatrix; kws...)
 end
 
 # ---------------------------------------------------------------------------
+# One source, measured against its own PSF reference
+# ---------------------------------------------------------------------------
+
+"""
+    measure_star_shape_ref(clean, rend, i0, j0, height; kws...) -> NamedTuple
+
+Every shape statistic for one source, measured on the isolated cutout `clean`,
+together with the same statistics measured on the noiseless render `rend` of
+that source's PSF model.
+
+Callers supply the cutout and its render: a fitter's finalization pass already
+holds both, and renders once for the pair rather than a second time here.  See
+`finalize_multipass` in `psf_photometry_simultaneous_multipass.jl` for how
+`clean`, `rend`, `i0`, `j0` and `height` are built per source.
+
+# Arguments
+
+- `clean`: the isolated cutout -- the residual with every source removed and
+  this one added back, so it holds this source's light plus noise but not its
+  neighbors'.
+- `rend`: this source's model rendered over **the same pixels** as `clean`,
+  with the model's own `bkg` already subtracted.
+- `i0`, `j0`: the anchor pixel, in `clean`'s own (1-based) indices.  Must be a
+  local maximum: [`centroid_poly`](@ref) fits a quadratic to the 3x3
+  neighborhood and degenerates otherwise.
+- `height`: the central height used to normalize `sharpness`, normally
+  `maximum(rend)`.
+
+# Keyword arguments
+
+- `inv_var`: per-pixel inverse variance over the cutout, or `nothing`
+  (default) for unit weights.
+- `sharp_half_width::Integer = 2`: half-width of the `sharpness` footprint.
+  See `_sharp_half_width`.
+- `background::Real = 0`, `fwhm_factor::Real`: as for
+  [`measure_star_shape`](@ref).
+- `y_offset`, `x_offset`: added to every returned coordinate, to lift cutout
+  indices into the frame `clean` was cut from.
+
+# Returns
+
+`(; sharpness, sharpness_err, core, centroid, aperture, psf_ref)`, where
+`psf_ref` is `(; sharpness, core, aperture)` measured on `rend`.  See
+[`measure_star_shapes`](@ref) for the individual fields and for how to combine
+a statistic with its `psf_ref` counterpart.  `psf_ref` mirrors values only: the
+render is noiseless, so it carries no `sharpness_err`.
+
+!!! note "Why both halves live in one function"
+    The measurement and its reference must share `inv_var`, the anchor pixel,
+    `background` and `height`, or the comparison stops being exact: with
+    `clean == rend` every ratio below must come out at exactly 1 and every
+    difference at exactly 0, which is what cancels the sub-pixel phase and
+    PSF-width dependence instead of modeling it away.  Computing the two halves
+    in one place is what enforces that; splitting them across call sites would
+    let them drift apart silently, since a violation changes no types and
+    throws no error.
+"""
+function measure_star_shape_ref(clean::AbstractMatrix, rend::AbstractMatrix,
+        i0::Integer, j0::Integer, height::Real;
+        inv_var::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
+        sharp_half_width::Integer = 2,
+        background::Real = 0,
+        fwhm_factor::Real = 2.3548200450309493,
+        y_offset::Real = 0,
+        x_offset::Real = 0,
+    )
+    axes(clean) == axes(rend) ||
+        throw(DimensionMismatch("`clean` and `rend` must have the same `axes`; " *
+                                "got $(axes(clean)) and $(axes(rend))"))
+    FT = float(eltype(clean))
+    ivar = inv_var === nothing ? Fill(one(FT), size(clean)) : inv_var
+    i, j, shw, h = Int(i0), Int(j0), Int(sharp_half_width), FT(height)
+
+    core = centroid_poly(clean, i, j, ivar; background, y_offset, x_offset)
+    centroid = choose_centroid(core)
+    aperture = measure_star_shape(clean, i, j;
+                                  inv_var = ivar, background, fwhm_factor,
+                                  y_offset, x_offset)
+    sharpness, sharpness_err = _sharpness(clean, i, j, shw, shw, h, ivar)
+
+    # The same measurement on the noiseless render: what each statistic would
+    # read for a source that *is* the PSF, at this source's sub-pixel phase and
+    # with this source's weights, anchor, background and height normalization.
+    psf_ref = (;
+        sharpness = first(_sharpness(rend, i, j, shw, shw, h, ivar)),
+        core = centroid_poly(rend, i, j, ivar; background, y_offset, x_offset),
+        aperture = measure_star_shape(rend, i, j;
+                                      inv_var = ivar, background, fwhm_factor,
+                                      y_offset, x_offset),
+    )
+    return (; sharpness, sharpness_err, core, centroid, aperture, psf_ref)
+end
+
+# ---------------------------------------------------------------------------
 # Batch measurement from matched-filter results
 # ---------------------------------------------------------------------------
 
@@ -380,6 +476,115 @@ function _default_half_width(result::MatchedFilterResult)
 end
 
 """
+    _kernel_template(K, kernel_norm) -> Matrix
+
+The sum-normalized PSF template `P` behind a `matched_filter` kernel `K`,
+recovered from the stored kernel and `kernel_norm`.
+"""
+function _kernel_template(K::AbstractMatrix, kernel_norm::Real)
+    d = kernel_norm^2
+    c = (1 - sum(K) * d) / length(K)
+    return @. K * d + c
+end
+
+@doc raw"""
+    _sharp_half_width(fwhm) -> Int
+
+DAOPHOT's `SHARP` neighborhood half-width,
+``\max(2, \lfloor 0.72\,\mathrm{FWHM} \rfloor)``.  The scale matters
+because the neighbor mean has to be measured where the profile is still
+falling steeply,
+so a footprint much larger than this dilutes it toward sky and drives
+`sharpness` to 1 for every source. The floor of 2 keeps it from
+collapsing onto the 3x3 core, where it would duplicate
+`normalized_curvature` and inherit that statistic's sub-pixel phase
+sensitivity.  Non-finite or non-positive `fwhm` falls back to the floor.
+
+Approximate `fwhm` are okay here; see e.g.
+[`effective_fwhm`](@ref CrowdPhot.PSF.effective_fwhm).
+"""
+_sharp_half_width(fwhm::Real) =
+    (isfinite(fwhm) && fwhm > 0) ? max(2, floor(Int, 0.72 * fwhm)) : 2
+
+@doc raw"""
+    _sharpness(image, i0, j0, hy, hx, height [, inv_var]) -> (Real, Real)
+
+DAOPHOT `SHARP` for the peak at `image[i0, j0]`:
+
+```math
+\mathtt{sharpness} = \frac{D_{i_0 j_0} - \bar{D}_\mathrm{neighbors}}{H}
+```
+
+the raw peak pixel minus the mean of its neighbors over the
+``(2h_y+1) \times (2h_x+1)`` footprint (center excluded), divided by
+the source's fitted central `height`.
+
+A spatially flat background cancels from the numerator, so no background
+argument is needed.  Non-finite neighbors are skipped; the footprint is
+clipped at the image border.
+
+Returns the statistic and its 1-σ uncertainty, the latter propagated from
+`inv_var` (unit weights when omitted, giving a formal error) over exactly the
+pixels that entered the value:
+
+```math
+\sigma(\mathtt{sharpness}) = \frac{1}{H}
+    \sqrt{\sigma^2_{i_0 j_0} + \frac{1}{n^2}\sum_\mathrm{neighbors} \sigma^2_i}
+```
+
+!!! note "`height` is treated as exact"
+    No uncertainty is propagated for `H`.  In [`measure_star_shape_ref`](@ref)
+    it comes from a noiseless render, so it genuinely has none.  In
+    [`measure_star_shapes`](@ref) it is the matched-filter flux times the
+    template peak fraction, which *is* uncertain (exactly
+    `peak_fluxes[i] / peak_significances[i]`, since the matched filter's
+    weighted flux error reduces to that ratio), but it is built from pixels
+    that overlap the numerator's footprint.  Propagating it would need
+    ``\mathrm{Cov}(\text{numerator}, H)`` rather than a variance, and keeping
+    `H` fixed is also what keeps `sharpness` a pure concentration statistic
+    instead of folding flux uncertainty into it.  Both call paths therefore
+    agree on what `sharpness_err` means.
+
+Both returned values are `NaN` if `height` is non-positive or no valid neighbor
+exists; the error alone is `NaN` if any contributing pixel has a non-positive
+or non-finite weight.
+"""
+function _sharpness(image::AbstractMatrix{T}, i0::Int, j0::Int,
+                    hy::Int, hx::Int, height::Real,
+                    inv_var::Union{Nothing, AbstractMatrix} = nothing) where {T}
+    FT = float(T)
+    nan = FT(NaN)
+    (isfinite(height) && height > 0) || return (nan, nan)
+    ny, nx = size(image)
+    s = zero(FT)
+    n = 0
+    # Variance of the neighbor sum.  Accumulated over exactly the pixels that
+    # enter `s`, so a masked or non-finite weight anywhere in that set makes the
+    # error undefined (NaN) without perturbing the value.
+    svar = zero(FT)
+    @inbounds for i in max(1, i0 - hy):min(ny, i0 + hy),
+                  j in max(1, j0 - hx):min(nx, j0 + hx)
+        (i == i0 && j == j0) && continue
+        v = FT(image[i, j])
+        isfinite(v) || continue
+        s += v
+        n += 1
+        w = inv_var === nothing ? one(FT) : FT(inv_var[i, j])
+        svar += (isfinite(w) && w > 0) ? inv(w) : nan
+    end
+    n == 0 && return (nan, nan)
+    h = FT(height)
+    sharpness = (FT(image[i0, j0]) - s / n) / h
+    # `height` is taken as exact: in the reference path it comes from a noiseless
+    # render, and in the batch path it shares pixels with the numerator, so
+    # propagating its error would need a covariance rather than a variance.
+    wc = inv_var === nothing ? one(FT) : FT(inv_var[i0, j0])
+    var_c = (isfinite(wc) && wc > 0) ? inv(wc) : nan
+    err = sqrt(var_c + svar / (n * n)) / h
+    return (sharpness, err)
+end
+
+"""
     measure_star_shapes(result::MatchedFilterResult; kws...) -> Vector{NamedTuple}
 
 Measure centroid, shape, and morphological properties for every peak
@@ -391,7 +596,8 @@ For each peak in `result.peaks`, this function:
    centered on the peak pixel from the original image.
 2. Calls [`centroid_poly`](@ref) on the 3×3 core (passing `background`) to
    obtain a sub-pixel centroid (polynomial and center-of-mass) and core
-   diagnostics (normalized curvature, compactness, roundness, ellipticity).
+   diagnostics (normalized curvature, compactness, and the two ellipticity
+   components).
 3. Calls [`choose_centroid`](@ref) to select the best centroid estimate.
 4. Calls [`measure_star_shape`](@ref) on the full cutout to compute
    aperture-based morphology and rectangular aperture sums.
@@ -422,8 +628,8 @@ pixel coordinates of the original image.
   image moments.  Defaults to `0`.  Passed to both
   [`measure_star_shape`](@ref) and [`centroid_poly`](@ref); the core
   diagnostics `normalized_curvature`, `compactness_core`,
-  `roundness1_core`, and the center-of-mass are only meaningful when this
-  matches the true sky level.
+  `ellipticity1_core`, `ellipticity2_core`, and the center-of-mass are
+  only meaningful when this matches the true sky level.
 - `fwhm_factor::Real`: scale factor from Gaussian σ to FWHM.  Defaults to
   ``2\\sqrt{2\\log 2} \\approx 2.35482``.  Passed to [`measure_star_shape`](@ref).
 - `peaks::Union{AbstractVector{Int}, Nothing}`: optional vector of integer
@@ -443,21 +649,41 @@ has the following fields:
 - `pixel::CartesianIndex{2}`: the peak pixel `(row, column)` in the
   original image.
 - `significance`: detection significance at this peak.
-- `matched_filter_flux`: matched-filter flux estimate at this peak.
+- `flux`: matched-filter flux estimate at this peak.
+- `sharpness`: DAOPHOT `SHARP` [Stetson1987](@citet),
+  ``(D_\\mathrm{peak} - \\bar{D}_\\mathrm{neighbors}) / H``.  The numerator
+  is taken on the **raw** image over DAOPHOT's
+  ``\\max(2, \\lfloor 0.72\\,\\mathrm{FWHM}\\rfloor)`` footprint, with the
+  PSF width recovered from the detection kernel. The denominator
+  ``H = \\mathtt{flux} \\times \\max(P)`` is the source's fitted central
+  height, matching DAOPHOT's normalization.  This statistic is large for a
+  cosmic ray or hot pixel whose flux is confined to a single pixel, small for a
+  blend or a resolved source, and tightly clustered for stars.
+  Unlike `normalized_curvature` it needs no quadratic fit, so it survives
+  where that fit degenerates.  `NaN` if the fitted height is non-positive.
+- `sharpness_err`: 1-σ uncertainty on `sharpness`, propagated from `inv_var`
+  over the same footprint.  The central height ``H`` is treated as exact: it
+  shares pixels with the numerator, so propagating its error would need a
+  covariance rather than a variance, and holding it fixed keeps `sharpness` a
+  pure concentration statistic.
 - `core`: the full [`centroid_poly`](@ref) result — `(; poly, com,
-  normalized_curvature, compactness_core, roundness1_core, roundness2_core,
-  ellipticity_core)` with coordinates in global pixels.
+  normalized_curvature, normalized_curvature_err, compactness_core,
+  ellipticity1_core, ellipticity2_core)` with coordinates in global pixels.
 - `centroid`: the chosen centroid `(; y, x, source)` from
   [`choose_centroid`](@ref) in global pixels.  `source` is `:poly` or `:com`.
-- `morphology`: the full [`measure_star_shape`](@ref) result — `(; fwhm,
-  roundness1_aperture, roundness2_aperture, ellipticity_aperture,
-  compactness_aperture, moment_norm, aperture_sum, aperture_area,
-  aperture_sum_err, centroid)` with coordinates in global pixels.
+- `aperture`: the full [`measure_star_shape`](@ref) result — `(; fwhm,
+  ellipticity1_aperture, ellipticity2_aperture, compactness_aperture,
+  moment_norm, aperture_sum, aperture_area, aperture_sum_err, centroid)`
+  with coordinates in global pixels.
+- `psf_ref`: `nothing` for this method.  There is no PSF model at detection
+  time, so there is nothing to normalize against.
+  [`measure_star_shape_ref`](@ref) fills this in, which is what the
+  post-fit morphology pass calls; see it for the contract.
 
 !!! note
     If a peak is so close to the image border that no full 3×3
     neighborhood exists, all fields in `core` are `NaN` and
-    `centroid.source` is `:poly` (degenerate).  The `morphology` fields
+    `centroid.source` is `:poly` (degenerate).  The `aperture` fields
     are computed from the available (clipped) cutout and may still be
     valid.
 
@@ -506,6 +732,13 @@ function measure_star_shapes(
 
     H, W = size(result.image)
     FT = float(T)
+    # SHARP normalization: the matched-filter flux times the PSF peak pixel
+    # fraction is the source's central height, which is DAOPHOT's denominator.
+    # Both are constant over the frame for a spatially constant kernel.
+    template = _kernel_template(result.kernel, result.kernel_norm)
+    peak_fraction = maximum(template)
+    # DAOPHOT's 0.72*FWHM footprint, not the kernel size
+    khy = khx = _sharp_half_width(PSF.effective_fwhm(template))
     return map(all_peak_idx) do pidx
         pixel = result.peaks[pidx]
         i0, j0 = Tuple(pixel)  # row, column
@@ -532,78 +765,37 @@ function measure_star_shapes(
         dy_global = FT(y_start - 1)
         dx_global = FT(x_start - 1)
 
-        # 1. Polynomial centroid on the 3×3 core.
-        core_local = centroid_poly(cutout, i0_cut, j0_cut, ivar_cutout; background)
+        # 1. Polynomial centroid on the 3×3 core.  `*_offset` puts every
+        #    returned coordinate straight into the original image's frame.
+        core = centroid_poly(cutout, i0_cut, j0_cut, ivar_cutout;
+                             background, y_offset = dy_global, x_offset = dx_global)
 
-        # Convert core coordinates to global.
-        core_global = (;
-            poly = (;
-                y = core_local.poly.y + dy_global,
-                x = core_local.poly.x + dx_global,
-                peak = core_local.poly.peak,
-                y_err = core_local.poly.y_err,
-                x_err = core_local.poly.x_err,
-                peak_err = core_local.poly.peak_err,
-                cov = core_local.poly.cov,
-            ),
-            com = (;
-                y = core_local.com.y + dy_global,
-                x = core_local.com.x + dx_global,
-                y_err = core_local.com.y_err,
-                x_err = core_local.com.x_err,
-                cov = core_local.com.cov,
-            ),
-            normalized_curvature = core_local.normalized_curvature,
-            compactness_core = core_local.compactness_core,
-            roundness1_core = core_local.roundness1_core,
-            roundness2_core = core_local.roundness2_core,
-            ellipticity_core = core_local.ellipticity_core,
-        )
-
-        # 2. Choose best centroid.
-        chosen = choose_centroid(core_local)
-        centroid_global = (;
-            y = chosen.y + dy_global,
-            x = chosen.x + dx_global,
-            source = chosen.source,
-        )
+        # 2. Choose best centroid (offset-invariant: it only compares
+        #    covariances and passes the chosen coordinates through).
+        centroid = choose_centroid(core)
 
         # 3. Aperture morphology.
-        morph_local = measure_star_shape(
-            cutout, i0_cut, j0_cut;
-            inv_var = ivar_cutout,
-            background = background,
-            fwhm_factor = fwhm_factor,
-        )
+        aperture = measure_star_shape(cutout, i0_cut, j0_cut;
+                                      inv_var = ivar_cutout, background, fwhm_factor,
+                                      y_offset = dy_global, x_offset = dx_global)
 
-        # Convert morphology centroid to global.
-        morph_global = (;
-            fwhm = morph_local.fwhm,
-            roundness1_aperture = morph_local.roundness1_aperture,
-            roundness2_aperture = morph_local.roundness2_aperture,
-            ellipticity_aperture = morph_local.ellipticity_aperture,
-            compactness_aperture = morph_local.compactness_aperture,
-            moment_norm = morph_local.moment_norm,
-            aperture_sum = morph_local.aperture_sum,
-            aperture_area = morph_local.aperture_area,
-            aperture_sum_err = morph_local.aperture_sum_err,
-            centroid = (;
-                y = morph_local.centroid.y + dy_global,
-                x = morph_local.centroid.x + dx_global,
-                y_err = morph_local.centroid.y_err,
-                x_err = morph_local.centroid.x_err,
-                cov = morph_local.centroid.cov,
-            ),
-        )
+        # 4. DAOPHOT SHARP from the raw cutout and the matched-filter flux.
+        #    Measured on the full frame, so the full-frame weights go with it.
+        sharpness, sharpness_err = _sharpness(result.image, Int(i0), Int(j0), khy, khx,
+                                              result.peak_fluxes[pidx] * peak_fraction,
+                                              inv_var)
 
         return (;
             peak_index = pidx,
             pixel = pixel,
             significance = result.peak_significances[pidx],
-            matched_filter_flux = result.peak_fluxes[pidx],
-            core = core_global,
-            centroid = centroid_global,
-            morphology = morph_global,
+            flux = result.peak_fluxes[pidx],
+            sharpness,
+            sharpness_err,
+            core,
+            centroid,
+            aperture,
+            psf_ref = nothing,
         )
     end
 end

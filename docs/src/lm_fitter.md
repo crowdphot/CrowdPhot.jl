@@ -64,6 +64,7 @@ with `KnownWeightsCovarianceEstimator`. You would typically use
 weight map.
 
 ```@docs
+AbstractCovarianceEstimator
 KnownWeightsCovarianceEstimator
 ReweightedCovarianceEstimator
 ```
