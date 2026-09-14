@@ -202,7 +202,12 @@ function _model_radii(psf, model_rad, nsigma, R_fit::Int, R_cap::Int,
     step = max(1, length(w) ÷ 65536) # downsample to ~65k for speed, still robust
     _w = w[1:step:end]
     _w = _w[(_w .> 0) .& isfinite.(_w)]
-    w_val = quantile(_w, 0.84)
+    # A fixed stride can miss every valid pixel on a periodically masked frame,
+    # and `quantile` of an empty vector throws.  Rescanning the whole map is the
+    # expensive path this stride exists to avoid, so take it only when the cheap
+    # sample came up empty.
+    isempty(_w) && (_w = w[(w .> 0) .& isfinite.(w)])
+    w_val = isempty(_w) ? zero(FT) : FT(quantile(_w, 0.84))
     sigma_bg = w_val > 0 ? FT(sqrt(1 / w_val)) : one(FT)
     unit = ConstructionBase.setproperties(psf,
         (; y = zero(FT), x = zero(FT), flux = one(FT), bkg = zero(FT)))

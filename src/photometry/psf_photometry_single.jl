@@ -11,10 +11,11 @@
 # ==============================================================================
 
 """
-    MultiPassPhotResult{T}
+    MultiPassPhotResult{T, M}
 
 Result of [`fit_all_stars`](@ref).  All per-star vectors have the same
-length (the number of input sources).
+length (the number of input sources).  `M` is the element type of
+`morphology`, inferred from the vector passed in.
 
 # Fields
 
@@ -34,10 +35,11 @@ length (the number of input sources).
 - `failure_msgs::Vector{String}`: first few exception messages from failed fits,
   for diagnosis.  Empty when `n_failed == 0`.
 - `residual::Matrix{T}`: final residual image after all subtractions.
-- `morphology::Vector{<:NamedTuple}`: per-source shape measurements, one entry
+- `morphology::Vector{M}`: per-source shape measurements, one entry
   per source in catalog order, measured on each source's neighbor-subtracted
-  cutout so the moments are not contaminated by its neighbors' light.  See
-  [`measure_star_shapes`](@ref) for the fields.
+  cutout so the moments are not contaminated by its neighbors' light.  Each
+  entry is a [`measure_star_shape_ref`](@ref) result with `pixel`,
+  `significance` and `flux` merged in; see that function for the fields.
 
   !!! note
       Currently populated only by
@@ -106,7 +108,7 @@ length (the number of input sources).
   pixel-noise propagation of the weighted estimator.  `NaN` when `inv_var` was
   not provided.
 """
-struct MultiPassPhotResult{T}
+struct MultiPassPhotResult{T, M <: NamedTuple}
     y::Vector{T}
     x::Vector{T}
     y_err::Vector{T}
@@ -129,7 +131,7 @@ struct MultiPassPhotResult{T}
     n_failed::Int
     failure_msgs::Vector{String}
     residual::Matrix{T}
-    morphology::Vector{<:NamedTuple}
+    morphology::Vector{M}
 end
 
 # ==============================================================================

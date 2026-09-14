@@ -556,6 +556,27 @@ end
         @test rr[end] > rr[1]         # a bright source needs a larger box
         # A larger nsigma (looser threshold) never needs a larger box.
         @test all(_model_radii(psf, :auto, 3.0, R_fit, R_cap, w, fl) .<= rr)
+
+        # `sigma_bg` comes from a strided sample of `w`, taken for speed on a
+        # full frame.  A periodically masked map can put every valid pixel off
+        # that stride, which used to reach `quantile` with an empty vector and
+        # throw `ArgumentError: empty data vector`.  The full-map fallback must
+        # recover the *same* radii the dense map gives, not just avoid the
+        # crash -- landing on the `sigma_bg = 1` default would silently mis-size
+        # every box.
+        fl2 = Float64[3.0e4, 1.0e3]
+        npix = 160_000                      # > 131072, so the stride is 2
+        striped = zeros(npix); striped[2:2:end] .= 1 / 100.0
+        @test all(iszero, striped[1:2:end])   # the sample really is empty
+        dense = fill(1 / 100.0, npix)
+        @test _model_radii(psf, :auto, 1.0, R_fit, R_cap, striped, fl2) ==
+              _model_radii(psf, :auto, 1.0, R_fit, R_cap, dense, fl2)
+        @test _model_radii(psf, :auto, 1.0, R_fit, R_cap, striped, fl2) !=
+              _model_radii(psf, :auto, 1.0, R_fit, R_cap, zeros(npix), fl2)
+        # No positive finite weight anywhere is genuinely degenerate: `sigma_bg`
+        # falls back to 1 and the radius is set by the curve of growth alone.
+        @test all(R_fit .<= _model_radii(psf, :auto, 1.0, R_fit, R_cap,
+                                         zeros(npix), fl2) .<= R_cap)
     end
 
     @testset "model_rad = :auto requires inv_var" begin

@@ -1,6 +1,7 @@
 using CrowdPhot: measure_star_shape, measure_star_shape_ref, _moments2, matched_filter,
     MatchedFilterResult, centroid_poly, choose_centroid, measure_star_shapes,
-    FlatWindow, GaussianWindow, deconvolve_moments, inv_window_var, yfactor, xfactor
+    FlatWindow, GaussianWindow, deconvolve_moments, inv_window_var, yfactor, xfactor,
+    _debiased_sq
 using CrowdPhot.PSF: CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, CircularMoffatPSF,
     evaluate, add_star!, fwhm as psf_fwhm
 using FillArrays: Fill
@@ -473,16 +474,33 @@ end
 
     @testset "noisy image — ellipticity bounded" begin
         using StableRNGs: StableRNG
-        rng = StableRNG(42)
         img, _ = _make_gaussian_cutout(; x0=3.5, y0=3.5, fwhm=2.8, flux=200.0, shape=(7,7))
-        noisy = img .+ 5.0 .* randn(rng, size(img))
-        r = measure_star_shape(noisy, 4, 4; background=0)
-        @test isfinite(r.ellipticity1_aperture)
-        @test isfinite(r.ellipticity2_aperture)
-        @test r.fwhm.y > 0
-        @test r.fwhm.x > 0
-        @test r.centroid.y_err > 0
-        @test r.centroid.x_err > 0
+
+        # A normalized quadrupole obeys `|e| <= 1`, and the way to violate that
+        # is a measured tensor that is not a covariance: `sigma^2_xy` is left
+        # unclamped, so noise can push it past `sqrt(sigma^2_yy sigma^2_xx)`.
+        # Here it lands at 3.3x that, and reporting anything finite would mean
+        # reporting `ellipticity2_aperture = 2.25`.  `deconvolve_moments` rejects
+        # a non-positive-definite tensor for every window, so this is `NaN`.
+        wild = img .+ 5.0 .* randn(StableRNG(42), size(img))
+        rw = measure_star_shape(wild, 4, 4; background=0)
+        @test isnan(rw.ellipticity1_aperture)
+        @test isnan(rw.ellipticity2_aperture)
+        @test isnan(rw.fwhm.y) && isnan(rw.fwhm.x)
+        # The centroid is built from the first moments and the weight moments,
+        # not from the second-moment tensor, so it survives.
+        @test rw.centroid.y_err > 0
+        @test rw.centroid.x_err > 0
+
+        # At a noise level the tensor does survive, the statistics are finite
+        # *and* inside the bound they are supposed to obey.
+        mild = img .+ 0.5 .* randn(StableRNG(42), size(img))
+        rm = measure_star_shape(mild, 4, 4; background=0)
+        @test isfinite(rm.ellipticity1_aperture)
+        @test isfinite(rm.ellipticity2_aperture)
+        @test hypot(rm.ellipticity1_aperture, rm.ellipticity2_aperture) <= 1
+        @test rm.fwhm.y > 0 && rm.fwhm.x > 0
+        @test rm.centroid.y_err > 0 && rm.centroid.x_err > 0
     end
 
     @testset "shape uncertainties" begin
@@ -704,13 +722,54 @@ end
             @test all(isnan, n.ellipticity_cov_aperture)
         end
 
-        @testset "the error is non-negative everywhere it is finite" begin
-            rng = StableRNG(99999)
-            for _ in 1:200
-                noisy = rnd .+ sqrt(sky) .* randn(rng, size(rnd))
-                r = measure_star_shape(noisy, 6, 6; inv_var=iv, background=0, window=win)
-                @test r.ellipticity_sq_aperture_err >= 0
+        @testset "the reported error never drops below the noise floor" begin
+            # `_debiased_sq` clamps the estimated `mu' Sigma mu` as a whole.
+            # The true quadratic form cannot be negative, but its plug-in
+            # estimate can: the cross product `(e1*e2 - c12)*c12` is signed, and
+            # unclamped it eats into the irreducible `2 tr(Sigma^2)` noise term
+            # and can quote a zero error on a noisy statistic.  Rebuild the
+            # variance from the returned covariance and check both that the
+            # reported error reproduces it term for term and that it is floored
+            # at the noise.
+            #
+            # The clamp is load-bearing for the round source and inert for the
+            # elongated one, which is exactly the asymmetry that motivates it:
+            # when `|e|` reads ~0 both debiased squares clamp to zero, leaving
+            # the signed cross product as the only surviving `mu` term.
+            # The bug this guards: perfectly correlated components with unit
+            # variance used to return a *zero* uncertainty, because the signed
+            # cross product cancelled `2 tr(Sigma^2) = 8` exactly.
+            @test _debiased_sq(0.0, 0.0, 1.0, 1.0, 1.0) == (-2.0, sqrt(8.0))
+
+            function frac_clamped(img, seed)
+                rng = StableRNG(seed)
+                n_clamped = 0
+                for _ in 1:400
+                    noisy = img .+ sqrt(sky) .* randn(rng, size(img))
+                    r = measure_star_shape(noisy, 6, 6; inv_var=iv, background=0, window=win)
+                    C = r.ellipticity_cov_aperture
+                    v1, v2, c12 = C[1, 1], C[2, 2], C[1, 2]
+                    e1, e2 = r.ellipticity1_aperture, r.ellipticity2_aperture
+                    noise = 2 * (v1 * v1 + v2 * v2 + 2 * c12 * c12)
+                    mu_term = max(0.0, e1 * e1 - v1) * v1 + 2 * (e1 * e2 - c12) * c12 +
+                              max(0.0, e2 * e2 - v2) * v2
+                    mu_term > 0 || (n_clamped += 1)
+                    @test r.ellipticity_sq_aperture_err ≈
+                          sqrt(noise + 4 * max(0.0, mu_term)) rtol=1e-12
+                    @test r.ellipticity_sq_aperture_err >= sqrt(noise)
+                end
+                return n_clamped / 400
             end
+            # The clamp is load-bearing rather than a safety net, and it fires
+            # on ordinary measurements and not only on a hand-built covariance:
+            # about a quarter of these round-source realizations, and a tenth of
+            # the elongated ones.  Only reachability is asserted -- how often it
+            # fires is a property of the source and SNR chosen here, not of
+            # `_debiased_sq`.
+            @test frac_clamped(rnd, 99999) > 0.05
+            # Called for the invariants it asserts internally on an elongated
+            # source, where the `mu` term usually carries the variance.
+            frac_clamped(elo, 1234)
         end
     end
 end
@@ -1165,13 +1224,28 @@ end
         n_nb = (2shw + 1)^2 - 1
         @test s1.sharpness_err ≈ sqrt(1 + 1 / n_nb) / h rtol=1e-12
 
-        # A masked pixel anywhere in the footprint makes the error undefined
-        # without disturbing the value.
+        # A masked neighbor leaves the footprint rather than poisoning the
+        # average: a zero weight means that pixel's value is not a measurement,
+        # so whatever sits there would shift the neighbor mean.  Dropping it
+        # shrinks `n` by one, which widens the error by exactly the closed form
+        # above and moves the value off `s1`.
         iv_masked = fill(1.0, ny, nx)
         iv_masked[7, 7] = 0.0
         sm = measure_star_shape_ref(clean, rend, 8, 8, h; inv_var = iv_masked)
-        @test isnan(sm.sharpness_err)
-        @test sm.sharpness === s1.sharpness
+        @test isfinite(sm.sharpness_err)
+        @test sm.sharpness_err ≈ sqrt(1 + 1 / (n_nb - 1)) / h rtol=1e-12
+        @test sm.sharpness != s1.sharpness
+        # The neighbor mean is over the 23 surviving pixels, not the 24 slots:
+        # dividing by 24 would be the zero-averaged-in bug this guards against.
+        nb = sum(clean[6:10, 6:10]) - clean[8, 8] - clean[7, 7]
+        @test sm.sharpness ≈ (clean[8, 8] - nb / (n_nb - 1)) / h rtol=1e-12
+        @test !isapprox(sm.sharpness, (clean[8, 8] - nb / n_nb) / h; rtol=1e-6)
+        # A masked *center* pixel has no peak value to compare against, so both
+        # halves are undefined.
+        iv_center = fill(1.0, ny, nx)
+        iv_center[8, 8] = 0.0
+        sc = measure_star_shape_ref(clean, rend, 8, 8, h; inv_var = iv_center)
+        @test isnan(sc.sharpness) && isnan(sc.sharpness_err)
 
         # `psf_ref` mirrors values only; the render is noiseless.
         @test !haskey(s1.psf_ref, :sharpness_err)
