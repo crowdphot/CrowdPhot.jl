@@ -373,12 +373,19 @@ function _moments2(
 end
 
 @doc raw"""
-    _shape_errors(mom, inv_M00, mu_y, mu_x, m_yy, m_xx, m_xy, window,
-                  s_yy, s_xx, s_xy) -> NamedTuple
+    _shape_covariance(mom, inv_M00, mu_y, mu_x, m_yy, m_xx, m_xy, window,
+                      s_yy, s_xx, s_xy) -> NamedTuple
 
-1-sigma uncertainties on the deconvolved aperture shape statistics
-`ellipticity1_aperture`, `ellipticity2_aperture` and `compactness_aperture`,
-by the delta method.
+Delta-method covariance of the deconvolved aperture shape statistics:
+the variances of `ellipticity1_aperture`, `ellipticity2_aperture` and
+`compactness_aperture`, plus the covariance of the two ellipticity
+components.
+
+We return variances rather than standard deviations, because we need
+``\mathrm{Var}(e_1)`` and ``\mathrm{Var}(e_2)`` to compute the bias correction in
+`ellipticity_sq_aperture`.  The cross term `c12` is
+needed only for ``\sigma`` of that statistic; the debiasing itself uses just
+the diagonal.
 
 `mom` is a `_moments2` return, `inv_M00`, `mu_y` and `mu_x` its normalization
 and centroid offsets, `m_*` the *measured* (windowed) second central moments
@@ -400,17 +407,18 @@ linearization about the clamped point rather than about the raw one.
 
 # Returns
 
-`(; ellipticity1_err, ellipticity2_err, compactness_err)`, all `NaN` when
-``s_{yy} + s_{xx} \le 0`` -- exactly the condition under which the caller
-reports the statistics themselves as `NaN`.
+`(; v1, v2, c12, compactness_var)`, all `NaN` when ``s_{yy} + s_{xx} \le 0``
+-- exactly the condition under which the caller reports the statistics
+themselves as `NaN`.  The three variances are clamped at zero; `c12` is not,
+since a covariance may legitimately be negative.
 """
-function _shape_errors(mom, inv_M00::FT, mu_y::FT, mu_x::FT, m_yy::FT,
+function _shape_covariance(mom, inv_M00::FT, mu_y::FT, mu_x::FT, m_yy::FT,
         m_xx::FT, m_xy::FT, window::AbstractMomentWindow, s_yy::FT, s_xx::FT,
         s_xy::FT) where {FT}
     S = s_yy + s_xx
     if !(S > zero(FT))
         n = FT(NaN)
-        return (; ellipticity1_err = n, ellipticity2_err = n, compactness_err = n)
+        return (; v1 = n, v2 = n, c12 = n, compactness_var = n)
     end
     z = zero(FT)
     # Cov(M_pq, M_rs) = W_{p+r, q+s}, ordered (M00, M10, M01, M20, M02, M11).
@@ -445,12 +453,41 @@ function _shape_errors(mom, inv_M00::FT, mu_y::FT, mu_x::FT, m_yy::FT,
 
     invS = inv(S)
     invS2 = invS * invS
-    j1 = @SVector [2*s_xx*invS2, -2*s_yy*invS2, z]      # e1 = (s_yy - s_xx)/S
+    j1 = @SVector [2*s_xx*invS2, -2*s_yy*invS2, z]       # e1 = (s_yy - s_xx)/S
     j2 = @SVector [-2*s_xy*invS2, -2*s_xy*invS2, 2*invS] # e2 = 2*s_xy/S
     jc = @SVector [-invS2, -invS2, z]                    # compactness = 1/S
-    return (; ellipticity1_err = sqrt(max(z, dot(j1, Σs * j1))),
-             ellipticity2_err = sqrt(max(z, dot(j2, Σs * j2))),
-             compactness_err = sqrt(max(z, dot(jc, Σs * jc))))
+    Σj1 = Σs * j1
+    return (; v1 = max(z, dot(j1, Σj1)), v2 = max(z, dot(j2, Σs * j2)),
+             c12 = dot(j2, Σj1), compactness_var = max(z, dot(jc, Σs * jc)))
+end
+
+@doc raw"""
+    _debiased_sq(d1, d2, v1, v2, c12) -> (value, err)
+
+Noise-debiased squared magnitude of the 2-vector `(d1, d2)`, and its 1-sigma
+uncertainty, given the vector's covariance `[v1 c12; c12 v2]`.
+
+Used for `ellipticity_sq_aperture`, where `(d1, d2)` are the ellipticity
+components themselves, and for `ellipticity_sq_resid`, where they are the
+components measured relative to the PSF.  The algebra is identical; only the
+point it is evaluated at differs.
+
+``\mathbb{E}[\hat{d}_i^2] = d_i^2 + v_i``, so subtracting the variances makes
+the value unbiased to first order.
+
+The uncertainty is ``\mathrm{Var}(x^\top x) = 2\,\mathrm{tr}(\Sigma^2) +
+4\mu^\top\Sigma\mu`` for ``x \sim N(\mu, \Sigma)``.  The second term needs the
+true ``\mu``; the obvious plug-in ``\hat{d}_i^2`` is biased high by exactly
+``v_i``, which inflates the quoted error by ~1.55x for a round source at low
+signal-to-noise, so the debiased products are used instead.
+"""
+function _debiased_sq(d1::FT, d2::FT, v1::FT, v2::FT, c12::FT) where {FT}
+    z = zero(FT)
+    p11 = d1 * d1 - v1
+    p22 = d2 * d2 - v2
+    var = 2 * (v1 * v1 + v2 * v2 + 2 * c12 * c12) +
+          4 * (max(z, p11) * v1 + 2 * (d1 * d2 - c12) * c12 + max(z, p22) * v2)
+    return (p11 + p22, sqrt(max(z, var)))
 end
 
 # ---------------------------------------------------------------------------
@@ -495,7 +532,8 @@ cutout using inverse-variance-weighted second central moments.
 
 # Returns
 `(; fwhm, ellipticity1_aperture, ellipticity1_aperture_err,
-    ellipticity2_aperture, ellipticity2_aperture_err,
+    ellipticity2_aperture, ellipticity2_aperture_err, ellipticity_cov_aperture,
+    ellipticity_sq_aperture, ellipticity_sq_aperture_err,
     compactness_aperture, compactness_aperture_err, moment_norm,
     aperture_sum, aperture_area, aperture_sum_err, centroid)` where
 
@@ -516,13 +554,30 @@ cutout using inverse-variance-weighted second central moments.
   extended along the
   ``+45°`` diagonal.  `NaN` when
   ``\sigma^2_{yy} + \sigma^2_{xx} \le 0``.
+- `ellipticity_cov_aperture::SMatrix{2,2,T}`: the 2×2 covariance of
+  `(ellipticity1_aperture, ellipticity2_aperture)`, in that order.
+- `ellipticity_sq_aperture::T`: the squared ellipticity magnitude
+  ``|e|^2 = e_1^2 + e_2^2``, with the noise bias removed:
+  ``\mathbb{E}[\hat{e}_i^2] = e_i^2 + \mathrm{Var}(\hat{e}_i)``, so both
+  component variances are subtracted.  Without that correction the statistic
+  carries a pedestal that grows as the signal-to-noise falls, which is what
+  makes a fixed threshold on a magnitude unusable.
+  ``0`` for a circular source.
+- `ellipticity_sq_aperture_err::T`: 1-σ uncertainty on the above, from
+  ``\mathrm{Var}(x^\top x) = 2\,\mathrm{tr}(\Sigma^2) +
+  4\mu^\top\Sigma\mu`` for the 2-vector of components, with the
+  debiased component products standing in for ``\mu`` (the naive plug-in is
+  biased high by the same variances subtracted above).  Near ``|e| = 0`` the
+  statistic is distributed like a shifted ``\chi^2_2`` rather than a Gaussian,
+  so this is a correct second moment but not a symmetric confidence interval in
+  the round-source regime where it is most used.
 - `compactness_aperture::T`: inverse total second central moment
   ``1/(\sigma^2_{yy} + \sigma^2_{xx})``.  Proportional to
   ``1/\mathrm{FWHM}^2`` for a Gaussian; larger for more compact profiles.
   `NaN` when ``\sigma^2_{yy} + \sigma^2_{xx} \le 0``.
 - `ellipticity1_aperture_err::T`, `ellipticity2_aperture_err::T`,
-  `compactness_aperture_err::T`: 1-σ uncertainties on the three statistics
-  above, propagated from `inv_var` by the delta method through the moment
+  `compactness_aperture_err::T`: 1-σ uncertainties on the corresponding
+  statistics, propagated from `inv_var` by the delta method through the moment
   covariance, the centralization and the window deconvolution.  They are
   Gaussian first-order errors on ratios of moment sums, so they are reliable
   where the moments are well determined and optimistic where they are not.
@@ -539,27 +594,13 @@ cutout using inverse-variance-weighted second central moments.
 - `centroid::NamedTuple (; y, x, y_err, x_err, cov)`: center-of-mass
   centroid, 1-σ uncertainties, and 2×2 `SMatrix` covariance.
 
-!!! note "Ellipticity"
-    The ellipticity ``1 - b/a = 1 - \sqrt{(1-|e|)/(1+|e|)}`` with ``|e| = \sqrt{e_1^2 + e_2^2}``,
-    with position angle
-    ``\theta = \tfrac{1}{2}\arctan(e_2, -e_1)``, is a one-liner from the
-    pair above and is deliberately not returned.  It rectifies: component
-    scatter cannot cancel, so noise and residual
-    sub-pixel phase both push it up and never down, and a round source has a positive
-    expectation of order ``\sigma\sqrt{\pi/2}`` in the component
-    error.  It is also the one
-    shape statistic that cannot be corrected against a PSF model from its
-    own value, because the magnitude does not commute with the subtraction:
-    the correction has to be applied to ``e_1`` and ``e_2`` *before*
-    taking the magnitude.
-
 If ``M_{00} \le 0`` (all pixels at or below background), shape and
 centroid fields are `NaN`; aperture-sum diagnostics are still reported.
 If ``\sigma^2_{yy} \le 0`` or ``\sigma^2_{xx} \le 0``
 (the distribution has no measurable width, e.g. a single bright pixel),
 `fwhm.y` and `fwhm.x` are `NaN`, and `ellipticity1_aperture`,
-`ellipticity2_aperture` and `compactness_aperture` are `NaN`, as are their
-`_err` counterparts.
+`ellipticity2_aperture`, `ellipticity_sq_aperture` and `compactness_aperture`
+are `NaN`, as are their `_err` counterparts.
 
 !!! note "Robustness to sub-pixel phase"
     Every shape statistic here is a ratio of linear moment sums taken
@@ -617,6 +658,8 @@ function measure_star_shape(
         return (; fwhm = (; y = n, x = n, theta = n),
                  ellipticity1_aperture = n, ellipticity1_aperture_err = n,
                  ellipticity2_aperture = n, ellipticity2_aperture_err = n,
+                 ellipticity_cov_aperture = @SMatrix([n n; n n]),
+                 ellipticity_sq_aperture = n, ellipticity_sq_aperture_err = n,
                  compactness_aperture = n, compactness_aperture_err = n,
                  moment_norm = FT_M00,
                  aperture_sum = FT(mom.aperture_sum),
@@ -693,8 +736,14 @@ function measure_star_shape(
     ellipticity1_aperture = total_moment > 0 ? (σ²_yy - σ²_xx) / total_moment : FT(NaN)
     ellipticity2_aperture = total_moment > 0 ? 2 * σ²_xy / total_moment : FT(NaN)
 
-    errs = _shape_errors(mom, inv_M00, μ_y, μ_x, m_yy, m_xx, m_xy, window,
-                         σ²_yy, σ²_xx, σ²_xy)
+    cv = _shape_covariance(mom, inv_M00, μ_y, μ_x, m_yy, m_xx, m_xy, window,
+                           σ²_yy, σ²_xx, σ²_xy)
+    v1, v2, c12 = FT(cv.v1), FT(cv.v2), FT(cv.c12)
+
+    # Noise-debiased squared ellipticity, removing a pedestal that would
+    # otherwise grow as the SNR falls and make a fixed threshold useless.
+    ellipticity_sq_aperture, ellipticity_sq_aperture_err =
+        _debiased_sq(ellipticity1_aperture, ellipticity2_aperture, v1, v2, c12)
 
     # Centroid covariance from the delta method for the ratio estimator.
     inv_M00_sq = inv_M00 * inv_M00
@@ -707,11 +756,13 @@ function measure_star_shape(
 
     return (; fwhm = (; y = fwhm_y, x = fwhm_x, theta),
              ellipticity1_aperture,
-             ellipticity1_aperture_err = errs.ellipticity1_err,
+             ellipticity1_aperture_err = sqrt(v1),
              ellipticity2_aperture,
-             ellipticity2_aperture_err = errs.ellipticity2_err,
+             ellipticity2_aperture_err = sqrt(v2),
+             ellipticity_cov_aperture = @SMatrix([v1 c12; c12 v2]),
+             ellipticity_sq_aperture, ellipticity_sq_aperture_err,
              compactness_aperture,
-             compactness_aperture_err = errs.compactness_err,
+             compactness_aperture_err = sqrt(FT(cv.compactness_var)),
              moment_norm = FT_M00,
              aperture_sum = FT(mom.aperture_sum),
              aperture_area = mom.aperture_area,
@@ -741,7 +792,7 @@ end
 # One source, measured against its own PSF reference
 # ---------------------------------------------------------------------------
 
-"""
+@doc raw"""
     measure_star_shape_ref(clean, rend, i0, j0, height; kws...) -> NamedTuple
 
 Every shape statistic for one source, measured on the isolated cutout `clean`,
@@ -780,8 +831,23 @@ holds both, and renders once for the pair rather than a second time here.  See
 
 # Returns
 
-`(; sharpness, sharpness_err, core, centroid, aperture, psf_ref)`, where
-`psf_ref` is `(; sharpness, core, aperture)` measured on `rend`.  See
+`(; sharpness, sharpness_err, ellipticity_sq_resid, ellipticity_sq_resid_err,
+core, centroid, aperture, psf_ref)`, where `psf_ref` is
+`(; sharpness, core, aperture)` measured on `rend`.
+
+`ellipticity_sq_resid` is the noise-debiased squared ellipticity measured
+*relative to* this source's own PSF,
+
+```math
+|\Delta e|^2 = (e_1 - e_1^\mathrm{ref})^2 + (e_2 - e_2^\mathrm{ref})^2
+  - \mathrm{Var}(e_1) - \mathrm{Var}(e_2),
+```
+
+zero for a source that is the PSF with positive and negative scatter when applied
+to noisy data. Do not use
+`psf_ref.aperture.ellipticity_sq_aperture` for this -- it is the debiasing
+applied to a noiseless render, and is over-corrected by exactly
+``\mathrm{Var}(e_1) + \mathrm{Var}(e_2)``.  See
 [`measure_star_shapes`](@ref) for the individual fields and for how to combine
 a statistic with its `psf_ref` counterpart.  `psf_ref` mirrors values only: the
 render is noiseless, so it carries no `sharpness_err`.
@@ -791,10 +857,13 @@ render is noiseless, so it carries no `sharpness_err`.
     `background`, `height` and `window`, or the comparison stops being exact: with
     `clean == rend` every ratio below must come out at exactly 1 and every
     difference at exactly 0, which is what cancels the sub-pixel phase and
-    PSF-width dependence instead of modeling it away.  Computing the two halves
-    in one place is what enforces that; splitting them across call sites would
-    let them drift apart silently, since a violation changes no types and
-    throws no error.
+    PSF-width dependence instead of modeling it away.  `ellipticity_sq_resid` is
+    the one exception, being neither a ratio nor a difference: at
+    `clean == rend` the components cancel exactly but the debiasing still
+    subtracts, so it reads ``-(\mathrm{Var}(e_1) + \mathrm{Var}(e_2))`` rather
+    than 0.  That degenerate case has no noise for the correction to remove; on
+    real data, where `clean` carries the noise `inv_var` describes, the
+    statistic is unbiased.
 """
 function measure_star_shape_ref(clean::AbstractMatrix, rend::AbstractMatrix,
         i0::Integer, j0::Integer, height::Real;
@@ -830,7 +899,18 @@ function measure_star_shape_ref(clean::AbstractMatrix, rend::AbstractMatrix,
                                       inv_var = ivar, background, fwhm_factor,
                                       y_offset, x_offset, window),
     )
-    return (; sharpness, sharpness_err, core, centroid, aperture, psf_ref)
+
+    # The PSF-referenced squared ellipticity.  Combined here rather than left to
+    # the caller because it is the one statistic that cannot be assembled by the
+    # ratio-or-difference rule the other `psf_ref` comparisons follow.
+    Σe = aperture.ellipticity_cov_aperture
+    ellipticity_sq_resid, ellipticity_sq_resid_err = _debiased_sq(
+        aperture.ellipticity1_aperture - psf_ref.aperture.ellipticity1_aperture,
+        aperture.ellipticity2_aperture - psf_ref.aperture.ellipticity2_aperture,
+        Σe[1, 1], Σe[2, 2], Σe[1, 2])
+
+    return (; sharpness, sharpness_err, ellipticity_sq_resid,
+             ellipticity_sq_resid_err, core, centroid, aperture, psf_ref)
 end
 
 # ---------------------------------------------------------------------------
@@ -1042,6 +1122,9 @@ has the following fields:
   shares pixels with the numerator, so propagating its error would need a
   covariance rather than a variance, and holding it fixed keeps `sharpness` a
   pure concentration statistic.
+- `ellipticity_sq_resid`, `ellipticity_sq_resid_err`: `NaN` for this method.
+  The PSF-referenced squared ellipticity needs a PSF model, and there is none at
+  detection time; [`measure_star_shape_ref`](@ref) fills these in.
 - `core`: the full [`centroid_poly`](@ref) result — `(; poly, com,
   normalized_curvature, normalized_curvature_err, compactness_core,
   ellipticity1_core, ellipticity2_core)` with coordinates in global pixels.
@@ -1049,7 +1132,8 @@ has the following fields:
   [`choose_centroid`](@ref) in global pixels.  `source` is `:poly` or `:com`.
 - `aperture`: the full [`measure_star_shape`](@ref) result — `(; fwhm,
   ellipticity1_aperture, ellipticity1_aperture_err, ellipticity2_aperture,
-  ellipticity2_aperture_err, compactness_aperture, compactness_aperture_err,
+  ellipticity2_aperture_err, ellipticity_cov_aperture, ellipticity_sq_aperture,
+  ellipticity_sq_aperture_err, compactness_aperture, compactness_aperture_err,
   moment_norm, aperture_sum, aperture_area, aperture_sum_err, centroid)`
   with coordinates in global pixels.
 - `psf_ref`: `nothing` for this method.  There is no PSF model at detection
@@ -1185,6 +1269,8 @@ function measure_star_shapes(
             flux = result.peak_fluxes[pidx],
             sharpness,
             sharpness_err,
+            ellipticity_sq_resid = FT(NaN),
+            ellipticity_sq_resid_err = FT(NaN),
             core,
             centroid,
             aperture,

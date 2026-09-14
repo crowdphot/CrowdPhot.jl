@@ -90,8 +90,87 @@ Note that they are equivalent to an `ellipticity` plus a position angle:
 \theta = \tfrac{1}{2}\arctan(e_2, -e_1).
 ```
 
-Note that ``|e| = (a^2-b^2)/(a^2+b^2)`` is the *distortion*, not
-the scalar ellipticity ``1 - b/a``.
+The names follow the weak-lensing convention.  ``(e_1, e_2)`` is the *complex
+ellipticity* ``\chi`` of [Bartelmann2001](@citet), Sect. 4.2 eq. (4.4), built
+from the second brightness moments of their eq. (4.2); our ``e_1`` and ``e_2``
+are its real and imaginary parts.  They also show
+``|\chi| = (1-r^2)/(1+r^2)`` for isophotes of axis ratio ``r \le 1``, with the
+phase equal to twice the position angle, which is the ``|e|`` and ``\theta``
+of the display above.
+
+!!! note "Our ``e_1`` is sign-flipped relative to the published formula"
+    Eq. (4.4) is written ``(Q_{11}-Q_{22}+2\mathrm{i}Q_{12})/(Q_{11}+Q_{22})``
+    with ``\theta_1`` conventionally the ``x`` axis.  CrowdPhot uses
+    ``(y, x)`` ordering throughout, so ``e_1`` is defined with
+    ``\sigma^2_{yy}`` first and therefore carries the opposite sign to
+    ``\Re\chi`` as that equation is literally written.  Positive ``e_1`` means
+    extended in rows, as the table above states.
+
+The same formula ``(a^2-b^2)/(a^2+b^2)`` carries a second name in that
+literature, in a different role: the *distortion* ``\delta``, when it
+describes a lensing shear rather than the shape of an object.  That is the
+sense in which [MiraldaEscude1991](@citet) introduced it, and how
+[Bernstein2002](@citet) define it in their Sect. 2.2.1.  Their Sect. 2.4
+separates the two roles explicitly and adopts ``e`` for object shapes because
+it "agrees with the traditional second-moment definition of ellipticities" --
+which is exactly how `ellipticity1_aperture` and `ellipticity2_aperture` are
+built, and hence the field names used here.  [Bartelmann2001](@citet) uses the
+same split, titling Sect. 4.3 "Local Determination of the Distortion" while
+calling the moment-based shape measure an ellipticity.
+
+Two further parameterizations of the same axis ratio appear in the literature
+and are **not** returned here.  The scalar ``1 - b/a``, written as
+`ellipticity` in the display above, is the ``e \equiv 1 - q`` of
+[Bonnet1995](@citet).  Distinct again is the second complex ellipticity
+``\epsilon`` of [Bartelmann2001](@citet) eq. (4.10), with
+``|\epsilon| = (1-r)/(1+r)``; their eq. (4.11) converts between it and
+``\chi``.
+
+### The rotationally invariant magnitude
+
+No *raw* magnitude is returned at either scale: neither ``1 - b/a`` nor
+``|e| = \sqrt{e_1^2 + e_2^2}``, though both are one-liners from ``e_1`` and
+``e_2``.  Any such magnitude rectifies.  The component scatter cannot
+cancel, so noise and residual sub-pixel phase push it up and never down, and a
+round source has a positive expectation of order ``\sigma\sqrt{\pi/2}`` in
+the component error.  This produces a pedestal that grows as the
+signal-to-noise falls, which is exactly what makes a fixed threshold on a raw
+magnitude unusable.
+
+What *is* returned, at the aperture scale, is `ellipticity_sq_aperture`,
+which is squared magnitude with that pedestal subtracted,
+
+```math
+|e|^2_\mathrm{debiased} = e_1^2 + e_2^2
+  - \mathrm{Var}(e_1) - \mathrm{Var}(e_2),
+```
+
+using the same component variances reported as `ellipticity1_aperture_err` and
+`ellipticity2_aperture_err`.  Because
+``\mathbb{E}[\hat{e}_i^2] = e_i^2 + \mathrm{Var}(\hat{e}_i)``, this is
+unbiased to first order, so a star sits at zero at every signal-to-noise and a
+fixed threshold becomes meaningful. Noise will cause round sources to scatter in
+a locus around zero, so this quantity should not be clampled or square rooted.
+
+There is no debiased magnitude at the **core** scale: `ellipticity1_core` and
+`ellipticity2_core` carry no uncertainties, and the component variances are
+what make the correction possible.
+
+A magnitude is also the one shape statistic that cannot be corrected against a
+PSF model from its own value, because taking the magnitude does not commute
+with the subtraction: the correction has to be applied to ``e_1`` and ``e_2``
+*before* they are combined.  That is why the `psf_ref` comparison is a
+difference on each component separately, and why the PSF-referenced form of the
+statistic above is
+
+```math
+|\Delta e|^2 = (e_1 - e_1^\mathrm{ref})^2 + (e_2 - e_2^\mathrm{ref})^2
+  - \mathrm{Var}(e_1) - \mathrm{Var}(e_2),
+```
+
+the render being noiseless, so the residual carries the measurement's own
+variances unchanged.
+
 
 Because these are ratios of *linear* moment sums taken about the center of
 mass, they are also the shape statistics least sensitive to where the
@@ -107,7 +186,8 @@ large.  Isolated off-axis hot pixels behave the same way: they inflate
 ``\sigma^2_{xx}`` and ``\sigma^2_{yy}`` about equally but register in
 ``e_2`` unless they happen to lie on a row or column through the center.
 The two components together register elongation at any position angle;
-their magnitude ``|e|`` is discussed below.
+`ellipticity_sq_aperture` combines them into the single rotationally invariant
+number, debiased so that it can be thresholded (see above).
 
 Departures from a Gaussian that *preserve* fourfold symmetry, e.g. a
 faint ring, leave ``e_1``, ``e_2``, and ellipticity all near zero, so
@@ -135,7 +215,7 @@ by a PSF-fit residual.
       values spanning approximately ``[-2, 2]``. The ellipticity components
       ``e_1`` and ``e_2`` lie in ``[-1, 1]``, with
       ``|e| = \sqrt{e_1^2 + e_2^2}`` giving the rotationally invariant
-      distortion.
+      ellipticity magnitude.
     - **Parameterization.** GROUND compares axis-aligned widths,
       approximately
       ``2(\sqrt{\sigma^2_{yy}}-\sqrt{\sigma^2_{xx}})/
