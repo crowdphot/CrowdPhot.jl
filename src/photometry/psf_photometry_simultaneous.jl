@@ -211,7 +211,7 @@ function _model_radii(psf, model_rad, nsigma, R_fit::Int, R_cap::Int,
     sb = Vector{FT}(undef, R_cap)
     prev = zero(FT)
     for r in 1:R_cap
-        sb[r] = max((ee[r] - prev) / (FT(pi) * (r^2 - (r - 1)^2)), zero(FT))
+        sb[r] = max((ee[r] - prev) / (FT(π) * (r^2 - (r - 1)^2)), zero(FT))
         prev = ee[r]
     end
     thr = FT(nsigma) * sigma_bg
@@ -621,6 +621,25 @@ function _render_model!(
         live, render_buf::AbstractMatrix{FT}, render_scratch
     ) where {FT}
     fill!(model_img, zero(FT))
+    return _accum_model!(model_img, model_template, free_names_val, fixed, θ, p, model_R,
+        anchor_y, anchor_x, ny, nx, live, render_buf, render_scratch, one(FT))
+end
+
+"""
+    _accum_model!(model_img, model_template, free_names_val, fixed, θ, p, model_R,
+                  anchor_y, anchor_x, ny, nx, live, render_buf, render_scratch, coef)
+
+The accumulating half of [`_render_model!`](@ref): add `coef` times each `live`
+source's render into `model_img` *without* clearing it first.  `coef = -1`
+removes a subset of sources from a model that is already rendered, which costs
+`O(n_subset * model_R^2)` instead of the `O(n_active * model_R^2)` of a full
+re-render.
+"""
+function _accum_model!(
+        model_img::AbstractVector{FT}, model_template, free_names_val, fixed,
+        θ, p, model_R, anchor_y, anchor_x, ny::Int, nx::Int,
+        live, render_buf::AbstractMatrix{FT}, render_scratch, coef::FT
+    ) where {FT}
     n_active = length(anchor_y)
     @inbounds for a in 0:(n_active - 1)
         live[a + 1] || continue
@@ -635,7 +654,7 @@ function _render_model!(
             gy = ay - R + ii - 1
             gx = ax - R + jj - 1
             (1 <= gy <= ny) & (1 <= gx <= nx) || continue
-            model_img[gy + (gx - 1) * ny] += render_buf[ii, jj]
+            model_img[gy + (gx - 1) * ny] += coef * render_buf[ii, jj]
         end
     end
     return model_img
@@ -1335,11 +1354,12 @@ function fit_all_stars_simultaneous(
     # spread_model reference: one field-constant exponential-disk kernel + a
     # reused buffer for the per-star PSF-convolved-with-disk stamp.
     spread_fwhm = isnothing(spread_model_fwhm) ?
-        _spread_fwhm(psf, FT(params[row_y, 1]), FT(params[row_x, 1])) : FT(spread_model_fwhm)
+        FT(PSF.effective_fwhm(ConstructionBase.setproperties(psf,
+            (; y = FT(params[row_y, 1]), x = FT(params[row_x, 1]))))) : FT(spread_model_fwhm)
     # Resolved to tuple form once, which stops `correlate!` re-running its
-    # separability test -- an SVD for a matrix kernel -- on every source.
+    # separability test -- an SVD for a matrix kernel -- on every source
     spread_kernel = isfinite(spread_fwhm) && spread_fwhm > 0 ?
-        _canonicalize(_exp_disk_kernel_bandlimited(spread_fwhm, FT; half = ceil(Int, fit_rad))) : nothing
+        _canonicalize(_exp_disk_kernel_bandlimited(spread_fwhm, FT; half = R_fit)) : nothing
     g_stamp = Matrix{FT}(undef, S_max, S_max)
 
     for (j, i) in enumerate(active)

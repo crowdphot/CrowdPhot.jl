@@ -227,8 +227,8 @@ end
         psf = CircularGaussianPSF(y=0.0, x=0.0, fwhm=2.0, flux=1.0, bkg=0.0)
         # Use the actual source positions from the simulation, with reasonable
         # initial flux guesses.
-        cat = (; y = sources.y, x = sources.x, flux = fill(400.0, 3))
-        result = fit_all_stars(image, psf, cat, 5; n_passes = 1, max_iter = 200)
+        catalog = (; y = sources.y, x = sources.x, flux = fill(400.0, 3))
+        result = fit_all_stars(image, psf, catalog, 5; n_passes = 1, max_iter = 200)
         @test length(result.y) == 3
         @test all(result.converged)
         for i in 1:3
@@ -287,14 +287,14 @@ end
         img = fill(20.0, (60, 60))
         CrowdPhot.PSF.add_star!(img, CircularGaussianPSF(y = 30.4, x = 29.7, fwhm = fwhm_psf, flux = 5000.0, bkg = 0.0))
         iv = fill(1 / 20.0, size(img))
-        cat = (; y = [30.4], x = [29.7], flux = [5000.0])
-        r = fit_all_stars(img, psf, cat, 8; n_passes = 2, max_iter = 100, fixed = (; bkg = 20.0, fwhm = fwhm_psf), inv_var = iv)
+        catalog = (; y = [30.4], x = [29.7], flux = [5000.0])
+        r = fit_all_stars(img, psf, catalog, 8; n_passes = 2, max_iter = 100, fixed = (; bkg = 20.0, fwhm = fwhm_psf), inv_var = iv)
         @test r.valid[1]
         @test isapprox(r.spread_model[1], 0.0; atol = 3e-3)
         @test isfinite(r.spread_model_err[1]) && r.spread_model_err[1] > 0
 
         # spread_model_err is NaN without inv_var; the value stays finite.
-        r_noiv = fit_all_stars(img, psf, cat, 8; n_passes = 2, max_iter = 100, fixed = (; bkg = 20.0, fwhm = fwhm_psf))
+        r_noiv = fit_all_stars(img, psf, catalog, 8; n_passes = 2, max_iter = 100, fixed = (; bkg = 20.0, fwhm = fwhm_psf))
         @test isfinite(r_noiv.spread_model[1])
         @test isnan(r_noiv.spread_model_err[1])
 
@@ -302,7 +302,7 @@ end
         function spread_for_width(w)
             im = fill(20.0, (60, 60))
             CrowdPhot.PSF.add_star!(im, CircularGaussianPSF(y = 30.4, x = 29.7, fwhm = w, flux = 5000.0, bkg = 0.0))
-            rr = fit_all_stars(im, psf, cat, 8; n_passes = 2, max_iter = 100,
+            rr = fit_all_stars(im, psf, catalog, 8; n_passes = 2, max_iter = 100,
                 fixed = (; bkg = 20.0, fwhm = fwhm_psf), inv_var = fill(1 / 20.0, size(im)))
             rr.spread_model[1]
         end
@@ -324,9 +324,9 @@ end
         # source stays at the structural zero regardless of the kernel).
         ext = fill(20.0, (60, 60))
         CrowdPhot.PSF.add_star!(ext, CircularGaussianPSF(y = 30.4, x = 29.7, fwhm = 4.0, flux = 5000.0, bkg = 0.0))
-        r_auto = fit_all_stars(ext, psf, cat, 8; n_passes = 2, max_iter = 100,
+        r_auto = fit_all_stars(ext, psf, catalog, 8; n_passes = 2, max_iter = 100,
             fixed = (; bkg = 20.0, fwhm = fwhm_psf), inv_var = fill(1 / 20.0, size(ext)))
-        r_big = fit_all_stars(ext, psf, cat, 8; n_passes = 2, max_iter = 100,
+        r_big = fit_all_stars(ext, psf, catalog, 8; n_passes = 2, max_iter = 100,
             fixed = (; bkg = 20.0, fwhm = fwhm_psf), inv_var = fill(1 / 20.0, size(ext)), spread_model_fwhm = 8.0)
         @test r_auto.spread_model[1] > 0
         @test r_big.spread_model[1] > r_auto.spread_model[1]
