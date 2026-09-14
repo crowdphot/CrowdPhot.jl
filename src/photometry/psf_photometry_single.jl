@@ -254,6 +254,13 @@ re-fitted, and re-subtracted, progressively refining all measurements.
   shape as `image`.  Forwarded to [`fit_star`](@ref CrowdPhot.PSF.fit_star),
   where non-positive or non-finite values are treated as masked pixels.  Stars
   with too few valid pixels are marked invalid and skipped.
+
+  Interpreted as the **total** inverse variance, including the Poisson
+  contribution of the source flux itself -- what a reduction pipeline's
+  `err`/`weight` array normally provides.  The map is used exactly as given;
+  supplying one also selects [`KnownWeightsCovarianceEstimator`](@ref) (absent
+  IRLS reweighting), which trusts it, so a background-only map yields position
+  and flux errors that are too small for bright sources.
 - All other keyword arguments (`max_iter`, `x_tol`, `f_tol`,
   `g_tol`, `show_trace`, `reweight`, `covariance_estimator`,
   `scale_estimator`, `damping`, etc.) are forwarded to
@@ -323,7 +330,10 @@ function fit_all_stars(
     # reused buffer for the per-star PSF-convolved-with-disk stamp.
     spread_fwhm = spread_model_fwhm === nothing ?
         _spread_fwhm(psf, FT(params[row_y, 1]), FT(params[row_x, 1])) : FT(spread_model_fwhm)
-    spread_kernel = isfinite(spread_fwhm) && spread_fwhm > 0 ? _exp_disk_kernel_bandlimited(spread_fwhm, FT; half = ceil(Int, fit_rad)) : nothing
+    # Resolved to tuple form once, which stops `correlate!` re-running its
+    # separability test -- an SVD for a matrix kernel -- on every source.
+    spread_kernel = isfinite(spread_fwhm) && spread_fwhm > 0 ?
+        _canonicalize(_exp_disk_kernel_bandlimited(spread_fwhm, FT; half = ceil(Int, fit_rad))) : nothing
     g_stamp = Matrix{FT}(undef, S_max, S_max)
 
     # -------------------------------------------------------------------
