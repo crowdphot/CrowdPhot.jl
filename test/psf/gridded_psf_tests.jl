@@ -1,5 +1,5 @@
 import CrowdPhot
-using CrowdPhot.PSF: GriddedPSFModel, GaussianPRF, CircularGaussianPRF, ImagePSF, AbstractPSFModel, evaluate, evaluate_fg, extent, centroid, integral, background, peak, render, add_star!, subtract_star!, fit_star
+using CrowdPhot.PSF: GriddedPSFModel, GaussianPRF, CircularGaussianPRF, ImagePSF, AbstractPSFModel, evaluate, evaluate_fg, extent, centroid, integral, background, peak, render, render!, add_star!, subtract_star!, fit_star
 import ConstructionBase
 using StableRNGs: StableRNG
 using Test
@@ -377,6 +377,39 @@ end
         @test all(abs.(out) .< 1.0e-10) # subtracting what was just added returns (near) zero
         @test base != out
     end
+end
+
+@testset "render! scratch dispatch" begin
+    # `_render_scratch` returns `nothing` for models with no specialized path,
+    # so forwarding its result is always correct; passing the buffers it builds
+    # for a gridded ImagePSF model must reproduce the per-pixel `evaluate` path.
+    data1 = [exp(-((i - 6)^2 + (j - 6)^2) / 5.0) for i in 1:11, j in 1:11]
+    data2 = [exp(-((i - 6)^2 + (j - 6)^2) / 12.0) for i in 1:11, j in 1:11]
+    nodes = [ImagePSF(d; y = 0.0, x = 0.0, flux = 1.0, bkg = 0.0, oversampling = 2, normalize = true)
+             for d in (data1, data2, data2, data1)]
+    m = GriddedPSFModel(nodes, [0.0, 0.0, 10.0, 10.0], [0.0, 10.0, 0.0, 10.0];
+                        y = 12.3, x = 7.6, flux = 50.0, bkg = 0.5)
+
+    S = 9
+    scratch = CrowdPhot.PSF._render_scratch(m, S, Float64)
+    @test scratch isa NTuple{3, NTuple{4, Matrix{Float64}}}
+    @test all(sz -> sz == (S, S), size.(scratch[1]))
+
+    yr, xr = 9:16, 4:12                       # deliberately non-square, <= S
+    ref = fill(NaN, S, S)
+    got = fill(NaN, S, S)
+    render!(ref, m, yr, xr)                   # scratch defaults to `nothing`
+    render!(got, m, yr, xr, scratch)
+    @test view(got, 1:length(yr), 1:length(xr)) ≈ view(ref, 1:length(yr), 1:length(xr)) rtol = 1.0e-12
+    # Oversized-buffer contract: only the top-left block is written.
+    @test all(isnan, got[(length(yr) + 1):end, :])
+    @test all(isnan, got[:, (length(xr) + 1):end])
+
+    # A model with no specialized path pairs with `nothing`, and a scratch it
+    # cannot use is a MethodError rather than a silent fallback.
+    plain = CircularGaussianPRF(y = 3.0, x = 3.0, fwhm = 2.5, flux = 1.0, bkg = 0.0)
+    @test CrowdPhot.PSF._render_scratch(plain, S, Float64) === nothing
+    @test_throws MethodError render!(got, plain, yr, xr, scratch)
 end
 
 @testset "GriddedPSFModel fit_star integration" begin

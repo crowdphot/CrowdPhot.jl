@@ -81,12 +81,12 @@ so `erf` itself is `O(exp(π^2 m^2 / a))` and overflows in `Float32` before the
 function _exp_disk_kernel_bandlimited(fwhm::Real, ::Type{FT};
         half::Integer = ceil(Int, 2.5 * fwhm)) where {FT}
     re = Float64(fwhm) / 16 * 1.67834699
-    twopi2 = 2 * pi^2
+    twopi2 = 2 * π^2
     Iband(m::Integer, v) = begin
         a = twopi2 * re^2 * Float64(v)
-        pi^2 * m^2 / a > 690 && return 0.0
+        π^2 * m^2 / a > 690 && return 0.0
         sa = sqrt(a)
-        real(exp(-pi^2 * m^2 / a) * sqrt(pi / a) * PSF.erf(sa / 2 + im * pi * m / sa))
+        real(exp(-π^2 * m^2 / a) * sqrt(π / a) * PSF.erf(sa / 2 + im * π * m / sa))
     end
     n = 2half + 1
     K = zeros(Float64, n, n)
@@ -101,35 +101,33 @@ function _exp_disk_kernel_bandlimited(fwhm::Real, ::Type{FT};
 end
 
 """
-    _spread_fwhm(psf, y0::Real, x0::Real) -> Real
+    _diagnostic_sinks(::Type{FT}, n) -> NamedTuple of `n`-element vectors
 
-Gaussian-equivalent FWHM of `psf` from the effective area of a noise-free,
-unit-flux render at `(y0, x0)`: `ea = (sum g)^2 / sum g^2`,
-`fwhm = sqrt(ea * 2 ln2 / pi)`.  Matches crowdsource's `neff_fwhm`.  Used to
-size the `spread_model` reference disk when the caller does not pass an explicit
-`spread_model_fwhm`.  The position matters only for a spatially varying
-[`GriddedPSFModel`](@ref); `spread_model` uses one field-constant value.
+The per-source fit-quality columns [`_star_diagnostics!`](@ref) writes into:
+`chisq`, `qfit`, `qfit_expected`, `qfit_z`, `crowding`, `spread_model`,
+`spread_model_err`.
+
+Every column starts at `NaN`, so a source whose diagnostics were never computed
+(non-positive flux, too few unmasked pixels) is distinguishable from one that
+was measured.  `chisq` included: a zero there would read as a perfect fit.
 """
-function _spread_fwhm(psf, y0::Real, x0::Real)
-    FT = float(promote_type(eltype(psf), typeof(y0), typeof(x0)))
-    m = ConstructionBase.setproperties(psf, (; y = FT(y0), x = FT(x0), flux = one(FT), bkg = zero(FT)))
-    (ylo, yhi), (xlo, xhi) = PSF.extent(Int, m)
-    yr, xr = ylo:yhi, xlo:xhi
-    g = PSF.render!(Matrix{FT}(undef, length(yr), length(xr)), m, yr, xr)
-    s1 = sum(g)
-    s2 = sum(abs2, g)
-    ea = s1^2 / s2
-    return sqrt(ea * 2 * log(FT(2)) / FT(π))
+function _diagnostic_sinks(::Type{FT}, n::Integer) where {FT}
+    nanv() = fill(convert(FT, NaN), n)
+    return (; chisq = nanv(), qfit = nanv(), qfit_expected = nanv(), qfit_z = nanv(),
+              crowding = nanv(), spread_model = nanv(), spread_model_err = nanv())
 end
 
 """
-    _star_diagnostics!(qfit, qfit_expected, qfit_z, crowding,
-                       spread_model, spread_model_err, idx,
-                       model, image, resid, star_model, g_model, inv_var, n_free)
+    _star_diagnostics!(diag, idx, model, image, resid, star_model, g_model,
+                       inv_var, n_free)
 
-Compute the per-star `qfit`, `qfit_expected`, `qfit_z`, `crowding`, and
-`spread_model` diagnostics for star `idx` and write them into the corresponding
-vectors.
+Compute the per-star `chisq`, `qfit`, `qfit_expected`, `qfit_z`, `crowding`, and
+`spread_model` diagnostics for star `idx` and write them into `diag`, the
+[`_diagnostic_sinks`](@ref) NamedTuple.
+
+Nothing is written for a source with non-positive `model.flux`: every statistic
+here is normalized by the flux, so none of them means anything in that case.
+All three fitters gate or drop such sources before reaching this point.
 
 `image`, `resid`, `star_model`, `g_model`, and `inv_var` are all *stamp-local*
 matrices of the same shape, covering the star's fitting box:
@@ -149,12 +147,12 @@ matrices of the same shape, covering the star's fitting box:
   `spread_model_err` requires `inv_var` and is left `NaN` without it.
 
 Only the scalar `flux`/`bkg` of `model` are read here.  `n_free` is the number
-of free parameters (used to correct `qfit_z` for fitting leverage).
+of free parameters, used both to correct `qfit_z` for fitting leverage and as
+the `chisq` degrees-of-freedom subtraction.
 """
 function _star_diagnostics!(
-        qfit::AbstractVector, qfit_expected::AbstractVector, qfit_z::AbstractVector,
-        crowding::AbstractVector, spread_model::AbstractVector, spread_model_err::AbstractVector,
-        idx::Int, model, image, resid, star_model, g_model, inv_var, n_free::Int
+        diag::NamedTuple, idx::Int, model, image, resid, star_model, g_model,
+        inv_var, n_free::Int
     )
     FT = float(eltype(image))
     flux = FT(model.flux)
@@ -163,6 +161,8 @@ function _star_diagnostics!(
 
     inv_flux = inv(flux)
     qfit_val = zero(FT)
+    chisq_num = zero(FT)
+    n_pix_good = 0
     num_clean = zero(FT)
     num_dirty = zero(FT)
     den_crowd = zero(FT)
@@ -173,6 +173,8 @@ function _star_diagnostics!(
         wp = inv_var !== nothing ? inv_var[I] : one(FT)
         if isfinite(wp) && wp > 0
             qfit_val += abs(resid[I])
+            chisq_num += wp * resid[I]^2
+            n_pix_good += 1
             # Unit-flux PSF kernel for the crowding calculation.
             Pp = (model_val - bkg) * inv_flux
             wP = wp * Pp
@@ -190,18 +192,21 @@ function _star_diagnostics!(
             end
         end
     end
-    qfit[idx] = qfit_val * inv_flux
+    diag.qfit[idx] = qfit_val * inv_flux
+    if n_pix_good > n_free
+        diag.chisq[idx] = chisq_num / (n_pix_good - n_free)
+    end
     if den_crowd > 0 && num_clean > 0 && num_dirty > 0
-        crowding[idx] = FT(2.5) * log10(num_dirty / num_clean)
+        diag.crowding[idx] = FT(2.5) * log10(num_dirty / num_clean)
     end
 
     # spread_model: SExtractor / crowdsource star-galaxy discriminant.  Zero for
     # a point source (p proportional to phi), positive for extended sources.
     if do_spread && Sp > 0
-        spread_model[idx] = Sq / Sp - Sq0 / Sp0
+        diag.spread_model[idx] = Sq / Sp - Sq0 / Sp0
         if inv_var !== nothing
             v = Sp^2 * SqG + Sq^2 * Sp0 - 2 * Sq * Sp * Sq0
-            spread_model_err[idx] = sqrt(max(zero(FT), v)) / Sp^2
+            diag.spread_model_err[idx] = sqrt(max(zero(FT), v)) / Sp^2
         end
     end
 
@@ -209,22 +214,20 @@ function _star_diagnostics!(
     if !isnothing(inv_var)
         sigma_sum = zero(FT)
         sigma2_sum = zero(FT)
-        n_pix_good = 0
         for I in CartesianIndices(inv_var)
             iv = inv_var[I]
             if isfinite(iv) && iv > 0
                 sigma_i = inv(sqrt(iv))
                 sigma_sum += sigma_i
                 sigma2_sum += sigma_i^2
-                n_pix_good += 1
             end
         end
-        qfit_expected[idx] = FT(sqrt(2 / FT(π))) * sigma_sum * inv_flux
+        diag.qfit_expected[idx] = FT(sqrt(2 / FT(π))) * sigma_sum * inv_flux
         if sigma2_sum > 0 && n_pix_good > n_free
             dof_factor = FT(sqrt(1 - n_free / n_pix_good))
             num = qfit_val - FT(sqrt(2 / FT(π))) * dof_factor * sigma_sum
             den = FT(sqrt((1 - 2 / FT(π)) * sigma2_sum)) * dof_factor
-            qfit_z[idx] = num / den
+            diag.qfit_z[idx] = num / den
         end
     end
     return nothing

@@ -1,6 +1,6 @@
 using CrowdPhot
 using CrowdPhot: CircularGaussianPSF, StampDerivatives, apply_JT!, apply_J!,
-    _jacobian_operator, _clamp_inds, _fill_stamps!, _ring_offsets, _model_radii
+    _jacobian_operator, _clamp_inds, _fill_stamps!, _model_radii
 using CrowdPhot.PSF
 using ConstructionBase
 using Krylov: lsqr!, lsmr!, LsqrWorkspace, LsmrWorkspace, solution
@@ -109,6 +109,51 @@ end
         @test stamp.colnorm[:, 2] == colnorm_before[:, 2]
         @test all(isfinite, stamp.values)
         @test all(isfinite, stamp.colnorm)
+    end
+
+    @testset "_fill_stamps! zeros masked entries" begin
+        # `apply_J!`/`apply_JT!` touch masked entries (the adjoint gathers the
+        # clamped `u[1]`) and rely on the derivative being exactly zero.  The
+        # multipass `StampStore` reuses one buffer across passes, so a skipped
+        # slot would otherwise keep a derivative from a different source/mask.
+        psf = CircularGaussianPSF(y = 0.0, x = 0.0, fwhm = 2.0, flux = 1.0, bkg = 0.0)
+        fixed = (; fwhm = 2.0, bkg = 0.0)
+        free_names, free_idx, _ = PSF.free_params(psf, fixed)
+        p = length(free_idx)
+        prop_names = collect(keys(ConstructionBase.getproperties(psf)))
+        row_y, row_x, row_flux = findfirst(==(:y), prop_names), findfirst(==(:x), prop_names), findfirst(==(:flux), prop_names)
+        grad_col = [free_names[k] === :y ? 1 : (free_names[k] === :x ? 2 : 3) for k in 1:p]
+        free_names_val = Val(free_names)
+
+        R, ny = 1, 30
+        dy_off = Int[]; dx_off = Int[]
+        for dx in -R:R, dy in -R:R
+            push!(dy_off, dy); push!(dx_off, dx)
+        end
+        S2 = length(dy_off)
+        npix = ny * 30
+        anchor_y = [10]; anchor_x = [10]
+        pixels = zeros(Int32, S2, 1)
+        for m in 1:S2                      # every other stamp entry masked out
+            isodd(m) || continue
+            pixels[m, 1] = (anchor_y[1] + dy_off[m]) + (anchor_x[1] + dx_off[m] - 1) * ny
+        end
+        θ = Float64[anchor_y[1], anchor_x[1], 100.0]
+        w = ones(npix)
+        stamp = StampDerivatives{Float64, Int32}(
+            fill(NaN, p, S2, 1), pixels, zeros(p, 1), npix, p, S2)   # poisoned buffer
+
+        _fill_stamps!(stamp, psf, free_names_val, fixed, θ, w, grad_col, dy_off, dx_off,
+            anchor_y, anchor_x, row_y, row_x, row_flux, trues(1), nothing)
+        for m in 1:S2
+            pixels[m, 1] == 0 || continue
+            @test all(iszero, stamp.values[:, m, 1])
+        end
+        @test all(isfinite, stamp.values)
+        # The adjoint must stay finite: a masked slot left at NaN poisons all of it.
+        z = zeros(p)
+        apply_JT!(z, stamp, ones(npix), trues(1), Vector{Float64}(undef, S2))
+        @test all(isfinite, z)
     end
 
     @testset "adjoint identity" begin
@@ -343,9 +388,11 @@ end
         r = fit_all_stars_simultaneous(img_sub, psf, cat, 5; fixed, max_iter=40, model_rad=5)
         for i in 1:length(r.flux)
             r.valid[i] || continue
-            yr = floor(Int, r.y[i] - 5):ceil(Int, r.y[i] + 5)
-            xr = floor(Int, r.x[i] - 5):ceil(Int, r.x[i] + 5)
-            yr, xr = _clamp_inds(yr, xr, r.residual)
+            # The diagnostics box is the fit's own `anchor +- R_fit`, and the
+            # anchors were rounded from the *input* positions when the stamps
+            # were built, not from the fitted ones.
+            ay, ax = round(Int, catalog.y[i]), round(Int, catalog.x[i])
+            yr, xr = _clamp_inds((ay - 5):(ay + 5), (ax - 5):(ax + 5), r.residual)
             @test r.qfit[i] ≈ sum(abs, view(r.residual, yr, xr)) / r.flux[i] rtol = 1e-10
         end
     end
@@ -446,17 +493,6 @@ end
             @test r1.y[i] ≈ r2.y[i] atol = 1e-8
             @test r1.x[i] ≈ r2.x[i] atol = 1e-8
             @test r1.flux[i] ≈ r2.flux[i] rtol = 1e-8
-        end
-    end
-
-    @testset "_ring_offsets: prefix boxes" begin
-        R = 5
-        dy, dx = _ring_offsets(R)
-        @test length(dy) == length(dx) == (2R + 1)^2
-        for k in 0:R
-            got = Set(zip(dy[1:(2k + 1)^2], dx[1:(2k + 1)^2]))
-            want = Set((a, b) for a in -k:k, b in -k:k)
-            @test got == want
         end
     end
 

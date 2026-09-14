@@ -1320,6 +1320,72 @@ function _gridded_corner_bicubic_pass!(
     return nothing
 end
 
+# Documented with the generic method in PSF.jl; defined here because it pairs
+# with the specialized `render!` below.
+function _render_scratch(::GriddedPSFModel{T2, M}, S::Int, ::Type{FT}) where {T2, M <: ImagePSF{T2}, FT}
+    return ntuple(_ -> ntuple(_ -> Matrix{FT}(undef, S, S), 4), 3)
+end
+
+"""
+    render!(buf, model::GriddedPSFModel{T,<:ImagePSF{T}}, yr, xr, scratch)
+
+Specialized [`render!`](@ref) reached by passing the buffers
+[`_render_scratch`](@ref) builds for `model`.  Corner selection/weights and
+each active node's recentered origin depend only on the star's `(Y, X)`, not
+on which pixel is being evaluated, so they are computed once here instead of
+once per `evaluate` call as the generic method does.  The bicubic gather and
+blend reuses [`_gridded_corner_bicubic_pass!`](@ref) (the same kernel
+[`_accum_gridded_imagepsf!`](@ref) uses), one branchless pass per corner into
+`scratch`'s per-corner buffers, followed by a weighted-sum reduction into
+`buf`.
+
+This also sidesteps `_turbo_safe(::Type{<:ImagePSF}) == false`: the reduction
+vectorizes because it reads dense cached matrices, never `evaluate`.
+"""
+function render!(
+        buf::AbstractMatrix{FT}, model::GriddedPSFModel{T2, M},
+        yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:Integer},
+        scratch::NTuple{3, NTuple{4, Matrix{FT}}}
+    ) where {FT, T2, M <: ImagePSF{T2}}
+    ny, nx = length(yr), length(xr)
+    Y, X, flux, bkg = FT(model.y), FT(model.x), FT(model.flux), FT(model.bkg)
+    pv1, pv2, pv3, pv4 = scratch[1]
+    pdv1, pdv2, pdv3, pdv4 = scratch[2]
+    pdu1, pdu2, pdu3, pdu4 = scratch[3]
+
+    corners = _grid_corners_dw(model, Y, X)
+    idx1, w1 = corners[1][1], FT(corners[1][2])
+    idx2, w2 = corners[2][1], FT(corners[2][2])
+    idx3, w3 = corners[3][1], FT(corners[3][2])
+    idx4, w4 = corners[4][1], FT(corners[4][2])
+    # `_grid_corners_dw` returns idx=0 for corners 2-4 only when there is a
+    # single node; their weight is exactly 0 there, so remapping to a valid
+    # (arbitrary) index is safe (matches `_accum_gridded_imagepsf!`).
+    idx2 = idx2 == 0 ? idx1 : idx2
+    idx3 = idx3 == 0 ? idx1 : idx3
+    idx4 = idx4 == 0 ? idx1 : idx4
+    node1, node2, node3, node4 = model.psfs[idx1], model.psfs[idx2], model.psfs[idx3], model.psfs[idx4]
+
+    y1, x1 = first(yr), first(xr)
+    _gridded_corner_bicubic_pass!(pv1, pdv1, pdu1, node1.data, FT(node1.origin.x), FT(node1.origin.y),
+        FT(node1.oversampling[1]), FT(node1.oversampling[2]), FT(node1.fill_value),
+        size(node1.data, 1), size(node1.data, 2), yr, xr, Y, X, y1, x1)
+    _gridded_corner_bicubic_pass!(pv2, pdv2, pdu2, node2.data, FT(node2.origin.x), FT(node2.origin.y),
+        FT(node2.oversampling[1]), FT(node2.oversampling[2]), FT(node2.fill_value),
+        size(node2.data, 1), size(node2.data, 2), yr, xr, Y, X, y1, x1)
+    _gridded_corner_bicubic_pass!(pv3, pdv3, pdu3, node3.data, FT(node3.origin.x), FT(node3.origin.y),
+        FT(node3.oversampling[1]), FT(node3.oversampling[2]), FT(node3.fill_value),
+        size(node3.data, 1), size(node3.data, 2), yr, xr, Y, X, y1, x1)
+    _gridded_corner_bicubic_pass!(pv4, pdv4, pdu4, node4.data, FT(node4.origin.x), FT(node4.origin.y),
+        FT(node4.oversampling[1]), FT(node4.oversampling[2]), FT(node4.fill_value),
+        size(node4.data, 1), size(node4.data, 2), yr, xr, Y, X, y1, x1)
+
+    LV.@turbo for j in 1:nx, i in 1:ny
+        buf[i, j] = muladd(flux, w1 * pv1[i, j] + w2 * pv2[i, j] + w3 * pv3[i, j] + w4 * pv4[i, j], bkg)
+    end
+    return view(buf, 1:ny, 1:nx)
+end
+
 """
     _accum_gridded_imagepsf!(A, b, residuals, image, inds, model, free_idx, weights,
         p_val, p_dpdv, p_dpdu)

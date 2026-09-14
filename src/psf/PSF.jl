@@ -352,7 +352,8 @@ end
 
 """
     render!(buf::AbstractMatrix, model::AbstractPSFModel,
-        yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:Integer})
+        yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:Integer},
+        scratch = nothing)
 
 Evaluate `model` at each image pixel `(y, x)` for `y in yr, x in xr` and write
 the result *stamp-locally* into `buf`: `buf[i, j] = evaluate(model, yr[i],
@@ -364,12 +365,25 @@ stars at arbitrary image positions.
 `buf` must be at least `length(yr) x length(xr)`; only that top-left block is
 touched.  Returns `view(buf, 1:length(yr), 1:length(xr))`, the block filled.
 
+`scratch` selects the render path by *type*.  `nothing` (the default) renders
+per pixel through `evaluate`.  Passing the buffers
+[`_render_scratch`](@ref) builds for `model` instead dispatches to a
+specialized method where one exists -- currently
+`GriddedPSFModel{T, <:ImagePSF{T}}`, whose per-pixel `evaluate` would
+otherwise redo corner selection, weights and node recentering at every pixel.
+`_render_scratch` returns `nothing` for every model without such a method, so
+forwarding its result is always correct; a non-`nothing` scratch paired with a
+model that has no specialization is a `MethodError` rather than a silent
+fallback.
+
 !!! note
     The `LV.@turbo` path requires `eltype(buf) == T` for
     `model::AbstractPSFModel{T}` and `_turbo_safe(model)`; otherwise a plain
     scalar loop is used.
 """
-function render!(buf::AbstractMatrix{T}, model::AbstractPSFModel{T}, yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:Integer}) where {T}
+render!(buf::AbstractMatrix, model::AbstractPSFModel, yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:Integer}) =
+    render!(buf, model, yr, xr, nothing)
+function render!(buf::AbstractMatrix{T}, model::AbstractPSFModel{T}, yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:Integer}, ::Nothing) where {T}
     ny, nx = length(yr), length(xr)
     y0, x0 = first(yr) - 1, first(xr) - 1
     if _turbo_safe(model)
@@ -387,7 +401,7 @@ function render!(buf::AbstractMatrix{T}, model::AbstractPSFModel{T}, yr::Abstrac
     end
     return view(buf, 1:ny, 1:nx)
 end
-function render!(buf::AbstractMatrix, model::AbstractPSFModel, yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:Integer})
+function render!(buf::AbstractMatrix, model::AbstractPSFModel, yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:Integer}, ::Nothing)
     ny, nx = length(yr), length(xr)
     y0, x0 = first(yr) - 1, first(xr) - 1
     @inbounds for j in 1:nx
@@ -397,6 +411,20 @@ function render!(buf::AbstractMatrix, model::AbstractPSFModel, yr::AbstractUnitR
     end
     return view(buf, 1:ny, 1:nx)
 end
+
+"""
+    _render_scratch(model, S::Int, ::Type{FT}) where {FT}
+
+Buffers that unlock [`render!`](@ref)'s specialized path for `model`, sized for
+a stamp of at most `S x S`.  `nothing` for every model type without such a
+path; for `GriddedPSFModel{T, <:ImagePSF{T}}`, three `NTuple{4, Matrix{FT}}`
+(value, d/dv, d/du), one `S x S` buffer per grid corner per quantity.
+
+The renderer reads only the value set.  The derivative buffers are written
+unconditionally by [`_gridded_corner_bicubic_pass!`](@ref) and are kept so one
+scratch can also back the gradient path.
+"""
+_render_scratch(::AbstractPSFModel, S::Int, ::Type{FT}) where {FT} = nothing
 
 """
     add_star!(out::AbstractMatrix, model::AbstractPSFModel,
