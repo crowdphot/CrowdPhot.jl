@@ -25,15 +25,40 @@
 
 # if ccall(:jl_generating_output, Cint, ()) == 1 
 
-# Common calls *on* PSFs
-for psf in (PSF.AiryPSF,)
+# Common calls *on* PSFs.  The forms of `render!` / `add_star!` / `subtract_star!`
+# taking extra UnitRange{Int} args are the methods fitters call once per source; the other
+# `add_star!` / `subtract_star!` methods are the whole-frame convenience entry points.
+for psf in (PSF.CircularGaussianPSF, CircularGaussianPRF)
+            # (PSF.AiryPSF, PSF.GaussianPSF, PSF.GaussianPRF, PSF.CircularMoffatPSF, PSF.MoffatPSF)
     for T in (Float32, Float64)
         psfT = psf{T}
         precompile(evaluate, (psfT, T, T))
         precompile(render, (psfT,))
+        precompile(PSF.render!, (Matrix{T}, psfT, UnitRange{Int}, UnitRange{Int}, Nothing))
         precompile(PSF.add_star!, (Matrix{T}, psfT))
         precompile(PSF.subtract_star!, (Matrix{T}, psfT))
+        precompile(PSF.add_star!, (Matrix{T}, psfT, UnitRange{Int}, UnitRange{Int}))
+        precompile(PSF.subtract_star!, (Matrix{T}, psfT, UnitRange{Int}, UnitRange{Int}))
     end
+end
+
+# The empirical models carry a second type parameter -- the backing array, and
+# for the grid the node model -- so they cannot go through the loop above.
+# `GriddedPSFModel{T, <:ImagePSF}` also has the scratch-accelerated `render!`
+# specialization, which is the path the simultaneous fitters take.
+for T in (Float32, Float64)
+    ip = PSF.ImagePSF{T, Matrix{T}}
+    gp = PSF.GriddedPSFModel{T, ip}
+    for m in (ip, gp)
+        precompile(evaluate, (m, T, T))
+        precompile(render, (m,))
+        precompile(PSF.render!, (Matrix{T}, m, UnitRange{Int}, UnitRange{Int}, Nothing))
+        precompile(PSF.add_star!, (Matrix{T}, m, UnitRange{Int}, UnitRange{Int}))
+        precompile(PSF.subtract_star!, (Matrix{T}, m, UnitRange{Int}, UnitRange{Int}))
+    end
+    precompile(PSF._render_scratch, (gp, Int, Type{T}))
+    precompile(PSF.render!, (Matrix{T}, gp, UnitRange{Int}, UnitRange{Int},
+                             NTuple{3, NTuple{4, Matrix{T}}}))
 end
 
 for T in (Float32, Float64)
