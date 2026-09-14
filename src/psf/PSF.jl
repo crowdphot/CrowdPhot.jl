@@ -5,7 +5,7 @@ using ..CrowdPhot: sigma_clip, sigma_clip!, besselj0, besselj1, _clamp_inds
 import ConstructionBase
 import LossFunctions
 import LoopVectorization as LV
-using SpecialFunctions: erf
+using SpecialFunctions: erf, sinint
 using StaticArrays: SA, SVector, MMatrix
 using Statistics: median, mean, quantile, std
 
@@ -500,21 +500,79 @@ function subtract_star!(out::AbstractMatrix, model::AbstractPSFModel)
 end
 
 """
-    pixel_response_kernel(n::Integer)
+    pixel_response_kernel(n::Integer; type::Symbol = :exact)
 
-Returns a discretized flat "pixel response" kernel of full-width `n` (the
-oversampling factor), height 1/n so it sums to 1. Reproduces
-`astropy.convolution.Box2DKernel(width=n).array` exactly (verified for
-n = 1..8): for even n this is *not* a naive n×n uniform box -- it's the exact
-overlap integral of a continuous box of width n against each unit-width pixel
-bin, giving an (n+1)x(n+1) kernel with tapered edge/corner weights.
+Returns the correlation kernel that integrates a PSF tabulated on a grid
+oversampled by `n` over the detector pixel response, for use with
+[`CrowdPhot.correlate`](@ref).  The result is a square, odd-sized,
+separable matrix summing to 1; `type` selects how the integration is
+discretized.  A detector pixel spans `n` samples of the oversampled grid,
+so the underlying continuous operation is convolution with a box of width
+`n`, whose transfer function is `sinc(n f)`.
+
+# Arguments
+- `n::Integer`: the oversampling factor of the grid the kernel will be
+  applied to.  `n = 1` returns the 1x1 identity for either `type`: at
+  detector sampling there is no subpixel structure left to integrate.
+
+# Keywords
+- `type::Symbol`: the quadrature used to discretize the box.
+  - `:exact` (default) implements the box exactly on band-limited input.
+    The kernel weights are the ideal inverse DTFT of `sinc(n f)`, truncated to a
+    half-width of `4n` and Hann-windowed.  This matches the exact
+    continuous-pixel convolution that GalSim (and hence `romanisim`)
+    applies when rendering an oversampled PSF stamp.
+  - `:box` reproduces `astropy.convolution.Box2DKernel(width=n).array`
+    exactly (verified for `n = 1..8`), which is what `romancal`'s
+    `get_gridded_psf_model` uses.  For even `n` this is not a naive `n x n`
+    uniform box; it is the overlap integral of a continuous box of width
+    `n` against each unit-width sample bin, giving an `(n+1) x (n+1)`
+    kernel with tapered edge and corner weights.
+
+!!! note
+    The two types are not equivalent.  `:box` has transfer function
+    `sinc(n f) * sinc(f)`, so it applies an extra box of one *oversampled*
+    sample on top of the pixel, over-smoothing the PSF; for `n = 4` this
+    depresses the modeled peak of a Roman ePSF by about 4% relative to
+    `:exact`.  `:box` exists to reproduce `romancal` results, not because
+    it is the better quadrature.
 """
-function pixel_response_kernel(n::Integer)
+function pixel_response_kernel(n::Integer; type::Symbol = :exact)
+    n > 0 || throw(ArgumentError("oversampling `n` must be positive (got $n)"))
+    # At detector sampling the samples are already pixel-integrated; there is
+    # nothing to average over, and the `:exact` taps would only ring.
+    n == 1 && return fill(1.0, 1, 1)
+    w = if type === :exact
+        _pixel_response_exact(n, 4n)
+    elseif type === :box
+        _pixel_response_box(n)
+    else
+        throw(ArgumentError("type must be :exact or :box (got $(repr(type)))"))
+    end
+    return w * w'
+end
+
+# 1D marginal of the `:box` kernel; see `pixel_response_kernel`.
+function _pixel_response_box(n::Integer)
     sz = isodd(n) ? n : n + 1
     half = n / 2
-    centers = (0:sz-1) .- (sz - 1) / 2
-    w1d = [clamp(min(c + 0.5, half) - max(c - 0.5, -half), 0, Inf) / n for c in centers]
-    return w1d * w1d'
+    centers = (0:(sz - 1)) .- (sz - 1) / 2
+    return [clamp(min(c + 0.5, half) - max(c - 0.5, -half), 0, Inf) / n for c in centers]
+end
+
+# 1D marginal of the `:exact` kernel; see `pixel_response_kernel`.  The ideal
+# taps are the unit-bandwidth sinc integrated over the box,
+# h[k] = (Si(pi*(k + n/2)) - Si(pi*(k - n/2))) / (pi*n), which is the inverse
+# DTFT of sinc(n f).  They decay only as 1/k, so truncation alone would ring;
+# the Hann window suppresses that at negligible cost in the passband.
+# `halfwidth = 4n` is converged: doubling it changes a rendered Roman ePSF by
+# < 0.001% rms.
+function _pixel_response_exact(n::Integer, halfwidth::Integer)
+    halfwidth > 0 || throw(ArgumentError("`halfwidth` must be positive (got $halfwidth)"))
+    k = -halfwidth:halfwidth
+    h = [(sinint(pi * (j + n / 2)) - sinint(pi * (j - n / 2))) / (pi * n) for j in k]
+    h .*= (1 .+ cos.(pi .* k ./ (halfwidth + 1))) ./ 2
+    return h ./ sum(h)
 end
 
 include("parametric_models.jl")

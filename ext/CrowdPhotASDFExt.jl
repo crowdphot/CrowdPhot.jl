@@ -6,7 +6,7 @@ using Statistics: median
 # description of arguments and behavior.
 function CrowdPhot.PSF.roman_crds_gridded_epsf(path::AbstractString;
         defocus = 0, spectral_type::AbstractString = "G2V", psf_subtype::AbstractString = "psf",
-        origin = nothing, normalize::Bool = false)
+        origin = nothing, normalize::Bool = false, pixel_integration::Symbol = :exact)
     psf_subtype in ("psf", "psf_noipc") || throw(ArgumentError(
         "psf_subtype must be \"psf\" or \"psf_noipc\" (got $(repr(psf_subtype))); " *
         "\"extended_psf\"/\"extended_psf_noipc\" are single non-gridded stamps, " *
@@ -61,7 +61,7 @@ function CrowdPhot.PSF.roman_crds_gridded_epsf(path::AbstractString;
     # "Pixel-response convolution" in gridded_psf_crds_plan.md.
     is_old_format = median(sum.(stamps)) < os^2 / 2
     if is_old_format
-        kernel = T.(CrowdPhot.PSF.pixel_response_kernel(os))
+        kernel = T.(CrowdPhot.PSF.pixel_response_kernel(os; type = pixel_integration))
         stamps = Matrix{T}[T(os^2) .* CrowdPhot.correlate(stamp, kernel, :zero) for stamp in stamps]
     end
     # NOTE: `oversampling^2` scaling only happens inside the `is_old_format`
