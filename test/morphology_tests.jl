@@ -1,7 +1,10 @@
 using CrowdPhot: measure_star_shape, measure_star_shape_ref, _moments2, matched_filter,
-    MatchedFilterResult, centroid_poly, choose_centroid, measure_star_shapes
-using CrowdPhot.PSF: CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, evaluate, add_star!, fwhm as psf_fwhm
+    MatchedFilterResult, centroid_poly, choose_centroid, measure_star_shapes,
+    FlatWindow, GaussianWindow, deconvolve_moments, inv_window_var, yfactor, xfactor
+using CrowdPhot.PSF: CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, CircularMoffatPSF,
+    evaluate, add_star!, fwhm as psf_fwhm
 using FillArrays: Fill
+using LinearAlgebra: I
 using StableRNGs: StableRNG
 using Test
 
@@ -55,7 +58,10 @@ end
         @test mom.aperture_sum == 2.0
         @test mom.aperture_area == 3
         @test mom.aperture_sum_err ≈ sqrt(1.0 + 0.25 + 1.0)
-        @test mom.M00 == 9.0
+        # Signed: z = -1, 2, 1 over the three unmasked pixels, so
+        # M00 = 1*(-1) + 4*2 + 1*1 = 8.  There is no positivity clip, which
+        # would drop the z = -1 pixel and give 9.
+        @test mom.M00 == 8.0
     end
 
     @testset "background subtraction" begin
@@ -75,10 +81,20 @@ end
         @test mom_masked.M00 < mom_full.M00
     end
 
-    @testset "all pixels below background — M00 = 0" begin
+    @testset "all pixels below background — M00 non-positive" begin
+        # Signed moments make this -225 rather than 0 (25 pixels at z = -9,
+        # unit weight).  What matters is the invariant the callers rely on:
+        # M00 <= 0 means no usable moments, and `measure_star_shape` must turn
+        # that into NaN rather than a number.
         img = fill(1.0, 5, 5)
         mom = _moments2(img, Fill(1.0, size(img)), 10.0, 3.0, 3.0)
-        @test mom.M00 == 0.0
+        @test mom.M00 == -225.0
+        @test mom.M00 <= 0
+        r = measure_star_shape(img, 3, 3; background = 10.0)
+        @test isnan(r.compactness_aperture)
+        @test isnan(r.fwhm.y) && isnan(r.fwhm.x)
+        @test isnan(r.ellipticity1_aperture) && isnan(r.ellipticity2_aperture)
+        @test isnan(r.centroid.y) && isnan(r.centroid.x)
     end
 
     @testset "single pixel" begin
@@ -91,9 +107,103 @@ end
         @test mom.M20 == 0.0
         @test mom.M02 == 0.0
         @test mom.M11 == 0.0
-        @test mom.W00 == 1.0
-        @test mom.W20 == 0.0
-        @test mom.W02 == 0.0
+        # The W sums are the variance bookkeeping for the M sums, so they run
+        # over exactly the pixels M runs over -- every unmasked pixel, not just
+        # the bright one.  W00 = 25 unit weights; W20 = sum(dy^2) = 50 over the
+        # 5x5.  Under the old positive-only clip only the single z > 0 pixel contributed.
+        @test mom.W00 == 25.0
+        @test mom.W20 == 50.0
+        @test mom.W02 == 50.0
+    end
+
+    @testset "moment windows" begin
+        img, _ = _make_gaussian_cutout(; flux = 500.0, fwhm = 2.5, shape = (15, 15))
+        iv = [0.4 + 0.02 * (i + j) for i in 1:15, j in 1:15]
+
+        # The default is the untapered limit, and passing it explicitly is a no-op.
+        @test _moments2(img, iv, 0.0, 8, 8) === _moments2(img, iv, 0.0, 8, 8, FlatWindow())
+
+        w = GaussianWindow(2.5)
+        mf = _moments2(img, iv, 0.0, 8, 8, FlatWindow())
+        mw = _moments2(img, iv, 0.0, 8, 8, w)
+
+        # A taper strictly reduces every positive-definite accumulator.
+        @test mw.M00 < mf.M00
+        @test mw.W00 < mf.W00
+        # `aperture_sum` is unwindowed by design, so it must not move at all.
+        @test mw.aperture_sum == mf.aperture_sum
+        @test mw.aperture_area == mf.aperture_area
+        @test mw.aperture_sum_err == mf.aperture_sum_err
+
+        # The subtle contract: moments carry w*g, their variances carry w*g^2.
+        # Checked against the tabulated factors directly, since getting this
+        # wrong mis-scales every propagated uncertainty while leaving the
+        # values correct.
+        expect_M00 = sum(iv[i, j] * yfactor(w, i - 8) * xfactor(w, j - 8) * img[i, j]
+                         for i in 1:15, j in 1:15)
+        expect_W00 = sum(iv[i, j] * (yfactor(w, i - 8) * xfactor(w, j - 8))^2
+                         for i in 1:15, j in 1:15)
+        @test mw.M00 ≈ expect_M00 rtol=1e-12
+        @test mw.W00 ≈ expect_W00 rtol=1e-12
+        @test !isapprox(mw.W00, sum(iv[i, j] * yfactor(w, i - 8) * xfactor(w, j - 8)
+                                    for i in 1:15, j in 1:15); rtol=1e-3)
+
+        # Support: unit at the anchor, negligible at the edge, exactly zero past it.
+        @test yfactor(w, 0) == 1
+        @test 0 < yfactor(w, w.hw) < 1e-5
+        @test yfactor(w, w.hw + 1) == 0
+        @test yfactor(w, -w.hw - 100) == 0
+        # FlatWindow factors are type-preserving.
+        @test 1.0f0 * yfactor(FlatWindow(), 3) isa Float32
+
+        # Deconvolution: the bitwise identity for flat, exact for a Gaussian pair.
+        a0, b0, c0 = 1.2345678901234567, 0.98765432109876, -0.5555555555555
+        f0 = deconvolve_moments(FlatWindow(), a0, b0, c0)
+        @test f0.yy === a0 && f0.xx === b0 && f0.xy === c0
+        @test inv_window_var(FlatWindow()) == 0
+
+        sw2 = 1.1^2
+        wg = GaussianWindow(1.1 * 2 * sqrt(2 * log(2)))
+        @test inv_window_var(wg) ≈ inv(sw2) rtol=1e-12
+        # Recovered exactly for any source tensor, *including* a rotated one.
+        # Deconvolving the marginals separately -- which is what this replaced --
+        # is wrong by 2% at a moment correlation of 0.25 and 11% at 0.53.
+        for Ss in ([3.0 0.0; 0.0 3.0], [4.0 0.0; 0.0 2.0],
+                   [4.0 0.7; 0.7 2.0], [4.0 1.5; 1.5 2.0])
+            Sm = inv(inv(Ss) + I / sw2)
+            r = deconvolve_moments(wg, Sm[1, 1], Sm[2, 2], Sm[1, 2])
+            @test r.yy ≈ Ss[1, 1] rtol=1e-10
+            @test r.xx ≈ Ss[2, 2] rtol=1e-10
+            @test r.xy ≈ Ss[1, 2] atol=1e-10
+        end
+        # No solution -> NaN for all three, never a partial answer.
+        for args in ((1.0, 1.0, 2.0),      # measured tensor not positive definite
+                     (50.0, 50.0, 0.0),    # source at least as broad as the window
+                     (0.0, 0.0, 0.0))      # no signal
+            @test all(isnan, values(deconvolve_moments(wg, args...)))
+        end
+
+        # Every size and shape statistic is absolute, window or not, because the
+        # window is divided back out.  On a Gaussian source the deconvolution is
+        # exact, so tapering changes the reported values hardly at all even
+        # though it changes the moments underneath a lot (checked above).
+        rf = measure_star_shape(img, 8, 8; inv_var = iv)
+        rw = measure_star_shape(img, 8, 8; inv_var = iv, window = GaussianWindow(2.5))
+        @test rw.fwhm.y ≈ rf.fwhm.y rtol=0.02
+        @test rw.fwhm.x ≈ rf.fwhm.x rtol=0.02
+        @test rw.compactness_aperture ≈ rf.compactness_aperture rtol=0.05
+        @test rw.ellipticity1_aperture ≈ rf.ellipticity1_aperture atol=0.02
+        @test rw.ellipticity2_aperture ≈ rf.ellipticity2_aperture atol=0.02
+
+        # Degenerate widths are rejected rather than silently unwindowed.
+        @test_throws "must be finite and positive" GaussianWindow(0.0)
+        @test_throws "must be finite and positive" GaussianWindow(-1.0)
+        @test_throws "must be finite and positive" GaussianWindow(NaN)
+
+        @test GaussianWindow(2.5f0).inv_var_w isa Float32
+        @test measure_star_shape(Float32.(img), 8, 8;
+                                 inv_var = Float32.(iv),
+                                 window = GaussianWindow(2.5f0)).fwhm.y isa Float32
     end
 end
 
@@ -334,16 +444,29 @@ end
         @test shape.fwhm.x > shape.fwhm.y
     end
 
-    @testset "background exclusion — z>0 in _moments2" begin
+    @testset "background over-subtraction is caught, not absorbed" begin
         img, _ = _make_gaussian_cutout(; x0=5.0, y0=5.0, flux=200.0, fwhm=2.0, shape=(9,9))
-        # With bg=1000, all pixels are below background → M00=0.
-        r_below = measure_star_shape(img, 5, 5; background=1000)
-        @test r_below.moment_norm == 0.0
-        @test isnan(r_below.fwhm.y)
-        # With bg=5, only the central pixels exceed background.
-        r_partial = measure_star_shape(img, 5, 5; background=5)
-        @test r_partial.moment_norm > 0
-        @test r_partial.moment_norm < 200.0  # less than total unweighted flux
+
+        # Moments are signed, so over-subtracting the background drives
+        # `moment_norm` negative instead of quietly zeroing the offending pixels.
+        # That is the safer failure: the guard fires and every shape statistic
+        # comes back NaN, where the old positivity clip would have built a
+        # plausible-looking measurement out of only the surviving bright pixels.
+        for bg in (5, 1000)
+            r = measure_star_shape(img, 5, 5; background = bg)
+            @test r.moment_norm < 0
+            @test isnan(r.fwhm.y) && isnan(r.fwhm.x)
+            @test isnan(r.compactness_aperture)
+            @test isnan(r.ellipticity1_aperture)
+        end
+
+        # A correct background leaves the measurement intact: with unit weights
+        # `moment_norm` is just the summed signal, so it recovers the input flux.
+        # (Slightly *above* it here, since `evaluate` samples the analytic
+        # profile rather than integrating over each pixel.)
+        r_ok = measure_star_shape(img, 5, 5; background = 0)
+        @test r_ok.moment_norm ≈ 200.0 rtol=1e-3
+        @test isfinite(r_ok.fwhm.y)
     end
 
     @testset "noisy image — ellipticity bounded" begin
@@ -751,6 +874,42 @@ end
     @testset "mismatched cutout and render are rejected" begin
         @test_throws "must have the same `axes`" measure_star_shape_ref(
             rend, zeros(Float64, ny, nx - 1), 8, 8, 1.0)
+    end
+
+    @testset "the window is shared by both halves" begin
+        # The invariant the whole function exists to enforce: measurement and
+        # reference must see the identical window, or the comparison stops
+        # cancelling.  With `clean == rend` every ratio must still be exactly 1
+        # and every difference exactly 0 *with* a window in play.
+        #
+        # Note this holds by identity of method, not by correctness of method:
+        # window deconvolution is exact only for a Gaussian source, so the check
+        # is repeated on a Moffat render, where it still has to be exact.  That
+        # is why the reference half is windowed too rather than left untapered,
+        # which would be individually more accurate and break the invariant.
+        iv = fill(0.7, ny, nx)
+        moff = zeros(Float64, ny, nx)
+        add_star!(moff, CircularMoffatPSF(; y = 8.3, x = 7.6, α = 1.8, β = 2.5,
+                                            flux = 1000.0, bkg = 0.0), 1:ny, 1:nx)
+        for (lab, img) in (("Gaussian", rend), ("Moffat", moff))
+            w = GaussianWindow(3.0)
+            s = measure_star_shape_ref(img, img, 8, 8, maximum(img);
+                                       inv_var = iv, window = w)
+            @test s.aperture.compactness_aperture == s.psf_ref.aperture.compactness_aperture
+            @test s.aperture.fwhm.y == s.psf_ref.aperture.fwhm.y
+            @test s.aperture.fwhm.x == s.psf_ref.aperture.fwhm.x
+            @test s.aperture.ellipticity1_aperture - s.psf_ref.aperture.ellipticity1_aperture == 0
+            @test s.aperture.ellipticity2_aperture - s.psf_ref.aperture.ellipticity2_aperture == 0
+        end
+
+        # Non-vacuity: the window is genuinely in play.  A Gaussian source would
+        # show nothing here, since deconvolving an exactly-Gaussian profile
+        # returns the untapered answer; a Moffat is only approximately recovered,
+        # so tapering moves the value.
+        sw = measure_star_shape_ref(moff, moff, 8, 8, maximum(moff);
+                                    inv_var = iv, window = GaussianWindow(3.0))
+        sf = measure_star_shape_ref(moff, moff, 8, 8, maximum(moff); inv_var = iv)
+        @test sw.aperture.compactness_aperture != sf.aperture.compactness_aperture
     end
 
     @testset "sharpness_err" begin

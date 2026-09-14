@@ -18,7 +18,7 @@ stars, the cost of forming normal matrices can scale like `N^2`,
 while a dense least-squares solve can scale like `N^3` in the group size.
 In contrast, when the fitting radius, the residual-image approach scales
 approximately linearly with the number of stars and passes:
-``N_passes * N_stars``. By operating on the progressive residual image,
+`N_passes * N_stars`. By operating on the progressive residual image,
 this method can give good results even in crowded fields.
 
 ## Result type
