@@ -44,7 +44,7 @@ length (the number of input sources).  `M` is the element type of
   !!! note
       Currently populated only by
       [`fit_all_stars_simultaneous_multipass`](@ref).  [`fit_all_stars`](@ref)
-      and [`fit_all_stars_simultaneous`](@ref) leave it empty, so check
+      leaves it empty, so check
       `isempty` rather than assuming one entry per source.
 
 # Goodness-of-fit diagnostics

@@ -51,6 +51,5 @@ per-star diagnostics computed on the final pass over exactly the fitting box:
 
 ```@docs
 fit_all_stars
-CrowdPhot.fit_all_stars_simultaneous
 CrowdPhot.fit_all_stars_simultaneous_multipass
 ```
