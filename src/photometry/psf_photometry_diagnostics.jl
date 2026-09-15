@@ -1,6 +1,6 @@
 # Shared per-star goodness-of-fit diagnostics for PSF photometry.
 #
-# `fit_all_stars` (sequential) and `fit_all_stars_simultaneous` compute the
+# `fit_all_stars` (sequential) and `fit_all_stars_simultaneous_multipass` compute the
 # same qfit / qfit_expected / qfit_z / crowding / spread_model statistics so
 # their results compare field-for-field.  The math below is extracted from the
 # sequential path (psf_photometry_single.jl) so both arms share one

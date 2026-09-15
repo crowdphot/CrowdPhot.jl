@@ -1,9 +1,15 @@
 using CrowdPhot
 using CrowdPhot: Catalog, Discards, FitPlan, append_sources, sort_morton, drop!,
     prune_mask, estimate_background_multipass, detect_sources, stamp_geometry, theta_from_catalog,
-    _anchor_key2, _SepGrid, _has_neighbor, _insert!, matched_filter, measure_star_shapes
+    _anchor_key2, _SepGrid, _has_neighbor, _insert!, matched_filter, measure_star_shapes,
+    StampDerivatives, apply_JT!, apply_J!, _jacobian_operator, _fill_stamps!, _model_radii,
+    _render_model!, _accum_model!
+using CrowdPhot.PSF
 using CrowdPhot.PSF: CircularGaussianPSF, GriddedPSFModel, GaussianPRF
 using CrowdPhot.Background: SExtractorBackground, MADStdRMS
+using ConstructionBase
+using Krylov: lsqr!, lsmr!, LsqrWorkspace, LsmrWorkspace, solution
+using LinearAlgebra: dot, I
 using StableRNGs
 using Statistics: median, mean
 using Test
@@ -27,6 +33,349 @@ function test_field(; ny = 160, nx = 160, n = 90, seed = 20240905, flux = (800.0
     bg = varying_background(ny, nx)
     img, src = simulate_image((ny, nx), TEST_PSF, n; background = bg, flux, rng, border = 8)
     return img, src, bg
+end
+
+# Build the full (npix x n) Jacobian from a StampDerivatives so the operator
+# and LSQR step can be checked against dense linear algebra.
+function dense_J(stamp::StampDerivatives)
+    p, S2, n_active = size(stamp.values)
+    J = zeros(stamp.npix, n_active * p)
+    for a in 0:(n_active - 1)
+        for m in 1:S2
+            fi = stamp.pixels[m, a + 1]
+            fi != 0 || continue
+            for k in 1:p
+                J[fi, a * p + k] = stamp.values[k, m, a + 1]
+            end
+        end
+    end
+    return J
+end
+
+# Column-equilibrate a stamp (as the real fill does) so H has unit diagonal.
+function equilibrate!(stamp::StampDerivatives)
+    p, S2, n_active = size(stamp.values)
+    for a in 1:n_active
+        for k in 1:p
+            s = zero(eltype(stamp.values))
+            for m in 1:S2
+                s += stamp.values[k, m, a]^2
+            end
+            s = max(sqrt(s), eps())
+            for m in 1:S2
+                stamp.values[k, m, a] /= s
+            end
+        end
+    end
+    return stamp
+end
+
+@testset "stamp operator kernels" begin
+    rng = StableRNG(1234)
+
+    @testset "_fill_stamps! preserves frozen colnorm/values" begin
+        psf = CircularGaussianPSF(y=0.0, x=0.0, fwhm=2.0, flux=1.0, bkg=0.0)
+        fixed = (; fwhm=2.0, bkg=0.0)
+        free_names, free_idx, _ = PSF.free_params(psf, fixed)
+        p = length(free_idx)
+        prop_names = collect(keys(ConstructionBase.getproperties(psf)))
+        row_y = findfirst(==(:y), prop_names)
+        row_x = findfirst(==(:x), prop_names)
+        row_flux = findfirst(==(:flux), prop_names)
+        grad_col = [free_names[k] === :y ? 1 : (free_names[k] === :x ? 2 : 3) for k in 1:p]
+        free_names_val = Val(free_names)
+
+        R = 1
+        dy_off = Int[]
+        dx_off = Int[]
+        for dx in -R:R, dy in -R:R
+            push!(dy_off, dy)
+            push!(dx_off, dx)
+        end
+        S2 = length(dy_off)
+        n_active = 2
+        ny = 30
+        anchor_y = [10, 10]
+        anchor_x = [10, 20]  # far apart: no shared pixels between the two stars
+        pixels = zeros(Int32, S2, n_active)
+        for a in 1:n_active, m in 1:S2
+            gy = anchor_y[a] + dy_off[m]
+            gx = anchor_x[a] + dx_off[m]
+            pixels[m, a] = gy + (gx - 1) * ny
+        end
+        npix = ny * 30
+        θ = zeros(p * n_active)
+        for a in 1:n_active
+            θ[(a - 1) * p .+ (1:p)] .= (Float64(anchor_y[a]), Float64(anchor_x[a]), 100.0)
+        end
+        w = ones(npix)
+        stamp = StampDerivatives{Float64, Int32}(
+            zeros(p, S2, n_active), pixels, zeros(p, n_active), npix, p, S2)
+
+        live = trues(n_active)
+        live[2] = false  # star 2 frozen from the start
+        _fill_stamps!(stamp, psf, free_names_val, fixed, θ, w,
+            grad_col, dy_off, dx_off, anchor_y, anchor_x, row_y, row_x, row_flux, live, nothing)
+        values_before = copy(stamp.values)
+        colnorm_before = copy(stamp.colnorm)
+        @test all(isfinite, values_before)
+        @test all(isfinite, colnorm_before)
+
+        # Repeated fills with a perturbed θ for the still-live star only: the
+        # frozen star's column must stay bitwise untouched, not drift or blow
+        # up via a stale colnorm floor (the bug this test regresses).
+        θ2 = copy(θ)
+        for _ in 1:5
+            θ2[1] += 0.1
+            _fill_stamps!(stamp, psf, free_names_val, fixed, θ2, w,
+                grad_col, dy_off, dx_off, anchor_y, anchor_x, row_y, row_x, row_flux, live, nothing)
+        end
+        @test stamp.values[:, :, 2] == values_before[:, :, 2]
+        @test stamp.colnorm[:, 2] == colnorm_before[:, 2]
+        @test all(isfinite, stamp.values)
+        @test all(isfinite, stamp.colnorm)
+    end
+
+    @testset "_accum_model! removes a subset" begin
+        # The multipass pass loop carries its model forward by subtracting pruned
+        # sources instead of re-rendering the survivors (`unrender!`).  The two
+        # agree in exact arithmetic; this pins that they agree numerically, and
+        # that the subtraction covers the full per-source `model_R` box.
+        psf = CircularGaussianPSF(y = 0.0, x = 0.0, fwhm = 2.5, flux = 1.0, bkg = 0.0)
+        fixed = (; fwhm = 2.5, bkg = 0.0)
+        free_names, _, _ = PSF.free_params(psf, fixed)
+        fnv = Val(free_names)
+        p = length(free_names)
+        ny = nx = 48
+        npix = ny * nx
+        rng = StableRNG(99)
+        n = 12
+        anchor_y = rand(rng, 8:41, n)
+        anchor_x = rand(rng, 8:41, n)
+        model_R = rand(rng, 3:6, n)
+        θ = Float64[]
+        for j in 1:n
+            append!(θ, (anchor_y[j] + 0.3, anchor_x[j] - 0.25, 500.0 * j))
+        end
+        Rmax = maximum(model_R)
+        rbuf = Matrix{Float64}(undef, 2Rmax + 1, 2Rmax + 1)
+        rs = PSF._render_scratch(psf, 2Rmax + 1, Float64)
+
+        keep = trues(n); keep[[2, 5, 9]] .= false
+        all_img = zeros(npix); sur_img = zeros(npix)
+        _render_model!(all_img, psf, fnv, fixed, θ, p, model_R, anchor_y, anchor_x,
+            ny, nx, trues(n), rbuf, rs)
+        _render_model!(sur_img, psf, fnv, fixed, θ, p, model_R, anchor_y, anchor_x,
+            ny, nx, keep, rbuf, rs)
+        # subtract the dropped sources from the full render
+        _accum_model!(all_img, psf, fnv, fixed, θ, p, model_R, anchor_y, anchor_x,
+            ny, nx, .!keep, rbuf, rs, -1.0)
+        @test all_img ≈ sur_img rtol = 1.0e-12
+        @test maximum(abs, all_img .- sur_img) < 1.0e-9 * maximum(abs, sur_img)
+        # A no-op mask leaves the image untouched, bitwise.
+        before = copy(sur_img)
+        _accum_model!(sur_img, psf, fnv, fixed, θ, p, model_R, anchor_y, anchor_x,
+            ny, nx, falses(n), rbuf, rs, -1.0)
+        @test sur_img == before
+    end
+
+    @testset "_fill_stamps! zeros masked entries" begin
+        # `apply_J!`/`apply_JT!` touch masked entries (the adjoint gathers the
+        # clamped `u[1]`) and rely on the derivative being exactly zero.  The
+        # multipass `StampStore` reuses one buffer across passes, so a skipped
+        # slot would otherwise keep a derivative from a different source/mask.
+        psf = CircularGaussianPSF(y = 0.0, x = 0.0, fwhm = 2.0, flux = 1.0, bkg = 0.0)
+        fixed = (; fwhm = 2.0, bkg = 0.0)
+        free_names, free_idx, _ = PSF.free_params(psf, fixed)
+        p = length(free_idx)
+        prop_names = collect(keys(ConstructionBase.getproperties(psf)))
+        row_y, row_x, row_flux = findfirst(==(:y), prop_names), findfirst(==(:x), prop_names), findfirst(==(:flux), prop_names)
+        grad_col = [free_names[k] === :y ? 1 : (free_names[k] === :x ? 2 : 3) for k in 1:p]
+        free_names_val = Val(free_names)
+
+        R, ny = 1, 30
+        dy_off = Int[]; dx_off = Int[]
+        for dx in -R:R, dy in -R:R
+            push!(dy_off, dy); push!(dx_off, dx)
+        end
+        S2 = length(dy_off)
+        npix = ny * 30
+        anchor_y = [10]; anchor_x = [10]
+        pixels = zeros(Int32, S2, 1)
+        for m in 1:S2                      # every other stamp entry masked out
+            isodd(m) || continue
+            pixels[m, 1] = (anchor_y[1] + dy_off[m]) + (anchor_x[1] + dx_off[m] - 1) * ny
+        end
+        θ = Float64[anchor_y[1], anchor_x[1], 100.0]
+        w = ones(npix)
+        stamp = StampDerivatives{Float64, Int32}(
+            fill(NaN, p, S2, 1), pixels, zeros(p, 1), npix, p, S2)   # poisoned buffer
+
+        _fill_stamps!(stamp, psf, free_names_val, fixed, θ, w, grad_col, dy_off, dx_off,
+            anchor_y, anchor_x, row_y, row_x, row_flux, trues(1), nothing)
+        for m in 1:S2
+            pixels[m, 1] == 0 || continue
+            @test all(iszero, stamp.values[:, m, 1])
+        end
+        @test all(isfinite, stamp.values)
+        # The adjoint must stay finite: a masked slot left at NaN poisons all of it.
+        z = zeros(p)
+        apply_JT!(z, stamp, ones(npix), trues(1), Vector{Float64}(undef, S2))
+        @test all(isfinite, z)
+    end
+
+    @testset "adjoint identity" begin
+        p = 3
+        S2 = 9
+        n_active = 4
+        npix = 20
+        pixels = zeros(Int32, S2, n_active)
+        # Give stars overlapping footprints.
+        for a in 1:n_active
+            for m in 1:S2
+                fi = mod(m + (a - 1) * 2 - 1, npix) + 1
+                pixels[m, a] = fi
+            end
+        end
+        stamp = StampDerivatives{Float64, Int32}(
+            randn(rng, p, S2, n_active), pixels, zeros(p, n_active), npix, p, S2)
+        u = randn(rng, npix)
+        v = randn(rng, p * n_active)
+        y = zeros(npix)
+        z = zeros(p * n_active)
+        apply_J!(y, stamp, v)
+        apply_JT!(z, stamp, u, trues(n_active))
+        @test dot(u, y) ≈ dot(z, v) rtol = 1e-12
+
+        # Both products agree with the explicit dense Jacobian.
+        J = dense_J(stamp)
+        @test y ≈ J * v rtol = 1e-12
+        @test z ≈ J' * u rtol = 1e-12
+
+        # A frozen star drops its columns from J: `apply_J!` ignores that
+        # star's slice of `v`, and `apply_JT!` leaves its slice of `z` at 0.
+        live = trues(n_active); live[2] = false
+        Jm = copy(J); Jm[:, (2 - 1) * p + 1:2 * p] .= 0
+        apply_J!(y, stamp, v, live, zeros(S2))
+        apply_JT!(z, stamp, u, live)
+        @test y ≈ Jm * v rtol = 1e-12
+        @test z ≈ Jm' * u rtol = 1e-12
+        @test all(iszero, view(z, (2 - 1) * p + 1:2 * p))
+    end
+
+    @testset "matrix-free operator matches dense J" begin
+        p = 3
+        S2 = 9
+        n_active = 6
+        npix = 30
+        pixels = zeros(Int32, S2, n_active)
+        for a in 1:n_active, m in 1:S2
+            pixels[m, a] = mod(m + (a - 1) * 2 - 1, npix) + 1
+        end
+        stamp = StampDerivatives{Float64, Int32}(
+            randn(rng, p, S2, n_active), pixels, zeros(p, n_active), npix, p, S2)
+        equilibrate!(stamp)
+        J = dense_J(stamp)
+        n = p * n_active
+
+        live = trues(n_active)
+        op = _jacobian_operator(stamp, live, zeros(S2), npix, n)
+        v = randn(rng, n)
+        u = randn(rng, npix)
+        @test op * v ≈ J * v rtol = 1e-12
+        @test op' * u ≈ J' * u rtol = 1e-12
+
+        # `op` closes over `live`: freezing a star zeroes its columns in place.
+        live[3] = false
+        Jm = copy(J); Jm[:, (3 - 1) * p + 1:3 * p] .= 0
+        @test op * v ≈ Jm * v rtol = 1e-12
+        @test op' * u ≈ Jm' * u rtol = 1e-12
+    end
+
+    @testset "LSQR/LSMR step matches dense damped normal-equation solve" begin
+        p = 3
+        S2 = 9
+        n_active = 6
+        npix = 8 * n_active + 8
+        pixels = zeros(Int32, S2, n_active)
+        # Light overlap (1 shared pixel between adjacent stars) so JᵀJ is
+        # well-conditioned and the Krylov solves converge tightly.
+        for a in 1:n_active, m in 1:S2
+            pixels[m, a] = mod(m + (a - 1) * 8 - 1, npix) + 1
+        end
+        stamp = StampDerivatives{Float64, Int32}(
+            randn(rng, p, S2, n_active), pixels, zeros(p, n_active), npix, p, S2)
+        equilibrate!(stamp)
+        J = dense_J(stamp)
+        n = p * n_active
+
+        μ = 1.0e-3                       # Marquardt damping (the outer-loop `λ`)
+        b = randn(rng, npix)             # weighted residual RHS
+        δ_dense = (J' * J + μ * Matrix{Float64}(I, n, n)) \ (J' * b)
+
+        for (wsT, solve!) in ((LsqrWorkspace, lsqr!), (LsmrWorkspace, lsmr!))
+            live = trues(n_active)
+            op = _jacobian_operator(stamp, live, zeros(S2), npix, n)
+            ws = wsT(npix, n, Vector{Float64})
+            solve!(ws, op, b; λ = sqrt(μ), itmax = 200, atol = 1e-12, btol = 1e-12)
+            @test solution(ws) ≈ δ_dense rtol = 1e-7 atol = 1e-9
+
+            # A frozen star: its slice of the step stays exactly 0 (its columns
+            # of `op` are structurally zero and the solver starts from 0).
+            live[2] = false
+            solve!(ws, op, randn(rng, npix); λ = sqrt(μ), itmax = 200, atol = 1e-12, btol = 1e-12)
+            @test all(iszero, view(solution(ws), (2 - 1) * p + 1:2 * p))
+        end
+    end
+    @testset "_model_radii" begin
+        psf = CircularGaussianPSF(y = 0.0, x = 0.0, fwhm = 2.5, flux = 1.0, bkg = 0.0)
+        R_fit, R_cap = 2, 20
+        w = fill(1 / 125.0, 4000)               # sigma_bg ~ 11.2 ADU
+        # Scalar path: one clamped value for all.
+        @test _model_radii(psf, 7.0, 1.0, R_fit, R_cap, w, Float64[100, 5e4]) == fill(7, 2)
+        @test _model_radii(psf, 1.0, 1.0, R_fit, R_cap, w, Float64[100]) == [R_fit]   # clamped up
+        @test _model_radii(psf, 999.0, 1.0, R_fit, R_cap, w, Float64[100]) == [R_cap] # clamped down
+        # :auto path: monotone non-decreasing in flux, faint -> R_fit, bright grows.
+        fl = Float64[50, 500, 5_000, 50_000, 500_000]
+        rr = _model_radii(psf, :auto, 1.0, R_fit, R_cap, w, fl)
+        @test issorted(rr)
+        @test all(R_fit .<= rr .<= R_cap)
+        @test rr[1] == R_fit          # a faint source's wings are below the noise
+        @test rr[end] > rr[1]         # a bright source needs a larger box
+        # A larger nsigma (looser threshold) never needs a larger box.
+        @test all(_model_radii(psf, :auto, 3.0, R_fit, R_cap, w, fl) .<= rr)
+
+        # `sigma_bg` comes from a strided sample of `w`, taken for speed on a
+        # full frame.  A periodically masked map can put every valid pixel off
+        # that stride, which used to reach `quantile` with an empty vector and
+        # throw `ArgumentError: empty data vector`.  The full-map fallback must
+        # recover the *same* radii the dense map gives, not just avoid the
+        # crash -- landing on the `sigma_bg = 1` default would silently mis-size
+        # every box.
+        fl2 = Float64[3.0e4, 1.0e3]
+        npix = 160_000                      # > 131072, so the stride is 2
+        striped = zeros(npix); striped[2:2:end] .= 1 / 100.0
+        @test all(iszero, striped[1:2:end])   # the sample really is empty
+        dense = fill(1 / 100.0, npix)
+        @test _model_radii(psf, :auto, 1.0, R_fit, R_cap, striped, fl2) ==
+              _model_radii(psf, :auto, 1.0, R_fit, R_cap, dense, fl2)
+        @test _model_radii(psf, :auto, 1.0, R_fit, R_cap, striped, fl2) !=
+              _model_radii(psf, :auto, 1.0, R_fit, R_cap, zeros(npix), fl2)
+        # No positive finite weight anywhere is genuinely degenerate: `sigma_bg`
+        # falls back to 1 and the radius is set by the curve of growth alone.
+        @test all(R_fit .<= _model_radii(psf, :auto, 1.0, R_fit, R_cap,
+                                         zeros(npix), fl2) .<= R_cap)
+    end
+    @testset "_model_radii for GriddedPSFModel" begin
+        # The :auto path renders a unit PSF and takes its curve of growth; for
+        # an image/gridded PSF that uses the generic (pixel-integrated)
+        # `curve_of_growth` and `ConstructionBase.setproperties`.
+        circ = CircularGaussianPSF(y = 0.0, x = 0.0, fwhm = 2.0, flux = 1.0, bkg = 0.0)
+        node = ImagePSF(render(circ); y = 0.0, x = 0.0, flux = 1.0, bkg = 0.0, oversampling = 1, normalize = true)
+        gpsf = GriddedPSFModel([node], [0.0], [0.0]; y = 0.0, x = 0.0, flux = 1.0, bkg = 0.0)
+        w = fill(1 / 125.0, 4000)
+        rr = _model_radii(gpsf, :auto, 1.0, 2, 15, w, Float64[50, 500, 5_000, 50_000])
+    end
 end
 
 @testset "Separation grid" begin
@@ -444,42 +793,6 @@ end
     @test isempty(r0.phot.flux)
     @test r0.phot.n_failed == length(src.y)
     @test r0.phot.residual ≈ img .- r0.background.background
-end
-
-@testset "fitter parity with fit_all_stars_simultaneous" begin
-    # The strongest available check that re-expressing sections 2-6 of
-    # `fit_all_stars_simultaneous` as `stamp_geometry` plus `fit_pass` preserved
-    # the fitter: same catalog, same weights, detection suppressed, pruning off,
-    # one linearization per pass.
-    rng = StableRNG(4242)
-    img, src = simulate_image((140, 140), TEST_PSF, 45; background = 100.0,
-        flux = (2000.0, 20000.0), rng, border = 10)
-    imgbs = img .- 100.0
-    iv = fill(1 / 100.0, size(imgbs))
-    srcs = (; y = src.y, x = src.x, flux = src.flux)
-
-    A = fit_all_stars_simultaneous(imgbs, TEST_PSF, srcs, 4.0;
-        fixed = (; fwhm = PSF_FWHM, bkg = 0.0), inv_var = iv, inner_iterations = 10,
-        linear_tol = 1e-4, max_step = 1.0, max_trials = 8, max_iter = 2,
-        x_tol = 0.0, g_tol = 0.0, f_tol = 0.0, λ_init = 1e-3)
-    B = fit_all_stars_simultaneous_multipass(imgbs, TEST_PSF, srcs, 4.0;
-        fixed = TEST_FIXED, inv_var = iv, detect_sigma = 1e9, max_iter = 1, min_iter = 1,
-        prune = false, linearizations_per_pass = 1, linear_iterations = 10,
-        linear_tol = 1e-4, max_step = 1.0, max_damping_trials = 8, λ_init = 1e-3)
-
-    @test length(B.phot.y) == length(A.y)
-    @test B.n_detection_passes == 1
-    ord = [argmin([hypot(B.phot.y[j] - A.y[i], B.phot.x[j] - A.x[i]) for j in eachindex(B.phot.y)])
-           for i in eachindex(A.y)]
-    @test length(unique(ord)) == length(A.y)
-    @test maximum(abs.(A.y .- B.phot.y[ord])) < 0.05
-    @test maximum(abs.(A.x .- B.phot.x[ord])) < 0.05
-    rel = abs.((A.flux .- B.phot.flux[ord]) ./ A.flux)
-    # Isolated sources agree to solver tolerance; tightly blended pairs are the
-    # documented near-degenerate flux-exchange direction and move more.
-    @test median(rel) < 1e-3
-    @test maximum(rel) < 0.05
-    @test maximum(abs.((A.flux_err .- B.phot.flux_err[ord]) ./ A.flux_err)) < 1e-4
 end
 
 @testset "pass loop scheduling" begin
