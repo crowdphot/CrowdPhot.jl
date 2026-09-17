@@ -1,5 +1,5 @@
 import CrowdPhot
-using CrowdPhot.PSF: GriddedPSFModel, GaussianPRF, CircularGaussianPRF, ImagePSF, AbstractPSFModel, evaluate, evaluate_fg, extent, centroid, integral, background, peak, render, render!, add_star!, subtract_star!, fit_star
+using CrowdPhot.PSF: GriddedPSFModel, GaussianPRF, CircularGaussianPRF, CircularGaussianPSF, ImagePSF, AbstractPSFModel, evaluate, evaluate_fg, extent, centroid, integral, background, peak, render, render!, add_star!, subtract_star!, fit_star
 import ConstructionBase
 using StableRNGs: StableRNG
 using Test
@@ -407,7 +407,7 @@ end
 
     # A model with no specialized path pairs with `nothing`, and a scratch it
     # cannot use is a MethodError rather than a silent fallback.
-    plain = CircularGaussianPRF(y = 3.0, x = 3.0, fwhm = 2.5, flux = 1.0, bkg = 0.0)
+    plain = nodes[1]   # a bare ImagePSF has no specialized render path
     @test CrowdPhot.PSF._render_scratch(plain, S, Float64) === nothing
     @test_throws MethodError render!(got, plain, yr, xr, scratch)
 end

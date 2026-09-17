@@ -31,6 +31,15 @@ const irls_losses = (
     @test idx_fixed == (1, 2, 3, 4)
     @test length(x0_fixed) == 4
 
+    # The free-parameter bookkeeping must fold to compile-time constants: it is what
+    # lets callers recompute the names instead of threading them out of `_star_problem`,
+    # and it keeps `fit_star`'s model concretely typed.
+    @test @inferred(CrowdPhot.PSF._free_names_val(m, (bkg = 1.0,))) === Val((:y, :x, :fwhm, :flux))
+    @test (@inferred free_params(m, (bkg = 1.0,))) isa Tuple{NTuple{4, Symbol}, NTuple{4, Int}, Vector{Float64}}
+    # `fit_star`'s model was inferred as `Any` while the free names were a runtime value.
+    @test only(Base.return_types(fit_star, Tuple{typeof(m), Matrix{Float64}})) <:
+        Tuple{typeof(m), CrowdPhot.LMResult}
+
     m2 = model_from_vector(m, Val(names), [1.1, 2.2, 3.3, 9.0, 0.5], (;))
     @test m2.y ≈ 1.1
     @test m2.x ≈ 2.2
