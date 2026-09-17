@@ -391,7 +391,7 @@ touched.  Returns `view(buf, 1:length(yr), 1:length(xr))`, the block filled.
 `scratch` selects the render path by *type*.  `nothing` (the default) renders
 per pixel through `evaluate`.  Passing the buffers
 [`_render_scratch`](@ref) builds for `model` instead dispatches to a
-specialized method where one exists -- currently
+specialized method where one exists -- for example,
 `GriddedPSFModel{T, <:ImagePSF{T}}`, whose per-pixel `evaluate` would
 otherwise redo corner selection, weights and node recentering at every pixel.
 `_render_scratch` returns `nothing` for every model without such a method, so

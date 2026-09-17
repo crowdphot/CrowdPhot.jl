@@ -430,6 +430,12 @@ end
 Run Levenberg-Marquardt with optional IRLS reweighting on a generic
 normal-equation problem. The core optimizer is agnostic to images and PSF model
 types; all model-specific work lives in `problem.accum!`.
+
+`initial_normal = (A, b, cost)` (internal) supplies the normal equations and
+cost at `problem.x0` with `problem.base_weights`, exactly as `problem.accum!`
+would have produced them, and skips that first accumulation.  Callers that
+already evaluated them -- e.g. to test for convergence before fitting -- use
+it to avoid paying for the same accumulation twice.
 """
 function lm_irls(
         problem::LMProblem{T};
@@ -447,7 +453,8 @@ function lm_irls(
         reweight::Union{Nothing, LossFunctions.SupervisedLoss} = nothing,
         scale_estimator::Union{Nothing, AbstractScaleEstimator} = nothing,
         weight_reset_tol::Real = 0.1,
-        covariance_estimator::Union{Nothing, AbstractCovarianceEstimator} = nothing
+        covariance_estimator::Union{Nothing, AbstractCovarianceEstimator} = nothing,
+        initial_normal = nothing
     ) where {T}
 
     # Input validation
@@ -505,8 +512,18 @@ function lm_irls(
         base_weights
     end
 
-    # Fill normal equations, residuals, and return cost at initial parameter vector
-    cost = problem.accum!(A, b, residuals, x, weights)
+    # Fill normal equations, residuals, and return cost at initial parameter vector,
+    # unless the caller already did (see `initial_normal` in the docstring).  The
+    # initial `residuals` are only read by IRLS after a candidate accumulation has
+    # overwritten them, so they need not be supplied.
+    cost = if initial_normal === nothing
+        problem.accum!(A, b, residuals, x, weights)
+    else
+        A0, b0, c0 = initial_normal
+        copyto!(A, A0)
+        copyto!(b, b0)
+        FT(c0)
+    end
     cost_init = cost
 
     # Per-parameter scale for the rescaled x_tol test

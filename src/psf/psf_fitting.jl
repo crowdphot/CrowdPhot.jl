@@ -7,11 +7,40 @@ a `Vector`. `fixed` is a `NamedTuple` whose keys name the fields to freeze.
 """
 function free_params(model::AbstractPSFModel{T}, fixed::NamedTuple = NamedTuple()) where {T}
     all_props = ConstructionBase.getproperties(model)
-    free_names = Tuple(k for k in keys(all_props) if !haskey(fixed, k))
-    free_idx = Tuple(i for (i, k) in enumerate(keys(all_props)) if !haskey(fixed, k))
+    all_names = keys(all_props)
+    # `structdiff` maintains inferability as it computes the free names from the
+    # two NamedTuple *types*, so `free_names` and `free_idx` are compile-time constants
+    # and `_free_names_val` below costs nothing.  A generator filtering on `haskey`
+    # reads more simply but infers as `Tuple{Vararg{Symbol}}`, which makes every
+    # downstream `Val(free_names)` a runtime value (521 ns and 23 allocations per call).
+    free_names = keys(Base.structdiff(all_props, fixed))
+    free_idx = map(k -> findfirst(isequal(k), all_names)::Int, free_names)
     x0 = T[all_props[k] for k in free_names]
     return free_names, free_idx, x0
 end
+
+"""
+    _free_names_val(model, fixed) -> Val{free_names}
+
+The free-parameter names of `model` under `fixed`, `Val`-wrapped for
+[`model_from_vector`](@ref).
+
+Call this whenever you drive [`lm_irls`](@ref) on a `_star_problem`
+yourself and need the fitted model back, as in [`fit_star`](@ref): 
+`lm_irls` returns a parameter vector, and turning that vector back
+into a model requires the names it was built from.
+
+This exists so that `_star_problem` can return a plain `LMProblem` instead of
+pairing it with the names.  That is only viable because the result is a
+function of the two argument *types*, so it constant-folds to zero allocations
+and any caller can recompute it at no cost.  The folding depends on
+`free_params` using `Base.structdiff`, which is why both live here
+and why `psf_fitting_tests.jl` asserts `@inferred` on this call: if that
+inferability is ever lost, this function silently becomes a per-fit allocation
+in the sequential fitter's inner loop.
+"""
+_free_names_val(model, fixed::NamedTuple) =
+    Val(keys(Base.structdiff(ConstructionBase.getproperties(model), fixed)))
 
 """
     model_from_vector(model, ::Val{names}, x, fixed::NamedTuple) -> updated model
@@ -248,7 +277,44 @@ function fit_star(
         weight_reset_tol::Real = 0.1,
         covariance_estimator::Union{Nothing, AbstractCovarianceEstimator} = nothing
     ) where {T}
+    problem = _star_problem(model, image, inds, fixed, inv_var)
+    result = lm_irls(
+        problem;
+        λ_init,
+        λ_up,
+        λ_down,
+        λ_min,
+        λ_max,
+        damping,
+        max_iter,
+        x_tol,
+        f_tol,
+        g_tol,
+        show_trace,
+        reweight,
+        scale_estimator,
+        weight_reset_tol,
+        covariance_estimator
+    )
+    best_model = model_from_vector(model, _free_names_val(model, fixed), result.minimizer, fixed)
+    return best_model, result
+end
 
+"""
+    _star_problem(model, image, inds, fixed, inv_var) -> LMProblem
+
+The normal-equation problem [`fit_star`](@ref) solves for `model`: validated fit
+indices and weights, the free-parameter bookkeeping, and an `accum!` closure using
+the fastest accumulator available for `model`'s type (one method per specialized
+model below; this one streams `evaluate_fg`).
+
+Split out of `fit_star` so a caller can evaluate the normal equations at the
+starting parameters itself -- to test for convergence -- and pass them to
+[`lm_irls`](@ref) as `initial_normal` instead of accumulating them twice.  Such a
+caller rebuilds the fitted model from `result.minimizer` with
+[`model_from_vector`](@ref) and [`_free_names_val`](@ref).
+"""
+function _star_problem(model::AbstractPSFModel{T}, image::AbstractMatrix, inds, fixed::NamedTuple, inv_var) where {T}
     # Run shared validation and parameter bookkeeping for this fit.
     prepared = _prepare_fit_star_inputs(model, image, inds, fixed, inv_var)
     inds, _, free_idx, x0, free_names_val, FT, base_weights = prepared
@@ -284,103 +350,190 @@ function fit_star(
         return cost
     end
 
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(
-        problem;
-        λ_init,
-        λ_up,
-        λ_down,
-        λ_min,
-        λ_max,
-        damping,
-        max_iter,
-        x_tol,
-        f_tol,
-        g_tol,
-        show_trace,
-        reweight,
-        scale_estimator,
-        weight_reset_tol,
-        covariance_estimator
-    )
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
+    return LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
 end
 
 ################################################################################
 # Custom `fit_star` methods for specific PSF models with optimized accumulators.
 ################################################################################
 
-function fit_star(
-        model::CircularGaussianPSF{T},
-        image::AbstractMatrix,
-        inds = axes(image);
-        fixed::NamedTuple = (;),
-        inv_var = nothing,
-        kws...
-    ) where {T}
+#-------------------------------------------------------------------------------
+# Separable circular Gaussians: `CircularGaussianPSF` and `CircularGaussianPRF`
+# share one set of per-axis buffers, one accumulator, one `_star_problem` and
+# one `render!`.  Everything model-specific lives in `_separable_params` and
+# `_separable_axis!`.
+#-------------------------------------------------------------------------------
 
-    # Reuse the generic preparation so this dispatch path preserves validation semantics.
-    prepared = _prepare_fit_star_inputs(model, image, inds, fixed, inv_var)
-    inds, _, free_idx, x0, free_names_val, FT, base_weights = prepared
+"""
+    _separable_axis_buffers(ny, nx, FT) -> NamedTuple
 
-    # Prepare an all-ones weight vector for the unweighted case
-    # so the LV.@turbo IRLS accumulator can always use a weight vector.
-    ones_weights = isnothing(base_weights) ? ones(FT, length(inds)) : base_weights
-    # Stream pixels through a CircularGaussian-specific normal-equation kernel.
-    function accum!(A::AbstractMatrix{FT}, b::AbstractVector{FT}, residuals::AbstractVector{FT}, x::AbstractVector{FT}, weights) where {FT}
-        @assert size(A, 1) == size(A, 2) == length(b) == length(free_idx)
-        @assert length(residuals) == length(inds)
-        m = model_from_vector(model, free_names_val, x, fixed)
-        # Always provide a weight vector to the accumulator for LV.@turbo
-        w = isnothing(weights) ? ones_weights : weights
-        return _accum_circular_gaussian!(A, b, residuals, image, inds, m, free_idx, w)
-    end
+Per-axis scratch for the separable circular Gaussians (`CircularGaussianPSF`,
+`CircularGaussianPRF`): `Ey`, `Gy`, `Hy` of length `ny` and `Ex`, `Gx`, `Hx` of
+length `nx` (see [`_separable_axis!`](@ref)), plus `Ee`, `Ge` of length
+`max(ny, nx) + 1`, the pixel-edge scratch the `CircularGaussianPRF` fill reuses
+for both axes.  Also used by their `_render_scratch` and `_fill_scratch`.
+"""
+_separable_axis_buffers(ny::Int, nx::Int, ::Type{FT}) where {FT} =
+    (; Ey = Vector{FT}(undef, ny), Gy = Vector{FT}(undef, ny), Hy = Vector{FT}(undef, ny),
+       Ex = Vector{FT}(undef, nx), Gx = Vector{FT}(undef, nx), Hx = Vector{FT}(undef, nx),
+       Ee = Vector{FT}(undef, max(ny, nx) + 1), Ge = Vector{FT}(undef, max(ny, nx) + 1))
 
-    # Delegate iteration, IRLS reweighting, damping, and covariance estimation
-    # to the shared LM engine to keep convergence behavior aligned.
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(problem; kws...)
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
+"""
+    _separable_params(model) -> (; αy, αx, amp, cH, cE, cF)
+
+Scalars that turn the per-axis factors of [`_separable_axis!`](@ref) into a
+model's value and gradient.  With `E = Ex[j] Ey[i]` (and `G`, `H` likewise),
+
+- value `= amp E + bkg`,
+- `∂/∂y = amp αy Ex Gy`, `∂/∂x = amp αx Gx Ey`,
+- `∂/∂fwhm = cH (Hx Ey + Ex Hy) + cE E`,
+- `∂/∂flux = cF E`, `∂/∂bkg = 1`.
+
+`αy` and `αx` scale pixel offsets into the axis buffers and are the same
+`sqrt(-GAUSS_PRE)/fwhm = 2 sqrt(ln 2)/fwhm` on both axes for circular models.
+
+!!! note
+    These scalars assume the model's five parameters are `(y, x, fwhm, flux,
+    bkg)` in that order.  A separable model with per-axis widths would need
+    per-axis width constants and a different gradient assembly.
+"""
+function _separable_params(m::CircularGaussianPRF)
+    fwhm = float(m.fwhm)
+    α = sqrt(-oftype(fwhm, GAUSS_PRE)) / fwhm
+    amp = float(m.flux) / 4
+    return (; αy = α, αx = α, amp, cH = amp / fwhm, cE = zero(amp), cF = one(amp) / 4)
 end
 
-function _accum_circular_gaussian!(
+function _separable_params(m::CircularGaussianPSF)
+    fwhm = float(m.fwhm)
+    α = sqrt(-oftype(fwhm, GAUSS_PRE)) / fwhm
+    # Same normalization as the full-parameter path: norm = -(π fwhm² / GAUSS_PRE).
+    norm = -(oftype(fwhm, π) * fwhm^2 / oftype(fwhm, GAUSS_PRE))
+    amp = float(m.flux) / norm
+    return (; αy = α, αx = α, amp, cH = 2 * amp / fwhm, cE = -2 * amp / fwhm, cF = one(amp) / norm)
+end
+
+"""
+    _separable_axis!(E, G, H, Ee, Ge, model, α, μ, r)
+
+One axis of a separable circular Gaussian, for pixel centers `c` in `r` at
+scaled offsets `u = α (c - μ)`.  `Ee` and `Ge` are edge scratch of length
+`length(r) + 1`, used by the `CircularGaussianPRF` method and ignored by the
+`CircularGaussianPSF` one.
+
+`CircularGaussianPSF` samples the profile at pixel centers:
+
+- `E[k] = exp(-u²)`, `G[k] = 2 u E[k]`, `H[k] = u² E[k]`.
+
+`CircularGaussianPRF` integrates it over the pixel, with edges
+`u± = α (c - μ ± 1/2)` and `g(u) = 2 exp(-u²) / √π`:
+
+- `E[k] = erf(u+) - erf(u-)`, `G[k] = g(u-) - g(u+)`, `H[k] = g(u-) u- - g(u+) u+`.
+
+Adjacent pixels share an edge, so the PRF evaluates each edge once: `length(r) +
+1` erf/exp pairs per axis instead of four of each per pixel.  It does so in two
+`@turbo` passes (edges, then differences) rather than one loop carrying the
+previous edge, because the carry would serialize the `erf` calls; the extra pass
+over `Ee`/`Ge` is cheap next to vectorizing them.  In both cases the value and
+the full five-parameter gradient are products of one x factor and one y factor;
+see [`_separable_params`](@ref).
+"""
+function _separable_axis!(E::AbstractVector{FT}, G::AbstractVector{FT}, H::AbstractVector{FT},
+        _Ee, _Ge, ::CircularGaussianPSF, α, μ, r::AbstractUnitRange) where {FT}
+    α, μ = FT(α), FT(μ)
+    # `@turbo` vectorizes the exponentials (4x over the scalar loop at 11 pixels,
+    # and the whole point of factorizing: the per-pixel kernel it replaces got
+    # vectorized `exp` too).  The offset is built affinely from `k` because
+    # `@turbo` needs affine indices.
+    d0 = FT(first(r)) - μ
+    LV.@turbo for k in 1:length(r)
+        u = α * (d0 + (k - 1))
+        e = exp(-u^2)
+        E[k] = e
+        G[k] = 2 * u * e
+        H[k] = u^2 * e
+    end
+    return nothing
+end
+
+function _separable_axis!(E::AbstractVector{FT}, G::AbstractVector{FT}, H::AbstractVector{FT},
+        Ee::AbstractVector{FT}, Ge::AbstractVector{FT},
+        ::CircularGaussianPRF, α, μ, r::AbstractUnitRange) where {FT}
+    tsp = 2 / sqrt(FT(π))
+    α, μ = FT(α), FT(μ)
+    n = length(r)
+    # Offset of the first pixel's lower edge; edge k is `α (d0 + (k - 1))`.
+    d0 = FT(first(r)) - μ - FT(0.5)
+    LV.@turbo for k in 1:(n + 1)
+        u = α * (d0 + (k - 1))
+        Ee[k] = erf(u)
+        Ge[k] = tsp * exp(-u^2)
+    end
+    LV.@turbo for k in 1:n
+        um = α * (d0 + (k - 1))
+        up = um + α
+        gm, gp = Ge[k], Ge[k + 1]
+        E[k] = Ee[k + 1] - Ee[k]
+        G[k] = gm - gp
+        H[k] = gm * um - gp * up
+    end
+    return nothing
+end
+
+"""
+    _separable_axes!(axis, model, yr, xr) -> params
+
+Fill both axes of `axis` (from [`_separable_axis_buffers`](@ref)) for `model`
+over rows `yr` and columns `xr` and return its [`_separable_params`](@ref).
+The parameters carry the `α` the fill itself needs, so returning them keeps
+each call site to one line and evaluates the constants once.
+"""
+function _separable_axes!(axis::NamedTuple, model::Union{CircularGaussianPSF, CircularGaussianPRF},
+        yr::AbstractUnitRange, xr::AbstractUnitRange)
+    p = _separable_params(model)
+    _separable_axis!(axis.Ey, axis.Gy, axis.Hy, axis.Ee, axis.Ge, model, p.αy, model.y, yr)
+    _separable_axis!(axis.Ex, axis.Gx, axis.Hx, axis.Ee, axis.Ge, model, p.αx, model.x, xr)
+    return p
+end
+
+"""
+    _accum_separable_gaussian!(A, b, residuals, image, inds, model, free_idx, weights, [axis])
+
+Normal-equation accumulator shared by `CircularGaussianPSF` and
+`CircularGaussianPRF`.  The per-axis factors of [`_separable_axis!`](@ref) are
+computed once per call (`axis` from [`_separable_axis_buffers`](@ref),
+allocated when omitted), then every pixel's value and five-parameter gradient
+is a product of one x and one y factor.  Pixels are visited in `inds` order, as
+the residuals and weights expect.
+"""
+function _accum_separable_gaussian!(
         A::AbstractMatrix{FT},
         b::AbstractVector{FT},
         residuals::AbstractVector{FT},
         image::AbstractMatrix,
         inds::CartesianIndices,
-        model::CircularGaussianPSF,
+        model::Union{CircularGaussianPSF, CircularGaussianPRF},
         free_idx,
-        weights
+        weights,
+        axis::NamedTuple
     ) where {FT}
-
-    # Precompute model constants exactly as in the full-parameter path.
-    γ = FT(GAUSS_PRE)
-    x0 = FT(model.x)
-    y0 = FT(model.y)
-    fwhm = FT(model.fwhm)
-    fwhm² = fwhm^2
-    norm = -(FT(π) * fwhm² / γ)
-    amp = FT(model.flux) / norm
-    bkg = FT(model.bkg)
-    γ_f2 = γ / fwhm²
 
     # `@turbo` requires affine array indices and compile-time-constant tuple
     # indices, so the runtime-valued `free_idx` subset can't be used to index
-    # a per-pixel gradient tuple inside the loop as the original scalar version did.
-    # Instead, always accumulate the full 5-parameter cost, gradient, and
-    # (upper-triangle, by symmetry) Hessian into scalar reduction variables,
-    # then project onto the requested free-parameter block once after the
-    # loop. `inds` is iterated via its `(yr, xr)` ranges directly (rather
-    # than `CartesianIndices`) so offset/non-1-based `inds` still work, and
-    # the linear index into `residuals` (k) is recovered affinely from
-    # `(i, j)`.
+    # a per-pixel gradient tuple inside the loop.  Instead, always accumulate
+    # the full 5-parameter cost, gradient, and (upper-triangle, by symmetry)
+    # Hessian into scalar reduction variables, then project onto the requested
+    # free-parameter block once after the loop.  `inds` is iterated via its
+    # `(yr, xr)` ranges directly (rather than `CartesianIndices`) so
+    # offset/non-1-based `inds` still work, and the linear index into
+    # `residuals` (k) is recovered affinely from `(i, j)`.
     yr, xr = inds.indices
-    y1 = first(yr)
-    x1 = first(xr)
     ny = length(yr)
+    p = _separable_axes!(axis, model, yr, xr)
+    αy, αx, amp = FT(p.αy), FT(p.αx), FT(p.amp)
+    cH, cE, cF = FT(p.cH), FT(p.cE), FT(p.cF)
+    bkg = FT(model.bkg)
+    Ey, Gy, Hy, Ex, Gx, Hx = axis.Ey, axis.Gy, axis.Hy, axis.Ex, axis.Gx, axis.Hx
 
     cost = zero(FT)
     b1 = b2 = b3 = b4 = b5 = zero(FT)
@@ -390,23 +543,20 @@ function _accum_circular_gaussian!(
     A44 = A45 = zero(FT)
     A55 = zero(FT)
 
-    LV.@turbo for j in xr, i in yr
-        dx = FT(j) - x0
-        dy = FT(i) - y0
-        sqmahab = (dx^2 + dy^2) / fwhm²
-        g = exp(γ * sqmahab)
-        Ag = amp * g
-        f_val = muladd(amp, g, bkg)
-        r = f_val - FT(image[i, j])
-        k = (j - x1) * ny + (i - y1) + 1
+    LV.@turbo for j in eachindex(xr), i in eachindex(yr)
+        ex, ey = Ex[j], Ey[i]
+        E = ex * ey
+        k = (j - 1) * ny + i
+        r = muladd(amp, E, bkg) - FT(image[yr[i], xr[j]])
         residuals[k] = r
         w = FT(weights[k])
         wr = w * r
         cost = muladd(wr, r, cost)
-        g1 = -2 * Ag * γ_f2 * dy
-        g2 = -2 * Ag * γ_f2 * dx
-        g3 = -2 * Ag * (1 + γ * sqmahab) / fwhm
-        g4 = g / norm
+        # evaluate_fg's parameter order: y, x, fwhm, flux, bkg.
+        g1 = amp * αy * ex * Gy[i]
+        g2 = amp * αx * Gx[j] * ey
+        g3 = muladd(cH, muladd(Hx[j], ey, ex * Hy[i]), cE * E)
+        g4 = cF * E
         g5 = one(FT)
         b1 = muladd(wr, g1, b1)
         b2 = muladd(wr, g2, b2)
@@ -450,14 +600,84 @@ function _accum_circular_gaussian!(
     return cost
 end
 
+function _accum_separable_gaussian!(A, b, residuals, image, inds::CartesianIndices,
+        model::Union{CircularGaussianPSF, CircularGaussianPRF}, free_idx, weights)
+    FT = eltype(A)
+    yr, xr = inds.indices
+    # LV.@turbo needs a real weight vector, so the unweighted case gets ones.
+    w = isnothing(weights) ? ones(FT, length(inds)) : weights
+    return _accum_separable_gaussian!(A, b, residuals, image, inds, model, free_idx, w,
+        _separable_axis_buffers(length(yr), length(xr), FT))
+end
+
+# Specialized method: separable per-axis factors; see `_accum_separable_gaussian!`.
+function _star_problem(
+        model::Union{CircularGaussianPSF{T}, CircularGaussianPRF{T}},
+        image::AbstractMatrix,
+        inds,
+        fixed::NamedTuple,
+        inv_var
+    ) where {T}
+
+    prepared = _prepare_fit_star_inputs(model, image, inds, fixed, inv_var)
+    inds, _, free_idx, x0, free_names_val, FT, base_weights = prepared
+
+    # Prepare an all-ones weight vector for the unweighted case
+    # so the LV.@turbo IRLS accumulator can always use a weight vector.
+    ones_weights = isnothing(base_weights) ? ones(FT, length(inds)) : base_weights
+    yr, xr = inds.indices
+    axis = _separable_axis_buffers(length(yr), length(xr), FT)
+    # Stream pixels through the separable normal-equation kernel.
+    function accum!(A::AbstractMatrix{FT}, b::AbstractVector{FT}, residuals::AbstractVector{FT}, x::AbstractVector{FT}, weights) where {FT}
+        @assert size(A, 1) == size(A, 2) == length(b) == length(free_idx)
+        @assert length(residuals) == length(inds)
+        m = model_from_vector(model, free_names_val, x, fixed)
+        w = isnothing(weights) ? ones_weights : weights
+        return _accum_separable_gaussian!(A, b, residuals, image, inds, m, free_idx, w, axis)
+    end
+
+    return LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
+end
+
+# Documented with the generic method in PSF.jl.  The separable circular
+# Gaussians render from the per-axis factors; see the `render!` below.
+_render_scratch(::Union{CircularGaussianPSF, CircularGaussianPRF}, S::Int, ::Type{FT}) where {FT} =
+    _separable_axis_buffers(S, S, FT)
+
+"""
+    render!(buf, model::Union{CircularGaussianPSF, CircularGaussianPRF}, yr, xr, axis)
+
+Separable [`render!`](@ref), reached by passing the buffers
+[`_render_scratch`](@ref) builds: `amp · Ex[j] · Ey[i] + bkg` from the per-axis
+factors of [`_separable_axis!`](@ref), so an `n x n` box costs `2 (n + 1)`
+erf/exp evaluations instead of `4 n²`.
+"""
+function render!(
+        buf::AbstractMatrix{FT}, model::Union{CircularGaussianPSF, CircularGaussianPRF},
+        yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:Integer}, axis::NamedTuple
+    ) where {FT}
+    ny, nx = length(yr), length(xr)
+    p = _separable_axes!(axis, model, yr, xr)
+    amp, bkg = FT(p.amp), FT(model.bkg)
+    Ey, Ex = axis.Ey, axis.Ex
+    # Not `LV.@turbo`: it is faster below ~40x40 but 1.7-1.8x slower once `buf`
+    # outgrows L1 which happens for bright stars with large model radii.
+    @inbounds for j in 1:nx
+        exj = amp * Ex[j]
+        @simd for i in 1:ny
+            buf[i, j] = muladd(exj, Ey[i], bkg)
+        end
+    end
+    return view(buf, 1:ny, 1:nx)
+end
+
 # Specialized method: 9.8x faster at (5,5), 5.6x at (11,11), and 3.3x at (21,21) over generic method.
-function fit_star(
+function _star_problem(
         model::GaussianPSF{T},
         image::AbstractMatrix,
-        inds = axes(image);
-        fixed::NamedTuple = (;),
-        inv_var = nothing,
-        kws...
+        inds,
+        fixed::NamedTuple,
+        inv_var
     ) where {T}
 
     # Reuse shared validation and fixed-parameter bookkeeping.
@@ -473,10 +693,7 @@ function fit_star(
     end
 
     # Delegate iteration details to the shared LM implementation.
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(problem; kws...)
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
+    return LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
 end
 
 function _accum_gaussian!(
@@ -558,119 +775,18 @@ function _accum_gaussian!(
     return cost
 end
 
-# Specialized method: 9.7x faster at (5,5), 3.7x at (11,11), and 1.9x at (21,21) over generic method.
-function fit_star(
-        model::CircularGaussianPRF{T},
-        image::AbstractMatrix,
-        inds = axes(image);
-        fixed::NamedTuple = (;),
-        inv_var = nothing,
-        kws...
-    ) where {T}
-
-    # Reuse shared validation and fixed-parameter bookkeeping.
-    prepared = _prepare_fit_star_inputs(model, image, inds, fixed, inv_var)
-    inds, _, free_idx, x0, free_names_val, FT, base_weights = prepared
-
-    # Stream pixels through a scalar circular-PRF normal-equation kernel.
-    function accum!(A::AbstractMatrix{FT}, b::AbstractVector{FT}, residuals::AbstractVector{FT}, x::AbstractVector{FT}, weights) where {FT}
-        @assert size(A, 1) == size(A, 2) == length(b) == length(free_idx)
-        @assert length(residuals) == length(inds)
-        m = model_from_vector(model, free_names_val, x, fixed)
-        return _accum_circular_gaussian_prf!(A, b, residuals, image, inds, m, free_idx, weights)
-    end
-
-    # Delegate iteration details to the shared LM implementation.
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(problem; kws...)
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
-end
-
-function _accum_circular_gaussian_prf!(
-        A::AbstractMatrix{FT},
-        b::AbstractVector{FT},
-        residuals::AbstractVector{FT},
-        image::AbstractMatrix,
-        inds::CartesianIndices,
-        model::CircularGaussianPRF,
-        free_idx,
-        weights
-    ) where {FT}
-
-    # Precompute model constants used by the integrated Gaussian factors.
-    fill!(A, zero(FT))
-    fill!(b, zero(FT))
-    x0 = FT(model.x)
-    y0 = FT(model.y)
-    fwhm = FT(model.fwhm)
-    flux = FT(model.flux)
-    bkg = FT(model.bkg)
-    α = 2 * sqrt(FT(log(2))) / fwhm
-    two_sqrtpi = 2 / sqrt(FT(π))
-    fl4 = flux / 4
-
-    # Evaluate difference-of-erf derivatives and accumulate the active block.
-    cost = zero(FT)
-    obs_k = 0
-    nparams = length(free_idx)
-    use_weights = !isnothing(weights)
-    @inbounds for idx in inds
-        obs_k += 1
-        w = use_weights ? FT(weights[obs_k]) : one(FT)
-        dx = FT(idx[2]) - x0
-        dy = FT(idx[1]) - y0
-        u_p = α * (dx + FT(0.5))
-        u_m = α * (dx - FT(0.5))
-        v_p = α * (dy + FT(0.5))
-        v_m = α * (dy - FT(0.5))
-        Ex = erf(u_p) - erf(u_m)
-        Ey = erf(v_p) - erf(v_m)
-        f_val = muladd(fl4, Ex * Ey, bkg)
-        r = f_val - FT(image[idx])
-        residuals[obs_k] = r
-        wr = w * r
-        cost = muladd(wr, r, cost)
-
-        # Match evaluate_fg's parameter order: y, x, fwhm, flux, bkg.
-        Gxp = two_sqrtpi * exp(-u_p^2)
-        Gxm = two_sqrtpi * exp(-u_m^2)
-        Gyp = two_sqrtpi * exp(-v_p^2)
-        Gym = two_sqrtpi * exp(-v_m^2)
-        g_full = (
-            fl4 * Ex * α * (Gym - Gyp),
-            fl4 * Ey * α * (Gxm - Gxp),
-            fl4 / fwhm * ((Gxm * u_m - Gxp * u_p) * Ey + Ex * (Gym * v_m - Gyp * v_p)),
-            Ex * Ey / 4,
-            one(FT),
-        )
-
-        # Accumulate the projected normal-equation block expected by lm_irls.
-        for j in 1:nparams
-            gj = g_full[free_idx[j]]
-            b[j] = muladd(wr, gj, b[j])
-            for i in 1:nparams
-                A[i, j] = muladd(w * g_full[free_idx[i]], gj, A[i, j])
-            end
-        end
-    end
-    return cost
-end
-
-# Specialized method: 7.5x faster at (5,5), 3.4x at (11,11), and 1.9x at (21,21) over generic method.
-function fit_star(
+# Specialized method: scalar integrated-Gaussian accumulator.
+function _star_problem(
         model::GaussianPRF{T},
         image::AbstractMatrix,
-        inds = axes(image);
-        fixed::NamedTuple = (;),
-        inv_var = nothing,
-        kws...
+        inds,
+        fixed::NamedTuple,
+        inv_var
     ) where {T}
 
     # Reuse shared validation and fixed-parameter bookkeeping.
     prepared = _prepare_fit_star_inputs(model, image, inds, fixed, inv_var)
     inds, _, free_idx, x0, free_names_val, FT, base_weights = prepared
-
     # Stream pixels through a scalar Gaussian-PRF normal-equation kernel.
     function accum!(A::AbstractMatrix{FT}, b::AbstractVector{FT}, residuals::AbstractVector{FT}, x::AbstractVector{FT}, weights) where {FT}
         @assert size(A, 1) == size(A, 2) == length(b) == length(free_idx)
@@ -680,10 +796,7 @@ function fit_star(
     end
 
     # Delegate iteration details to the shared LM implementation.
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(problem; kws...)
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
+    return LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
 end
 
 function _accum_gaussian_prf!(
@@ -769,13 +882,12 @@ function _accum_gaussian_prf!(
 end
 
 # Specialized method: 5x faster at (5,5), 3.5x at (11,11), and 2.2x at (21,21) over generic method.
-function fit_star(
+function _star_problem(
         model::CircularMoffatPSF{T},
         image::AbstractMatrix,
-        inds = axes(image);
-        fixed::NamedTuple = (;),
-        inv_var = nothing,
-        kws...
+        inds,
+        fixed::NamedTuple,
+        inv_var
     ) where {T}
 
     # Reuse shared validation and fixed-parameter bookkeeping.
@@ -791,10 +903,7 @@ function fit_star(
     end
 
     # Delegate iteration details to the shared LM implementation.
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(problem; kws...)
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
+    return LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
 end
 
 function _accum_circular_moffat!(
@@ -862,13 +971,12 @@ function _accum_circular_moffat!(
 end
 
 # Specialized method: 4.9x faster at (5,5), 2.6x at (11,11), and 1.8x at (21,21) over generic method.
-function fit_star(
+function _star_problem(
         model::MoffatPSF{T},
         image::AbstractMatrix,
-        inds = axes(image);
-        fixed::NamedTuple = (;),
-        inv_var = nothing,
-        kws...
+        inds,
+        fixed::NamedTuple,
+        inv_var
     ) where {T}
 
     # Reuse shared validation and fixed-parameter bookkeeping.
@@ -884,10 +992,7 @@ function fit_star(
     end
 
     # Delegate iteration details to the shared LM implementation.
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(problem; kws...)
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
+    return LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
 end
 
 function _accum_moffat!(
@@ -973,13 +1078,12 @@ function _accum_moffat!(
 end
 
 # Specialized method: 4.3x faster at (5,5), 1.7x at (11,11), and 1.3x at (21,21) over generic method.
-function fit_star(
+function _star_problem(
         model::AiryPSF{T},
         image::AbstractMatrix,
-        inds = axes(image);
-        fixed::NamedTuple = (;),
-        inv_var = nothing,
-        kws...
+        inds,
+        fixed::NamedTuple,
+        inv_var
     ) where {T}
 
     # Reuse shared validation and fixed-parameter bookkeeping.
@@ -995,10 +1099,7 @@ function fit_star(
     end
 
     # Delegate iteration details to the shared LM implementation.
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(problem; kws...)
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
+    return LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
 end
 
 function _accum_airy!(
@@ -1083,13 +1184,12 @@ function _accum_airy!(
 end
 
 # Specialized method: faster than generic by 4x at (5,5), 2.2x at (11,11), and 1.4x at (21,21).
-function fit_star(
+function _star_problem(
         model::ImagePSF{T},
         image::AbstractMatrix,
-        inds = axes(image);
-        fixed::NamedTuple = (;),
-        inv_var = nothing,
-        kws...
+        inds,
+        fixed::NamedTuple,
+        inv_var
     ) where {T}
 
     # Share validation and fixed-parameter bookkeeping with the generic fitter.
@@ -1106,10 +1206,7 @@ function fit_star(
     end
 
     # Keep the LM iteration, damping, IRLS, and covariance semantics shared.
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(problem; kws...)
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
+    return LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
 end
 
 function _accum_image_psf!(
@@ -1174,13 +1271,12 @@ end
 
 # Specialized method: uses `LV.@turbo` for GriddedPSFModel{ImagePSF}; see
 # `_accum_gridded_imagepsf!` for design and benchmark details.
-function fit_star(
+function _star_problem(
         model::GriddedPSFModel{T, M},
         image::AbstractMatrix,
-        inds = axes(image);
-        fixed::NamedTuple = (;),
-        inv_var = nothing,
-        kws...
+        inds,
+        fixed::NamedTuple,
+        inv_var
     ) where {T, M <: ImagePSF{T}}
 
     prepared = _prepare_fit_star_inputs(model, image, inds, fixed, inv_var)
@@ -1203,10 +1299,7 @@ function fit_star(
         return _accum_gridded_imagepsf!(A, b, residuals, image, inds, m, free_idx, w, p_val, p_dpdv, p_dpdu)
     end
 
-    problem = LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
-    result = lm_irls(problem; kws...)
-    best_model = model_from_vector(model, free_names_val, result.minimizer, fixed)
-    return best_model, result
+    return LMProblem(Vector{FT}(x0), length(inds), accum!, base_weights)
 end
 
 """
