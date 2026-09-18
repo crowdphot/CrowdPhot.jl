@@ -847,7 +847,7 @@ function estimate_background_multipass(image::AbstractMatrix, model::AbstractMat
     work = @. FT(image) - model
     coarse = pass <= o.bkg_coarse_passes
     box = coarse ? o.bkg_box_size_coarse : o.bkg_box_size
-    common = merge((; mask = o.mask, coverage_mask = o.coverage_mask), o.bkg_kws)
+    common = merge((; mask = o.bkg_mask, coverage_mask = o.coverage_mask), o.bkg_kws)
     level = Background2D(work, box; estimator = o.bkg_estimator, common...)
     rmsb = Background2D(work, o.bkg_rms_box_size; rms_estimator = o.bkg_rms_estimator, common...)
     level.background_rms .= rmsb.background_rms
@@ -1322,7 +1322,18 @@ are estimated by two separate [`Background2D`](@ref) calls.
 - `bkg_kws::NamedTuple = (;)`: extra keyword arguments merged into (and
   overriding) the defaults for both `Background2D` calls, e.g.
   `(; filter_size = (5, 5), sigma = (2.0, 5.0))`.
-- `mask`, `coverage_mask`: forwarded to `Background2D` (see its docstring).
+- `bkg_mask::Union{Nothing, AbstractMatrix{Bool}} = nothing`: `true` marks pixels
+  excluded from the **background and RMS mesh statistics** only.  Mesh cells are
+  interpolated across them, so a masked pixel still receives a background and RMS
+  value and still takes part in detection and in the fit.  Use it to keep bright
+  stars, extended sources, etc. from biasing the sky estimate. This is **not** a
+  bad-pixel mask -- set `inv_var` to zero at pixels that should be
+  excluded from detection and fitting.  Those are folded into this mask
+  automatically, so a pixel masked by `inv_var` is kept out of the sky estimate as
+  well, and a genuinely bad pixel only needs to be given once, to `inv_var`.
+- `coverage_mask`: forwarded to `Background2D` (see its docstring); `true` marks
+  pixels outside the data region, whose mesh cells are filled rather than
+  interpolated.
 
 ## Detection
 
@@ -1499,7 +1510,9 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   will overstate the precision of bright stars and is only supported for testing
   purposes; it is not recommended for actual science measurements.
   This also serves as the bad pixel mask; set `inv_var` to zero at
-  every pixel that should be excluded from detection and fitting.
+  every pixel that should be excluded from detection and fitting.  Such pixels are
+  also excluded from the background and RMS mesh statistics, so they do not need
+  to be repeated in `bkg_mask`.
 - `max_iter::Integer = 10`: maximum number of *detection* passes.  A run performs
   at most `max_iter` of them and then one additional terminal pass, so at most
   `max_iter + 1` passes in total.  `max_iter = 1` therefore means one detection
@@ -1708,7 +1721,7 @@ function _fit_all_stars_multipass(
         bkg_estimator = SExtractorBackground(),
         bkg_rms_estimator = MADStdRMS(),
         bkg_kws::NamedTuple = (;),
-        mask::Union{Nothing, AbstractMatrix{Bool}} = nothing,
+        bkg_mask::Union{Nothing, AbstractMatrix{Bool}} = nothing,
         coverage_mask::Union{Nothing, AbstractMatrix{Bool}} = nothing,
         # --- detection ---
         detection_kernel::Union{Nothing, AbstractMatrix} = nothing,
@@ -1777,12 +1790,27 @@ function _fit_all_stars_multipass(
     if inv_var !== nothing
         size(inv_var) == size(image) || throw(ArgumentError("`inv_var` must be the same size as `image`"))
     end
+    if bkg_mask !== nothing
+        size(bkg_mask) == size(image) || throw(ArgumentError("`bkg_mask` must be the same size as `image`"))
+    end
 
     # ------------------------------------------------------------------
     # The immutable plans: free parameters, options, detection kernel
     # ------------------------------------------------------------------
     plan = FitPlan(psf, merge(fixed, (; bkg = zero(FT))))
     fixed_iv = inv_var === nothing ? nothing : Matrix{FT}(inv_var)
+
+    # A pixel `inv_var` declares unusable is kept out of the mesh statistics too,
+    # on the same test the `inv_var` contract uses everywhere else.
+    bkg_mask_resolved = if fixed_iv === nothing
+        bkg_mask
+    else
+        bad = map(v -> !(isfinite(v) && v > 0), fixed_iv)
+        # Overly safe guard; an `inv_var` with no usable pixel at all `all(bad)` should
+        # still reach the empty-catalog path, so we ignore `inv_var` and return bkg_mask
+        # because otherwise `Background2D` would throw on a fully excluded mesh.
+        all(bad) ? bkg_mask : (bkg_mask === nothing ? bad : bad .| bkg_mask)
+    end
 
     # The PSF is evaluated once at the image center, and everything that needs
     # a PSF scale -- the detection kernel, the morphology box, the SHARP footprint,
@@ -1827,7 +1855,8 @@ function _fit_all_stars_multipass(
         # background
         bkg_box_size = Int(bkg_box_size), bkg_box_size_coarse = Int(bkg_box_size_coarse),
         bkg_coarse_passes = Int(bkg_coarse_passes), bkg_rms_box_size = Int(bkg_rms_box_size),
-        bkg_estimator, bkg_rms_estimator, bkg_kws, mask, coverage_mask, fixed_inv_var = fixed_iv,
+        bkg_estimator, bkg_rms_estimator, bkg_kws, bkg_mask = bkg_mask_resolved, coverage_mask,
+        fixed_inv_var = fixed_iv,
         # detection
         kernel, detect_sigma = FT(detect_sigma), normalize_zerosum,
         min_separation = FT(min_separation),
