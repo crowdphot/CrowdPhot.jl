@@ -22,7 +22,7 @@ CrowdPhot = {path = ".."}
 
 [compat]
 ASDF = "2"
-CSV = "0.10.15"
+CSV = "0.10.15, 1.0"
 CairoMakie = "0.12, 0.13, 0.14, 0.15"
 ConstructionBase = "1"
 DataFrames = "1"
