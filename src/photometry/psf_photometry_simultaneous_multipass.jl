@@ -571,7 +571,8 @@ n_free_per_source(::SimultaneousFitter, plan::FitPlan) = plan.p
 min_stamp_pixels(::SimultaneousFitter, ::FitPlan) = 1
 empty_pass_stats(::SimultaneousFitter, lambda, ::Type{FT}) where {FT} =
     (; n_lin = 0, n_trials = 0, n_accepted = 0, cost_start = FT(NaN), cost_end = FT(NaN),
-       lambda_start = lambda, lambda_end = lambda, gnorm = FT(NaN))
+       lambda_start = lambda, lambda_end = lambda, gnorm = FT(NaN),
+       fit_timing = (; setup = 0.0, stamps = 0.0, render = 0.0, solve = 0.0, grad = 0.0))
 
 """
     catalog_from_theta(catalog, fit, plan) -> Catalog
@@ -643,11 +644,17 @@ The fields [`AbstractMultipassFitter`](@ref) requires, plus `stamp`, `cost`,
 `n_trials` (damping trials), `n_accepted` (accepted trials), `cost_start`,
 `cost_end`, `lambda_start`, `lambda_end`, and `gnorm`, the cosine-scaled
 gradient norm at the returned `theta`.
+
+`stats.fit_timing` breaks the pass's wall time into `setup` (allocation and the
+Krylov workspace), `stamps`, `render`, `solve` (the Krylov solve and the step it
+produces) and `grad`. Some work is not timed (e.g., calculating the `cost`) so
+the sum of the segments will generally be slightly less than the total `t_fit`.
 """
 function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, geom,
                   catalog::Catalog{FT}, psf, plan::FitPlan, o, lambda::FT; ny::Int, nx::Int,
                   pass::Integer = 1, n_new::Integer = 0, freeze_positions::Bool = false,
                   move::Bool = true, show_trace::Bool = false) where {FT}
+    t0 = time()
     n = length(catalog)
     p = plan.p
     n_par = p * n
@@ -692,8 +699,14 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
     n_lin = 0
     n_trials = 0
     n_accepted = 0
+    t_stamps = 0.0
+    t_render = 0.0
+    t_solve = 0.0
+    t_grad = 0.0
+    t_setup = time() - t0
 
     for lin in 1:linearizations
+        t0 = time()
         _fill_stamps!(stamp, psf, plan.free_names_val, plan.fixed, theta, w, plan.grad_col,
             geom.dy_off, geom.dx_off, geom.anchor_y, geom.anchor_x,
             plan.row_y, plan.row_x, plan.row_flux, live, fill_scratch)
@@ -706,27 +719,36 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
                 end
             end
         end
+        t_stamps += time() - t0
+        t0 = time()
         _render_model!(model, psf, plan.free_names_val, plan.fixed, theta, p, model_R,
             geom.anchor_y, geom.anchor_x, ny, nx, live, render_buf, render_scratch)
+        t_render += time() - t0
         cost = _residual_cost!(wt_resid, model, data, w, union_pix)
         n_lin += 1
         lin == 1 && (cost_start = cost)
         @. mrhs = -wt_resid
+        t0 = time()
         apply_JT!(b_scaled, stamp, wt_resid, live, sbuf)
 
         colnorm_flat = reshape(stamp.colnorm, n_par)
         gnorm = _scaled_gradient_norm(b_scaled, colnorm_flat, cost / dof)
+        t_grad += time() - t0
 
         accepted = false
         for trial in 1:max_trials
+            t0 = time()
             Krylov.krylov_solve!(ws, J_op, mrhs; λ = sqrt(lambda),
                 itmax = fitter.linear_iterations, atol = fitter.linear_tol, btol = fitter.linear_tol)
             sol = Krylov.solution(ws)
             @. delta = sol / colnorm_flat
             _cap_position_step!(delta, max_step, p, plan.k_y, plan.k_x)
             @. theta_cand = theta + delta
+            t_solve += time() - t0
+            t0 = time()
             _render_model!(cand, psf, plan.free_names_val, plan.fixed, theta_cand, p, model_R,
                 geom.anchor_y, geom.anchor_x, ny, nx, live, render_buf, render_scratch)
+            t_render += time() - t0
             cost_cand = _cost!(cand, data, w, union_pix)
 
             n_trials += 1
@@ -757,6 +779,7 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
     # one linearization per pass).  One more stamp fill; it also refreshes
     # `colnorm`, so `flux_snr` below is no longer one step stale.
     if n_accepted > 0
+        t0 = time()
         _fill_stamps!(stamp, psf, plan.free_names_val, plan.fixed, theta, w, plan.grad_col,
             geom.dy_off, geom.dx_off, geom.anchor_y, geom.anchor_x,
             plan.row_y, plan.row_x, plan.row_flux, live, fill_scratch)
@@ -769,15 +792,20 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
                 end
             end
         end
+        t_stamps += time() - t0
         _residual_cost!(wt_resid, model, data, w, union_pix)
+        t0 = time()
         apply_JT!(b_scaled, stamp, wt_resid, live, sbuf)
         gnorm = _scaled_gradient_norm(b_scaled, reshape(stamp.colnorm, n_par), cost / dof)
+        t_grad += time() - t0
     end
 
     fit = (; theta, model = reshape(model, ny, nx), cost, dof, stamp, model_R, geom, data, w,
              render_buf, render_scratch, fill_scratch)
     stats = (; n_lin, n_trials, n_accepted, cost_start, cost_end = cost, lambda_start,
-               lambda_end = lambda, gnorm)
+               lambda_end = lambda, gnorm,
+               fit_timing = (; setup = t_setup, stamps = t_stamps, render = t_render,
+                               solve = t_solve, grad = t_grad))
     return (; fit..., catalog = catalog_from_theta(catalog, fit, plan), state = lambda, stats)
 end
 

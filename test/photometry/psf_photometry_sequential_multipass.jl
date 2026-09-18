@@ -83,6 +83,9 @@ end
     @test CrowdPhot.initial_fit_state(free, Float64) === nothing
     st = CrowdPhot.empty_pass_stats(free, nothing, Float64)
     @test (st.n_lin, st.n_trials, st.n_accepted) == (0, 0, 0) && isnan(st.gnorm)
+    # A pass with an empty catalog must still report the same `fit_timing` keys, or
+    # `pass_history` is heterogeneous within a run.
+    @test st.fit_timing == (; setup = 0.0, fits = 0.0, grad = 0.0)
 end
 
 @testset "move = false agrees with the simultaneous fitter" begin
@@ -291,6 +294,12 @@ end
         @test h.cost_end <= h.cost_start
         @test length(h.sweep_costs) == h.n_lin
         @test issorted(h.sweep_costs; rev = true)
+        # The sub-step timings are named buckets, not a partition of `t_fit`: cheap
+        # steps are left out, so they may sum to less but never to more.  No tolerance
+        # on the difference, which is wall-clock and would be flaky.
+        @test keys(h.fit_timing) == (:setup, :fits, :grad)
+        @test all(t -> isfinite(t) && t >= 0, values(h.fit_timing))
+        @test sum(values(h.fit_timing)) <= h.t_fit
     end
 end
 
