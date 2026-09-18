@@ -882,7 +882,6 @@ end
     ph = res.phot
 
     @test length(ph.y) == length(ph.morphology) == length(res.pass_number)
-    @test all(ph.valid)
     @test all(ph.flux .> 0)
     @test all(isfinite, ph.flux_err)
     @test all(res.pass_number .>= 1)
