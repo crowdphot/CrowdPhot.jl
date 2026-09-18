@@ -375,6 +375,47 @@ end
         gpsf = GriddedPSFModel([node], [0.0], [0.0]; y = 0.0, x = 0.0, flux = 1.0, bkg = 0.0)
         w = fill(1 / 125.0, 4000)
         rr = _model_radii(gpsf, :auto, 1.0, 2, 15, w, Float64[50, 500, 5_000, 50_000])
+
+        @test issorted(rr) && all(2 .<= rr .<= 15) && rr[end] > rr[1]
+
+    end
+
+
+
+    @testset "_source_errors! is scale-invariant for bright sources" begin
+        # The ridge that keeps a starved block invertible must be applied in
+        # equilibrated coordinates.  On the raw block a bright source's position
+        # curvature (~flux^2) dwarfs its flux curvature, so a trace-relative ridge
+        # there shrank the flux error of a 7e5-count star by 20%.
+        psf = CircularGaussianPSF(y = 0.0, x = 0.0, fwhm = 2.9, flux = 1.0, bkg = 0.0)
+        fixed = (; fwhm = 2.9, bkg = 0.0)
+        free_names, free_idx, _ = PSF.free_params(psf, fixed)
+        p = length(free_idx)
+        prop_names = collect(keys(ConstructionBase.getproperties(psf)))
+        row_y, row_x, row_flux = findfirst(==(:y), prop_names), findfirst(==(:x), prop_names), findfirst(==(:flux), prop_names)
+        grad_col = [free_names[k] === :y ? 1 : (free_names[k] === :x ? 2 : 3) for k in 1:p]
+        R, ny = 5, 30
+        dy_off = Int[]; dx_off = Int[]
+        for dx in -R:R, dy in -R:R
+            push!(dy_off, dy); push!(dx_off, dx)
+        end
+        S2 = length(dy_off)
+        npix = ny * ny
+        anchor_y, anchor_x = [15], [15]
+        pixels = zeros(Int32, S2, 1)
+        for m in 1:S2
+            pixels[m, 1] = (15 + dy_off[m]) + (15 + dx_off[m] - 1) * ny
+        end
+        θ = [15.2, 14.9, 7.0e5]
+        w = fill(1 / 120.0, npix)
+        stamp = StampDerivatives{Float64, Int32}(zeros(p, S2, 1), pixels, zeros(p, 1), npix, p, S2)
+        _fill_stamps!(stamp, psf, Val(free_names), fixed, θ, w, grad_col, dy_off, dx_off,
+            anchor_y, anchor_x, row_y, row_x, row_flux, trues(1), nothing)
+        errs = zeros(p, 1)
+        CrowdPhot._source_errors!(errs, stamp, CrowdPhot.KnownWeightsCovarianceEstimator(), 1.0, 1)
+        J = dense_J(stamp) .* reshape(stamp.colnorm, 1, p)   # undo the equilibration
+        exact = sqrt.([inv(J' * J)[k, k] for k in 1:p])
+        @test vec(errs) ≈ exact rtol = 1e-8
     end
 end
 

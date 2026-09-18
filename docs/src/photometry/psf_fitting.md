@@ -4,22 +4,27 @@ CurrentModule = CrowdPhot
 
 # PSF Fitting Photometry
 
-[`fit_all_stars`](@ref) performs PSF-fitting photometry on all sources in an
-image using a DOLPHOT-style multi-pass algorithm. Stars are sorted by
-brightness and fitted sequentially against a progressive residual image:
-each fitted model is subtracted before the next star is processed, so
-fainter neighbors are measured after brighter stars have been removed. On
-subsequent passes each star is added back, re-fitted, and re-subtracted,
-refining all measurements iteratively.
+CrowdPhot's crowded-field photometry is a **multi-pass** pipeline.  Each pass
+re-estimates the background from the current residual image, detects sources
+the model is still missing, estimates initial centroids and fluxes, re-fits the whole
+catalog, and prunes unreliable sources; a final pass re-fits without detecting
+or pruning.  Two functions run this pipeline and differ only in the fitting
+implementation:
 
-This avoids the large matrix solves used by fully simultaneous
-group-fitting methods such as DAOPHOT/ALLSTAR. For a group containing `N`
-stars, the cost of forming normal matrices can scale like `N^2`,
-while a dense least-squares solve can scale like `N^3` in the group size.
-In contrast, when the fitting radius, the residual-image approach scales
-approximately linearly with the number of stars and passes:
-`N_passes * N_stars`. By operating on the progressive residual image,
-this method can give good results even in crowded fields.
+- [`fit_all_stars_multipass`](@ref) fits DOLPHOT-style: within a pass the
+  catalog is swept brightest to faintest, and each source is fit alone with a
+  few Levenberg-Marquardt iterations against the residual of every other
+  source.  Each LM step is cheap (a `3x3` or `4x4` solve) and the cost scales
+  linearly with the number of sources and sweeps.  It can also fit a local
+  background pedestal per source.
+- [`fit_all_stars_simultaneous_multipass`](@ref) fits crowdsource-style: every
+  source moves together in one damped Levenberg-Marquardt step over the whole
+  catalog.  One step accounts for all the couplings between blended neighbors at once.
+
+Background estimation, detection, seeding, pruning, model radius tuning,
+diagnostics and morphology are shared, so the two return the same result
+structure and are directly comparable.  Errors are computed per fitter, from
+each source's own normal-matrix block in both cases.
 
 ## Result type
 
@@ -50,6 +55,6 @@ per-star diagnostics computed on the final pass over exactly the fitting box:
 ## Fitting functions
 
 ```@docs
-fit_all_stars
-CrowdPhot.fit_all_stars_simultaneous_multipass
+fit_all_stars_multipass
+fit_all_stars_simultaneous_multipass
 ```
