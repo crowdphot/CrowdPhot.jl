@@ -1,6 +1,22 @@
 using CrowdPhot.PSF
-using CrowdPhot.PSF: AbstractPSFModel, fit_star, _grid_corners
+using CrowdPhot.PSF: AbstractPSFModel, fit_star, model_from_vector, _grid_corners,
+    _star_problem, _free_names_val
+using CrowdPhot: lm_irls
 using Test
+
+# `fit_star` has a single method for every model; the per-model specialization
+# lives in `_star_problem`.  So the generic `evaluate_fg` path has to be reached
+# by `invoke`ing *that*, and driving `lm_irls` here exactly as `fit_star` does.
+# `invoke`ing `fit_star` instead would re-enter the specialized `_star_problem`
+# and compare each accumulator against itself.
+function fit_star_generic(model, image, inds; fixed::NamedTuple = (;), inv_var = nothing, kws...)
+    problem = invoke(
+        _star_problem, Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any, NamedTuple, Any},
+        model, image, inds, fixed, inv_var
+    )
+    result = lm_irls(problem; kws...)
+    return model_from_vector(model, _free_names_val(model, fixed), result.minimizer, fixed), result
+end
 
 @testset "fit CircularGaussianPSF specialized parity" begin
     # Compare circular-Gaussian specialized accumulation against the generic fitter.
@@ -8,10 +24,8 @@ using Test
     truth = CircularGaussianPSF(x = 13.5, y = 12.3, fwhm = 4.0, flux = 200.0, bkg = 5.0)
     img = evaluate.(truth, inds[1], inds[2]')
     init = CircularGaussianPSF(x = 14.1, y = 11.8, fwhm = 4.3, flux = 190.0, bkg = 5.5)
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-6,
     )
@@ -32,8 +46,7 @@ using Test
 
     # Exercise the projected-parameter accumulator used when fields are fixed.
     fixed = (bkg = truth.bkg,)
-    best_fixed_generic, result_fixed_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_fixed_generic, result_fixed_generic = fit_star_generic(init, img, inds;
         fixed,
         x_tol = 1.0e-6,
     )
@@ -58,10 +71,8 @@ end
     truth = GaussianPSF(x = 10.4, y = 9.8, x_fwhm = 3.0, y_fwhm = 4.2, theta = 28.0, flux = 250.0, bkg = 4.0)
     img = evaluate.(truth, inds[1], inds[2]')
     init = GaussianPSF(x = 10.8, y = 9.4, x_fwhm = 3.3, y_fwhm = 3.9, theta = 24.0, flux = 230.0, bkg = 4.4)
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -86,8 +97,7 @@ end
 
     # Exercise the projected-parameter accumulator for fixed structural fields.
     fixed = (x_fwhm = truth.x_fwhm, y_fwhm = truth.y_fwhm, theta = truth.theta, bkg = truth.bkg)
-    best_fixed_generic, result_fixed_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_fixed_generic, result_fixed_generic = fit_star_generic(init, img, inds;
         fixed,
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -116,10 +126,8 @@ end
     truth = CircularGaussianPRF(x = 10.4, y = 9.8, fwhm = 3.0, flux = 250.0, bkg = 4.0)
     img = evaluate.(truth, inds[1], inds[2]')
     init = CircularGaussianPRF(x = 10.8, y = 9.4, fwhm = 3.3, flux = 230.0, bkg = 4.4)
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -142,8 +150,7 @@ end
 
     # Exercise the projected-parameter accumulator for fixed structural fields.
     fixed = (fwhm = truth.fwhm, bkg = truth.bkg)
-    best_fixed_generic, result_fixed_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_fixed_generic, result_fixed_generic = fit_star_generic(init, img, inds;
         fixed,
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -170,10 +177,8 @@ end
     truth = GaussianPRF(x = 10.4, y = 9.8, x_fwhm = 3.0, y_fwhm = 4.2, theta = 28.0, flux = 250.0, bkg = 4.0)
     img = evaluate.(truth, inds[1], inds[2]')
     init = GaussianPRF(x = 10.8, y = 9.4, x_fwhm = 3.3, y_fwhm = 3.9, theta = 24.0, flux = 230.0, bkg = 4.4)
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -198,8 +203,7 @@ end
 
     # Exercise the projected-parameter accumulator for fixed structural fields.
     fixed = (x_fwhm = truth.x_fwhm, y_fwhm = truth.y_fwhm, theta = truth.theta, bkg = truth.bkg)
-    best_fixed_generic, result_fixed_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_fixed_generic, result_fixed_generic = fit_star_generic(init, img, inds;
         fixed,
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -228,10 +232,8 @@ end
     truth = CircularMoffatPSF(x = 10.4, y = 9.8, α = 3.0, β = 3.2, flux = 250.0, bkg = 4.0)
     img = evaluate.(truth, inds[1], inds[2]')
     init = CircularMoffatPSF(x = 10.8, y = 9.4, α = 3.3, β = 2.9, flux = 230.0, bkg = 4.4)
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -255,8 +257,7 @@ end
 
     # Exercise the projected-parameter accumulator for fixed structural fields.
     fixed = (α = truth.α, β = truth.β, bkg = truth.bkg)
-    best_fixed_generic, result_fixed_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_fixed_generic, result_fixed_generic = fit_star_generic(init, img, inds;
         fixed,
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -284,10 +285,8 @@ end
     truth = MoffatPSF(x = 10.4, y = 9.8, x_α = 3.0, y_α = 4.2, theta = 28.0, β = 3.2, flux = 250.0, bkg = 4.0)
     img = evaluate.(truth, inds[1], inds[2]')
     init = MoffatPSF(x = 10.8, y = 9.4, x_α = 3.3, y_α = 3.9, theta = 24.0, β = 2.9, flux = 230.0, bkg = 4.4)
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -313,8 +312,7 @@ end
 
     # Exercise the projected-parameter accumulator for fixed structural fields.
     fixed = (x_α = truth.x_α, y_α = truth.y_α, theta = truth.theta, β = truth.β, bkg = truth.bkg)
-    best_fixed_generic, result_fixed_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_fixed_generic, result_fixed_generic = fit_star_generic(init, img, inds;
         fixed,
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -344,10 +342,8 @@ end
     truth = AiryPSF(x = 10.4, y = 9.8, radius = 4.5, flux = 250.0, bkg = 4.0)
     img = evaluate.(truth, inds[1], inds[2]')
     init = AiryPSF(x = 10.8, y = 9.4, radius = 4.8, flux = 230.0, bkg = 4.4)
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -370,8 +366,7 @@ end
 
     # Exercise the projected-parameter accumulator for fixed structural fields.
     fixed = (radius = truth.radius, bkg = truth.bkg)
-    best_fixed_generic, result_fixed_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_fixed_generic, result_fixed_generic = fit_star_generic(init, img, inds;
         fixed,
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -400,10 +395,8 @@ end
     truth = ImagePSF(psf_data; x = 8.35, y = 7.75, flux = 300.0, bkg = 4.0, origin = (y = 8.0, x = 8.0), normalize = true)
     img = evaluate.(truth, inds[1], inds[2]')
     init = ImagePSF(psf_data; x = 8.0, y = 8.1, flux = 260.0, bkg = 3.5, origin = (y = 8.0, x = 8.0), normalize = true)
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -425,8 +418,7 @@ end
 
     # Exercise the projected-parameter accumulator used for fixed ImagePSF fields.
     fixed = (x = truth.x, y = truth.y, bkg = truth.bkg)
-    best_fixed_generic, result_fixed_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_fixed_generic, result_fixed_generic = fit_star_generic(init, img, inds;
         fixed,
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -471,10 +463,8 @@ end
     @test count(!iszero, last.(_grid_corners(truth, truth.y, truth.x))) == 4
     img = zeros(maximum(inds[1]), maximum(inds[2]))
     img[inds...] .= evaluate.(truth, inds[1], inds[2]')
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -496,8 +486,7 @@ end
 
     # Exercise the projected-parameter accumulator for a fixed field.
     fixed = (bkg = truth.bkg,)
-    best_fixed_generic, result_fixed_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_fixed_generic, result_fixed_generic = fit_star_generic(init, img, inds;
         fixed,
         x_tol = 1.0e-7,
         max_iter = 100,
@@ -539,10 +528,8 @@ end
     init = GriddedPSFModel(nodes, gy, gx; y = 11.0, x = 9.7, flux = 230.0, bkg = 4.4)
     @test count(!iszero, last.(_grid_corners(truth, truth.y, truth.x))) == 4
     img = evaluate.(truth, inds[1], inds[2]')
-    generic_sig = Tuple{AbstractPSFModel{Float64}, AbstractMatrix, Any}
 
-    best_generic, result_generic = invoke(
-        fit_star, generic_sig, init, img, inds;
+    best_generic, result_generic = fit_star_generic(init, img, inds;
         inv_var = fill(1.0, size(img)),
         x_tol = 1.0e-7,
         max_iter = 100,

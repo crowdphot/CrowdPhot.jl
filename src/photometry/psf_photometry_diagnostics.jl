@@ -1,12 +1,10 @@
 # Shared per-star goodness-of-fit diagnostics for PSF photometry.
 #
-# `fit_all_stars` (sequential) and `fit_all_stars_simultaneous_multipass` compute the
-# same qfit / qfit_expected / qfit_z / crowding / spread_model statistics so
-# their results compare field-for-field.  The math below is extracted from the
-# sequential path (psf_photometry_single.jl) so both arms share one
-# implementation.  All inputs are stamp-local: `(length(yr), length(xr))` blocks
-# aligned to the star's fitting box, so the only per-arm difference is how those
-# blocks are produced.
+# `fit_all_stars_multipass` (sequential) and `fit_all_stars_simultaneous_multipass`
+# compute the same qfit / qfit_expected / qfit_z / crowding / spread_model
+# statistics from this one implementation, so their results compare
+# field-for-field.  All inputs are stamp-local: `(length(yr), length(xr))` blocks
+# aligned to the star's fitting box.
 
 # Mixture-of-Gaussians approximation of a unit-integral circular exponential
 # profile exp(-r/h), from David Hogg & Dustin Lang's "The Tractor"
@@ -127,7 +125,7 @@ Compute the per-star `chisq`, `qfit`, `qfit_expected`, `qfit_z`, `crowding`, and
 
 Nothing is written for a source with non-positive `model.flux`: every statistic
 here is normalized by the flux, so none of them means anything in that case.
-All three fitters gate or drop such sources before reaching this point.
+Both multi-pass fitters drop such sources before reaching this point.
 
 `image`, `resid`, `star_model`, `g_model`, and `inv_var` are all *stamp-local*
 matrices of the same shape, covering the star's fitting box:

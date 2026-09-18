@@ -25,6 +25,6 @@ import CrowdPhot
 @safetestset "Detection" include("detection_tests.jl")
 @safetestset "Utilities" include("utilities/calc_total_error_tests.jl")
 @safetestset "Bessel functions" include("bessels.jl")
-@safetestset "Photometry" include("photometry/psf_photometry_single.jl")
 @safetestset "Multi-pass simultaneous photometry" include("photometry/psf_photometry_simultaneous_multipass.jl")
+@safetestset "Multi-pass sequential photometry" include("photometry/psf_photometry_sequential_multipass.jl")
 @safetestset "Doctests" include("doctests.jl")

@@ -425,8 +425,8 @@ the ePSF is supersampled at 4× the detector pixel scale.
 
 ```@example hst-drc
 # Select bright, morphologically-clean stars
-n_psf = 400
-psf_idx = CrowdPhot.PSF.pick_psf_stars(results, n_psf; mag_quantiles=(0.05, 0.95))
+n_psf = 2000
+psf_idx = CrowdPhot.PSF.pick_psf_stars(results, n_psf; mag_quantiles=(0.00, 0.95))
 
 # Use sub-pixel centroids from the morphology measurements
 psf_y = [results[i].centroid.y for i in psf_idx]
@@ -568,13 +568,16 @@ valid_total = @. isfinite(total_err) & (total_err > 0)
 @. inv_var[valid_total] = 1 / total_err[valid_total]^2;
 ```
 
-We now run [`fit_all_stars`](@ref) on every source in a 250×250 region,
-using the empirical PSF we just constructed.  After measuring all sources
-in this region and subtracting their models, the residual image should be
-nearly empty -- only noise should remain where the sources used to be. We will
-fix the background to 0 since we have already subtracted a background model.
-We will only do one pass of photometry, since this field is not very crowded
-($\sim2$ stars per square arcsecond).
+We now run [`fit_all_stars_multipass`](@ref) on a 250×250 region, using the
+empirical PSF we just constructed.  It owns the background and detection as
+well as the fit: each pass re-estimates the background from the current
+residual, detects anything the model is still missing, and re-fits every source
+one at a time against the residual of all the others.  We pass it the *raw*
+cutout and the sources we already detected in this region as a warm start.
+After the final pass the residual image should be nearly empty -- only noise
+should remain where the sources used to be.  We fix each source's local
+background pedestal to 0, since the pipeline's own background model already
+handles this uncrowded field ($\sim2$ stars per square arcsecond).
 
 ```@example hst-drc
 # Select a 250×250 sub-region (lower-right corner of the earlier 500×500 region)
@@ -591,31 +594,38 @@ end
 region_sources = results[region_idx]
 println("$(length(region_sources)) sources in the display region")
 
-# Run single-pass PSF-fitting photometry
-phot_result = fit_all_stars(img_sub_f64, psf, region_sources, 3;
-    n_passes = 1, inv_var, fixed = (; bkg = 0.0))
+# Cutout coordinates start at 1, so shift the warm-start catalog to match.
+img_cut = Float64.(img[phot_y_range, phot_x_range])
+warm = (; y = [s.centroid.y - (y1 - 1) for s in region_sources],
+          x = [s.centroid.x - (x1 - 1) for s in region_sources],
+          flux = [s.flux for s in region_sources])
 
-n_good = sum(phot_result.valid)
-println("$n_good / $(length(region_sources)) stars fitted successfully")
+# Multi-pass background -> detect -> fit
+mp = fit_all_stars_multipass(img_cut, psf, warm, 3;
+    inv_var = inv_var[phot_y_range, phot_x_range], fixed = (; bkg = 0.0),
+    max_iter = 3, min_iter = 3,
+    # blend gating, to prevent bright-star fragmentation
+    blend_threshold_initial = 10.0, blend_threshold = 5.0, blend_passes = 1)
+phot_result = mp.phot
+
+n_good = length(phot_result.flux)
+println("$n_good sources in the final catalog after $(mp.n_detection_passes) detection passes")
 ```
 
-The [`MultiPassPhotResult`](@ref) stores the final residual image after
-all source models have been subtracted.  Below we compare the original
+The [`MultiPassPhotResult`](@ref) stores the final residual image,
+`image - background - model`, after all source models have been subtracted.  Below we compare the original
 image to the residual for this 250×250 region.  Where sources have been
 successfully subtracted, the residual shows only noise.
 
 ```@example hst-drc
 orig_region = img_sub[phot_y_range, phot_x_range]
-resid_region = phot_result.residual[phot_y_range, phot_x_range]
+resid_region = phot_result.residual
 region_colorrange = zscale(orig_region[isfinite.(orig_region)])
 
-# Recompute detection circles for this sub-region
-phot_circles = map(filter(mf.peaks) do peak
-    y, x = Tuple(peak)
-    y in phot_y_range && x in phot_x_range
-end) do peak
-    y, x = Tuple(peak)
-    Circle(Point2f(x, y), 2)
+# Circle every source in the final catalog, including those found by the
+# detection passes.  Catalog positions are cutout-local, so shift them back.
+phot_circles = map(zip(phot_result.y, phot_result.x)) do (y, x)
+    Circle(Point2f(x + (x1 - 1), y + (y1 - 1)), 2)
 end
 
 fig = Figure(size = (500, 900))
@@ -634,10 +644,10 @@ hm2 = heatmap!(ax2, phot_x_range, phot_y_range, resid_region';
     colormap = :grays, interpolate = false)
 
 # Overlay detection circles on both panels
-# poly!(ax1, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
-#     strokewidth = 1.2)
-# poly!(ax2, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
-#     strokewidth = 1.2)
+poly!(ax1, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
+    strokewidth = 1.2)
+poly!(ax2, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
+    strokewidth = 1.2)
 
 Colorbar(fig[1, 2], hm1; height = Relative(0.8), valign = :center)
 Colorbar(fig[2, 2], hm2; height = Relative(0.8), valign = :center)
@@ -653,14 +663,22 @@ derived above is applied. For descriptions
 of the goodness-of-fit statistics, see [`CrowdPhot.MultiPassPhotResult`](@ref).
 
 ```@example hst-drc
+# Every returned source was fit; pair each with the nearest morphology
+# measurement from the region, when there is one within a pixel.
+nearest = map(eachindex(phot_result.y)) do j
+    d = [hypot(warm.y[i] - phot_result.y[j], warm.x[i] - phot_result.x[j]) for i in eachindex(warm.y)]
+    i = argmin(d)
+    d[i] < 1 ? i : 0
+end
+good = nearest .> 0
+
 # Compute ST magnitudes from PSF-fit fluxes
-good = phot_result.valid
 psf_mags = -2.5 .* log10.(phot_result.flux[good]) .+ stmag_zeropoint .+ aper_corr
 psf_mag_errs = (2.5 / log(10)) .* phot_result.flux_err[good] ./ phot_result.flux[good]
 
 # Centroids from measure_star_shapes for the same sources
-morph_y = [results[region_idx[i]].centroid.y for i in findall(good)]
-morph_x = [results[region_idx[i]].centroid.x for i in findall(good)]
+morph_y = warm.y[nearest[good]]
+morph_x = warm.x[nearest[good]]
 fit_y = phot_result.y[good]
 fit_x = phot_result.x[good]
 fit_y_err = phot_result.y_err[good]
@@ -669,7 +687,7 @@ fit_x_err = phot_result.x_err[good]
 # Centroid offset between the two measurement techniques
 centroid_offset = @. hypot(morph_y - fit_y, morph_x - fit_x)
 
-# Fitting statistics returned from `fit_all_stars`
+# Fitting statistics returned from `fit_all_stars_multipass`
 chisq = phot_result.chisq[good]
 qfit = phot_result.qfit[good]
 qfit_z = phot_result.qfit_z[good]
@@ -695,7 +713,7 @@ axislegend(ax2; position = :lt)
 ax3 = Axis(fig[2, 1];
     xlabel = "PSF-fit ST magnitude",
     ylabel = "Centroid offset (pix)",
-    title = "Centroid offset: quadratic (`measure_star_shapes`) vs PSF (`fit_all_stars`)")
+    title = "Centroid offset: quadratic (`measure_star_shapes`) vs PSF fit")
 scatter!(ax3, psf_mags, centroid_offset; markersize = 4, color = :black)
 ylims!(ax3, 0.0, 0.5)
 
