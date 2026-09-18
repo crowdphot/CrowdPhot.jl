@@ -904,6 +904,13 @@ function pass_weights(image::AbstractMatrix, bkg, ::Type{FT}) where {FT}
 end
 
 
+# The window shared by the seeding and finalization moment measurements, built
+# from `o.psf_fwhm`.  `GaussianWindow` throws on a non-finite or non-positive
+# FWHM, so a PSF with no usable width falls back to a unit-FWHM taper and the
+# moments still evaluate.
+_morph_window(psf_fwhm::T) where {T} =
+    isfinite(psf_fwhm) && psf_fwhm > 0 ? GaussianWindow(psf_fwhm) : GaussianWindow(one(T))
+
 # ==============================================================================
 # Detection
 # ==============================================================================
@@ -974,8 +981,10 @@ function detect_sources(catalog::Catalog{FT}, disc::Discards{FT}, bkg, model,
 
     # mfr contains only new sources detected this iteration; get estimates of their
     # centroids and fluxes from measure_star_shapes to seed fitting, then append them to the catalog.
-    hw = o.morph_half_width === nothing ? _default_half_width(mfr) : o.morph_half_width
-    shapes = measure_star_shapes(mfr; peaks = surv, half_width = hw)
+    # The window is passed explicitly to avoid the fallback in `measure_star_shapes`
+    # that builds one from the *detection kernel's* effective FWHM. Seeding and finalization taper identically.
+    shapes = measure_star_shapes(mfr; peaks = surv, half_width = o.morph_half_width,
+                                 window = _morph_window(o.psf_fwhm))
     a = append_sources(catalog, [s.centroid.y for s in shapes], [s.centroid.x for s in shapes],
                        [s.flux for s in shapes], pass; min_separation = sep)
     return (; catalog = a.catalog, mfr, n_peaks, n_blend_rejected, n_dup_catalog, n_dup_discarded,
@@ -1462,18 +1471,10 @@ rejections are permanent.
 
 - `morph_half_width::Union{Nothing, Integer} = nothing`: cutout half-width for
   the final per-source morphology pass, and for the seeding measurement on new
-  stars detected each pass.  `nothing` uses `max(3, ceil(fit_rad))` for the former
-  and the kernel-derived default for the latter.
-
-  The morphology cutout is an aperture, so every pure-sky pixel it contains
-  costs signal-to-noise on the shape, with an `r^2` lever arm on the second
-  moments.  The aperture moments are tapered by a Gaussian window matched
-  to the PSF FWHM, which bounds the sky-noise contribution.
-  The window's compression is divided back out, so `fwhm`, the
-  ellipticity components and `compactness_aperture` stay absolute; see
-  [`GaussianWindow`](@ref). Generally `fit_rad` is a reasonable scale
-  because it was already chosen to encompass enough of the profile to carry
-  the signal, not so much that sky dominates.
+  stars detected each pass.  Resolved once when the options are built, so both steps
+  use the same box.  `nothing` uses `max(3, ceil(3 * sigma_psf))`, three standard
+  deviations of the PSF's Gaussian-effective width (`1.27 * FWHM`), floored at a
+  window size of 7x7.
 """
 
 const _MULTIPASS_DOC_FIT_COMMON = """
@@ -1761,15 +1762,32 @@ function _fit_all_stars_multipass(
     plan = FitPlan(psf, merge(fixed, (; bkg = zero(FT))))
     fixed_iv = inv_var === nothing ? nothing : Matrix{FT}(inv_var)
 
+    # The PSF is evaluated once at the image center, and everything that needs
+    # a PSF scale -- the detection kernel, the morphology box, the SHARP footprint,
+    # the moment window, the `spread_model` reference disk -- derives from this one
+    # evaluation.  A spatially varying PSF would need one per region.
+    yc, xc = (ny + 1) ÷ 2, (nx + 1) ÷ 2
+    m_center = ConstructionBase.setproperties(psf,
+        (; y = FT(yc), x = FT(xc), flux = one(FT), bkg = zero(FT)))
+    psf_fwhm = FT(PSF.effective_fwhm(m_center))
+
     kernel = if detection_kernel === nothing
-        # Field-constant by construction: one kernel rendered from `psf` at the
-        # image center.  A spatially varying PSF would need one per region.
-        yc, xc = (ny + 1) ÷ 2, (nx + 1) ÷ 2
-        m = ConstructionBase.setproperties(psf, (; y = FT(yc), x = FT(xc), flux = one(FT), bkg = zero(FT)))
         R = Int(kernel_rad)
-        Matrix{FT}(PSF.render!(Matrix{FT}(undef, 2R + 1, 2R + 1), m, (yc - R):(yc + R), (xc - R):(xc + R)))
+        Matrix{FT}(PSF.render!(Matrix{FT}(undef, 2R + 1, 2R + 1), m_center,
+                               (yc - R):(yc + R), (xc - R):(xc + R)))
     else
         Matrix{FT}(detection_kernel)
+    end
+
+    # The morphology box defaults to 3σ of the `GaussianWindow` the aperture
+    # moments are tapered by, where the taper has fallen to ~1%. The window size
+    # is floored at 7x7.
+    morph_hw = if morph_half_width !== nothing
+        Int(morph_half_width)
+    elseif isfinite(psf_fwhm) && psf_fwhm > 0
+        max(3, ceil(Int, 3 * psf_fwhm / FT(2 * sqrt(2 * log(2)))))
+    else
+        3
     end
 
     # Blend gating converts a `matched_filter` flux estimate into a peak amplitude
@@ -1794,7 +1812,7 @@ function _fit_all_stars_multipass(
         blend_threshold = blend_threshold === nothing ? nothing : FT(blend_threshold),
         blend_threshold_initial = blend_threshold_initial === nothing ? nothing : FT(blend_threshold_initial),
         blend_passes = Int(blend_passes),
-        morph_half_width = morph_half_width === nothing ? nothing : Int(morph_half_width),
+        morph_half_width = morph_hw, psf_fwhm,
         # fit
         R_fit, R_cap = ceil(Int, model_rad === :auto ? model_rad_max : max(float(model_rad), float(fit_rad))),
         model_rad, model_rad_nsigma = FT(model_rad_nsigma), max_step = FT(max_step),
@@ -2167,13 +2185,12 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
     # mask reaches here for free -- `detect_inv_var` is already zeroed wherever
     # the caller's map is.
     morph_iv = bkg.detect_inv_var
-    morph_hw = o.morph_half_width !== nothing ? Int(o.morph_half_width) : max(3, o.R_fit)
+    morph_hw = o.morph_half_width
 
     # The PSF's Gaussian-effective width, used for the `spread_model` reference disk
     # (unless overridden by `spread_model_fwhm`), the SHARP footprint,
     # and the Gaussian-windowed morphological moments.
-    psf_fwhm = FT(PSF.effective_fwhm(ConstructionBase.setproperties(psf,
-        (; y = catalog.y[1], x = catalog.x[1]))))
+    psf_fwhm = o.psf_fwhm
     spread_fwhm = spread_model_fwhm === nothing ? psf_fwhm : FT(spread_model_fwhm)
     # Resolved to tuple form once, which stops `correlate!` re-running its
     # separability test -- an SVD for a matrix kernel -- on every source
@@ -2186,8 +2203,7 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
     # to small departures from the PSF (see `GaussianWindow`).
     # Built once: the tables are indexed by integer offset from the anchor,
     # so every source reuses them.
-    morph_window = isfinite(psf_fwhm) && psf_fwhm > 0 ?
-        GaussianWindow(psf_fwhm) : GaussianWindow(one(FT))
+    morph_window = _morph_window(psf_fwhm)
 
     # One render per source over the union of the diagnostics and morphology
     # boxes.  Both are centered on the fit anchor: the diagnostics box has to be

@@ -686,7 +686,10 @@ end
            coverage_mask = nothing, fixed_inv_var = nothing,
            kernel = kern, detect_sigma = 5.0, normalize_zerosum = true,
            min_separation = 1.5, blend_threshold = nothing,
-           blend_threshold_initial = nothing, blend_passes = 0, morph_half_width = nothing)
+           blend_threshold_initial = nothing, blend_passes = 0,
+           # As the driver resolves them: already an `Int`, never `nothing`.
+           morph_half_width = max(3, ceil(Int, 3 * PSF_FWHM / (2 * sqrt(2 * log(2))))),
+           psf_fwhm = PSF_FWHM)
 
     model = zeros(ny, nx)
     bkg = estimate_background_multipass(img, model, 1, o)
