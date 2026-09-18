@@ -48,8 +48,8 @@ n_free_per_source(fitter::SequentialFitter, plan::FitPlan) = plan.p + fitter.fit
 min_stamp_pixels(fitter::SequentialFitter, plan::FitPlan) = n_free_per_source(fitter, plan) + 1
 empty_pass_stats(::SequentialFitter, _, ::Type{FT}) where {FT} =
     (; n_lin = 0, n_trials = 0, n_accepted = 0, cost_start = FT(NaN), cost_end = FT(NaN),
-       gnorm = FT(NaN), n_star_fits = 0, n_skipped = 0, n_capped = 0, sweep_costs = FT[],
-       fit_timing = (; setup = 0.0, fits = 0.0, grad = 0.0))
+       n_star_fits = 0, n_skipped = 0, n_capped = 0, sweep_costs = FT[],
+       fit_timing = (; setup = 0.0, fits = 0.0))
 
 # The `fixed` the per-source fits see: the render plan's, minus the pinned `bkg`
 # when a local pedestal is fit.
@@ -168,15 +168,13 @@ The fields [`AbstractMultipassFitter`](@ref) requires, with `state = nothing`.
 source fit), `n_accepted` (source fits that lowered their own cost),
 `n_star_fits`, `n_skipped` (sources the convergence check did not fit),
 `n_capped` (fits whose position step hit `max_step`),
-`cost_start`, `cost_end`, `sweep_costs` (the global cost after each sweep), and
-`gnorm`, the same cosine-scaled gradient norm the simultaneous fitter reports,
-evaluated at the end of the pass.  With a free pedestal `gnorm` is computed on
-the pedestal-free residual, so it is only indicative.
+`cost_start`, `cost_end` and `sweep_costs` (the global cost after each sweep);
+`cost_end` is `sweep_costs`' last entry.
 
 `stats.fit_timing` breaks the pass's wall time into `setup` (allocation and the
-opening render), `fits` (the whole sweep loop) and `grad` (`gnorm`).  These are
-named buckets, not a partition: cheap work is left out rather than pooled into a
-residual, so they sum to slightly less than the driver's `t_fit`.
+opening render) and `fits` (the whole sweep loop).  These are named substeps
+timing only significant work; minor calculations are neglected, so the substeps sum to
+slightly less than the driver's `t_fit`.
 """
 function fit_pass(fitter::SequentialFitter, data::Vector{FT}, w::Vector{FT}, geom,
                   catalog::Catalog{FT}, psf, plan::FitPlan, o, state; ny::Int, nx::Int,
@@ -287,40 +285,13 @@ function fit_pass(fitter::SequentialFitter, data::Vector{FT}, w::Vector{FT}, geo
 
     new_catalog = Catalog{FT}(y, x, flux, snr, copy(catalog.pass), bkg, lambda)
     theta = theta_from_catalog(new_catalog, plan)
-    # `gnorm` is expensive: one full stamp fill and adjoint product per pass, 12-16%
-    # of `t_fit` on a 1000x1000 / 6k-source field, and nothing consumes it.  Kept as a
-    # diagnostic for now; it may be deprecated.  `fit_timing.grad` is this cost, so the
-    # decision can be made from a run rather than from this comment.
-    t0 = time()
-    gnorm, cost_end = _end_of_pass_gnorm(psf, plan, theta, model, data, w, geom, union_pix, R_fit)
-    t_grad = time() - t0
-    stats = (; n_lin = move ? n_sweeps : 0, n_trials, n_accepted, cost_start, cost_end, gnorm,
-               n_star_fits, n_skipped, n_capped, sweep_costs,
-               fit_timing = (; setup = t_setup, fits = t_fits, grad = t_grad))
+    # The last sweep already evaluated the cost at this model, over the same
+    # `union_pix` and with the same function as `cost_start`.
+    stats = (; n_lin = move ? n_sweeps : 0, n_trials, n_accepted, cost_start,
+               cost_end = last(sweep_costs), n_star_fits, n_skipped, n_capped, sweep_costs,
+               fit_timing = (; setup = t_setup, fits = t_fits))
     return (; catalog = new_catalog, theta, model = reshape(model, ny, nx), model_R, geom, data, w,
               render_buf, render_scratch, state = nothing, stats)
-end
-
-# The simultaneous fitter's convergence statistic, `max |J'r| / sqrt(diag(J'J) *
-# cost / dof)`, evaluated once at the end of a sequential pass so the two fitters
-# report a directly comparable `gnorm`.  One stamp fill: about the cost of one
-# more source fit per source, and far less than a sweep.
-function _end_of_pass_gnorm(psf, plan::FitPlan, theta, model, data::Vector{FT}, w, geom,
-                            union_pix, R_fit::Int) where {FT}
-    n = length(geom.anchor_y)
-    p, S2, npix = plan.p, geom.S2, length(data)
-    stamp = StampDerivatives{FT, Int32}(Array{FT, 3}(undef, p, S2, n), geom.pixels,
-                                        Matrix{FT}(undef, p, n), npix, p, S2)
-    live = trues(n)
-    _fill_stamps!(stamp, psf, plan.free_names_val, plan.fixed, theta, w, plan.grad_col,
-        geom.dy_off, geom.dx_off, geom.anchor_y, geom.anchor_x, plan.row_y, plan.row_x,
-        plan.row_flux, live, _fill_scratch(psf, 2R_fit + 1, FT))
-    wt_resid = zeros(FT, npix)
-    cost = _residual_cost!(wt_resid, model, data, w, union_pix)
-    b_scaled = Vector{FT}(undef, p * n)
-    apply_JT!(b_scaled, stamp, wt_resid, live, Vector{FT}(undef, S2))
-    dof = max(length(union_pix) - p * n, 1)
-    return _scaled_gradient_norm(b_scaled, reshape(stamp.colnorm, p * n), cost / dof), cost
 end
 
 function _trace_sweep(pass, sweep, cost, cost_after, n_fits, n_iter)
@@ -454,8 +425,7 @@ In `pass_history`, `n_lin` counts sweeps, `n_trials` LM iterations summed over
 all source fits, and `n_accepted` source fits that lowered their own cost;
 `n_star_fits`, `n_skipped` (sources the convergence check did not refit),
 `n_capped` and `sweep_costs` (the global cost after each sweep) are specific to
-this fitter.  `gnorm` is the simultaneous fitter's cosine-scaled
-gradient norm evaluated at the end of the pass, so the two are comparable.
+this fitter.
 
 Errors come from each source's own LM normal matrix at its final parameters,
 evaluated against the final residual of all other sources; like the

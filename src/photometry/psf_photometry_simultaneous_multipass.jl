@@ -46,7 +46,7 @@ end
 
 Compute `z = Jm' * u` where `u` is the *weighted* residual
 `sqrt.(w) .* (model .- data)` and `z` is the equilibrated gradient
-`D⁻¹ J' r` (i.e. `b_scaled`).  `z` is filled in place.  `sbuf` is a
+`D⁻¹ J' r`.  `z` is filled in place.  `sbuf` is a
 length-`S²` scratch vector.  Non-`live` (frozen) stars are skipped, leaving
 their `z` slice at `0`.  The convenience form allocates `sbuf`.
 """
@@ -140,10 +140,9 @@ end
 Wrap the weighted, column-equilibrated Jacobian as a matrix-free
 `npix × n` `LinearOperator`: `op * v` calls [`apply_J!`](@ref), `op' * u`
 calls [`apply_JT!`](@ref).  The closures capture `stamp` (whose `values` are
-refreshed in place each outer iteration), `live` (mutated as stars freeze),
-and `sbuf` (a length-`S²` scratch shared by the forward and adjoint products,
-which the linear solver never runs concurrently), so a single operator built
-once is valid for the whole fit.
+refreshed in place each outer iteration), `live`, and `sbuf` (a length-`S²`
+scratch shared by the forward and adjoint products, which the linear solver never
+runs concurrently), so a single operator built once is valid for the whole fit.
 """
 function _jacobian_operator(stamp::StampDerivatives{FT}, live, sbuf, npix::Int, n::Int) where {FT}
     fwd = (res, v) -> apply_J!(res, stamp, v, live, sbuf)
@@ -223,7 +222,7 @@ end
 """
     _fill_scratch(psf, S, ::Type{FT}) where {FT}
 
-Per-solve scratch for [`_fill_stamps!`](@ref)'s specialized
+Per-solve scratch for `_fill_stamps!`'s specialized
 `GriddedPSFModel{T,<:ImagePSF{T}}` method: the same per-corner
 `(value, d/dv, d/du)` `S x S` buffers [`PSF._render_scratch`](@ref) builds, plus three
 length-`S^2` reduction outputs (`dS/dY`, `dS/dX`, `S`, in
@@ -459,7 +458,7 @@ Per-source 1-sigma parameter errors from the `p x p` diagonal block of the
 normal equations, for a catalog whose Jacobian is stored as `stamp`.
 
 `stamp` must already hold the derivatives at the final `θ`, filled with every
-source live (see [`_fill_stamps!`](@ref)): a source frozen during the fit has
+source live (see `_fill_stamps!`): a source frozen during the fit has
 zeroed columns, and its reported errors must not inherit that.
 
 Each block is `J' J` restricted to source `j`'s stamp pixels.  It is assembled
@@ -476,7 +475,7 @@ flux error of a 7e5-count star by 20%.
 is the error on free parameter `k` (the `k`-th entry of `free_names`) of
 source `j`.  Callers scatter it into whatever layout they report.
 
-Used by [`fit_all_stars_simultaneous_multipass`](@ref); `fit_all_stars_multipass`
+Used by [`fit_all_stars_simultaneous_multipass`](@ref); [`fit_all_stars_multipass`](@ref)
 takes its errors from each source's own Levenberg-Marquardt normal matrix instead.
 """
 function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT},
@@ -571,13 +570,13 @@ n_free_per_source(::SimultaneousFitter, plan::FitPlan) = plan.p
 min_stamp_pixels(::SimultaneousFitter, ::FitPlan) = 1
 empty_pass_stats(::SimultaneousFitter, lambda, ::Type{FT}) where {FT} =
     (; n_lin = 0, n_trials = 0, n_accepted = 0, cost_start = FT(NaN), cost_end = FT(NaN),
-       lambda_start = lambda, lambda_end = lambda, gnorm = FT(NaN),
-       fit_timing = (; setup = 0.0, stamps = 0.0, render = 0.0, solve = 0.0, grad = 0.0))
+       lambda_start = lambda, lambda_end = lambda,
+       fit_timing = (; setup = 0.0, stamps = 0.0, render = 0.0, solve = 0.0))
 
 """
     catalog_from_theta(catalog, fit, plan) -> Catalog
 
-The catalog with the fitted parameters and the fresh `flux_snr` written back.
+The catalog with the fitted parameters and the `flux_snr` written back.
 Fit indices *are* catalog indices, so this is element-wise; it returns a new
 catalog rather than mutating, so the pre-fit values remain valid where they are
 still referenced.
@@ -596,8 +595,7 @@ function catalog_from_theta(catalog::Catalog{FT}, fit, plan::FitPlan) where {FT}
         end
         # Signed curvature significance `flux * sqrt(H_ff)`: column equilibration
         # already computed `colnorm[k_flux, j] == sqrt(H_ff)`, so pruning needs
-        # no extra linear algebra.  `fit_pass` refills the stamps at the final
-        # theta whenever a step was accepted, so this is current.
+        # no extra linear algebra.
         snr[j] = theta[base + plan.k_flux] * colnorm[plan.k_flux, j]
     end
     return Catalog{FT}(y, x, flux, snr, copy(catalog.pass), copy(catalog.bkg), copy(catalog.lambda))
@@ -642,12 +640,11 @@ linearization with no accepted trial ends the pass.
 The fields [`AbstractMultipassFitter`](@ref) requires, plus `stamp`, `cost`,
 `dof` and `fill_scratch` for [`source_errors`](@ref).  `stats` holds `n_lin`,
 `n_trials` (damping trials), `n_accepted` (accepted trials), `cost_start`,
-`cost_end`, `lambda_start`, `lambda_end`, and `gnorm`, the cosine-scaled
-gradient norm at the returned `theta`.
+`cost_end`, `lambda_start` and `lambda_end`.
 
 `stats.fit_timing` breaks the pass's wall time into `setup` (allocation and the
-Krylov workspace), `stamps`, `render`, `solve` (the Krylov solve and the step it
-produces) and `grad`. Some work is not timed (e.g., calculating the `cost`) so
+Krylov workspace), `stamps`, `render` and `solve` (the Krylov solve and the step it
+produces). Some work is not timed (e.g., calculating the `cost`) so
 the sum of the segments will generally be slightly less than the total `t_fit`.
 """
 function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, geom,
@@ -682,7 +679,6 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
     # is the length-`npix` Krylov right-hand side and copies all of it.
     wt_resid = zeros(FT, npix)
     mrhs = Vector{FT}(undef, npix)
-    b_scaled = Vector{FT}(undef, n_par)
     delta = Vector{FT}(undef, n_par)
     theta_cand = Vector{FT}(undef, n_par)
 
@@ -695,14 +691,12 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
     max_step = freeze_positions ? zero(FT) : o.max_step
     cost = FT(NaN)
     cost_start = FT(NaN)
-    gnorm = FT(NaN)
     n_lin = 0
     n_trials = 0
     n_accepted = 0
     t_stamps = 0.0
     t_render = 0.0
     t_solve = 0.0
-    t_grad = 0.0
     t_setup = time() - t0
 
     for lin in 1:linearizations
@@ -728,12 +722,7 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
         n_lin += 1
         lin == 1 && (cost_start = cost)
         @. mrhs = -wt_resid
-        t0 = time()
-        apply_JT!(b_scaled, stamp, wt_resid, live, sbuf)
-
         colnorm_flat = reshape(stamp.colnorm, n_par)
-        gnorm = _scaled_gradient_norm(b_scaled, colnorm_flat, cost / dof)
-        t_grad += time() - t0
 
         accepted = false
         for trial in 1:max_trials
@@ -753,7 +742,7 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
 
             n_trials += 1
             ok = cost_cand < cost
-            show_trace && _trace_fit_step(pass, lin, trial, cost, cost_cand, lambda, gnorm,
+            show_trace && _trace_fit_step(pass, lin, trial, cost, cost_cand, lambda,
                 ok ? "accepted" : "rejected")
             if ok
                 # The candidate arrays become the current ones.  `model` is now
@@ -773,52 +762,34 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
         accepted || break
     end
 
-    # Report stationarity at the returned `theta`, not at the start of the last
-    # linearization: a pass that ends on an accepted step would otherwise report
-    # the gradient from before that step (20.7 vs 3.0 on the crowding harness at
-    # one linearization per pass).  One more stamp fill; it also refreshes
-    # `colnorm`, so `flux_snr` below is no longer one step stale.
-    if n_accepted > 0
-        t0 = time()
-        _fill_stamps!(stamp, psf, plan.free_names_val, plan.fixed, theta, w, plan.grad_col,
-            geom.dy_off, geom.dx_off, geom.anchor_y, geom.anchor_x,
-            plan.row_y, plan.row_x, plan.row_flux, live, fill_scratch)
-        if freeze_positions
-            V = stamp.values
-            @inbounds for k in (plan.k_y, plan.k_x)
-                k === nothing && continue
-                for a in 1:n, mi in 1:S2
-                    V[k, mi, a] = zero(FT)
-                end
-            end
-        end
-        t_stamps += time() - t0
-        _residual_cost!(wt_resid, model, data, w, union_pix)
-        t0 = time()
-        apply_JT!(b_scaled, stamp, wt_resid, live, sbuf)
-        gnorm = _scaled_gradient_norm(b_scaled, reshape(stamp.colnorm, n_par), cost / dof)
-        t_grad += time() - t0
-    end
+    # Refill at the returned `theta`, not the one the last linearization started
+    # from to refresh `colnorm`, which is what `catalog_from_theta` reads for `flux_snr`
+    # which the driver then prunes on, so without this the pruning cut would act on an SNR one
+    # accepted step stale. 26-09-18: Stamp filling is expensive and colnorm being one step out
+    # of date does not significantly alter the pruning behavior.  Measured on 1000x1000 with
+    # 5850 sources: the refill costs ~4.8 ms against ~73 ms of `t_fit` per pass (~7%), and
+    # leaves `flux_snr` at most 6e-5 relative from its refilled value -- `flux` is read fresh
+    # from `theta`, and the stale factor `sqrt(H_ff)` is a unit-flux render norm, nearly
+    # translation-invariant over the <=1 px step.  Over a full 5-pass run that still tips the
+    # occasional source sitting on the `prune_snr_min` cut (4 of 5850 differ in membership,
+    # fitted positions by <0.04 px), which is the arbitrary end of the cut.  Not measured for
+    # hard-masked weights or a `GriddedPSFModel`, where `H_ff` varies less smoothly with
+    # position; restore this if morphology or pruning there looks unstable.
+    # if n_accepted > 0
+    #     t0 = time()
+    #     _fill_stamps!(stamp, psf, plan.free_names_val, plan.fixed, theta, w, plan.grad_col,
+    #         geom.dy_off, geom.dx_off, geom.anchor_y, geom.anchor_x,
+    #         plan.row_y, plan.row_x, plan.row_flux, live, fill_scratch)
+    #     t_stamps += time() - t0
+    # end
 
     fit = (; theta, model = reshape(model, ny, nx), cost, dof, stamp, model_R, geom, data, w,
              render_buf, render_scratch, fill_scratch)
     stats = (; n_lin, n_trials, n_accepted, cost_start, cost_end = cost, lambda_start,
-               lambda_end = lambda, gnorm,
+               lambda_end = lambda,
                fit_timing = (; setup = t_setup, stamps = t_stamps, render = t_render,
-                               solve = t_solve, grad = t_grad))
+                               solve = t_solve))
     return (; fit..., catalog = catalog_from_theta(catalog, fit, plan), state = lambda, stats)
-end
-
-# Cosine-scaled gradient norm: `|b_true| / sqrt(A_ii * cost/dof)` per column,
-# maximized.  Dimensionless and comparable across passes and source counts.
-function _scaled_gradient_norm(b_scaled::AbstractVector{FT}, colnorm_flat, C_r) where {FT}
-    g_tiny = eps(FT)
-    gnorm = zero(FT)
-    @inbounds for i in eachindex(b_scaled)
-        cn = colnorm_flat[i]
-        gnorm = max(gnorm, abs(cn * b_scaled[i]) / (sqrt(cn * cn * C_r) + g_tiny))
-    end
-    return gnorm
 end
 
 """
@@ -826,9 +797,13 @@ end
 
 Per-source errors from the `p x p` diagonal blocks of the normal matrix at the
 final `theta` (see `_source_errors!`), with the global `cost / dof` for
-estimators that rescale by it.  The stamps are refilled with every source live
-and unmasked first: `freeze_positions` may have zeroed the position columns
-during the fit, and the reported position errors must not inherit that.
+estimators that rescale by it.
+
+The stamps are refilled at `fit.theta` first, for two reasons.
+`freeze_positions` may have zeroed the position columns during the fit, and the
+reported position errors must not inherit that.  The stamp refill also allows the
+errors to reflect the parameters the final pass returned, since `fit_pass` leaves `stamp`
+at the last linearization's, one accepted step behind.
 """
 function source_errors(::SimultaneousFitter, fit, psf, plan::FitPlan, cov_est)
     FT = eltype(fit.theta)
@@ -905,9 +880,8 @@ $(_MULTIPASS_DOC_FIT_COMMON)
 - `λ_down::Real = 10.0`: damping decrease factor on a successful trial.
 - `λ_min::Real = 1.0e-12`, `λ_max::Real = 1.0e12`: damping bounds.
 
-In `pass_history`, `n_lin` counts linearizations, `n_trials` damping trials,
-`n_accepted` accepted trials, and `gnorm` is the cosine-scaled gradient norm at
-the parameters the pass returns; `lambda_start` / `lambda_end` bracket the
+In `pass_history`, `n_lin` counts linearizations, `n_trials` damping trials and
+`n_accepted` accepted trials; `lambda_start` / `lambda_end` bracket the
 damping factor.
 
 !!! note

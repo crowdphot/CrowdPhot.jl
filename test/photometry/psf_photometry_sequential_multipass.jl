@@ -82,10 +82,10 @@ end
     @test CrowdPhot.min_stamp_pixels(free, plan) == 5
     @test CrowdPhot.initial_fit_state(free, Float64) === nothing
     st = CrowdPhot.empty_pass_stats(free, nothing, Float64)
-    @test (st.n_lin, st.n_trials, st.n_accepted) == (0, 0, 0) && isnan(st.gnorm)
+    @test (st.n_lin, st.n_trials, st.n_accepted) == (0, 0, 0) && isempty(st.sweep_costs)
     # A pass with an empty catalog must still report the same `fit_timing` keys, or
     # `pass_history` is heterogeneous within a run.
-    @test st.fit_timing == (; setup = 0.0, fits = 0.0, grad = 0.0)
+    @test st.fit_timing == (; setup = 0.0, fits = 0.0)
 end
 
 @testset "move = false agrees with the simultaneous fitter" begin
@@ -114,15 +114,14 @@ end
     @test seq.stats.cost_end ≈ sim.stats.cost_start rtol = 1e-10
     @test seq.stats.n_lin == 0 && seq.stats.n_star_fits == 0
 
-    # Both fitters report `gnorm` at the parameters they return: after an
-    # accepted simultaneous step it must match an independent evaluation there.
+    # `cost_end` is the cost at the parameters the pass returns, not at the ones the
+    # last linearization started from: after an accepted step it must match an
+    # independent evaluation against the returned model.
     simfit = fit_pass(SimultaneousFitter{Float64}(:lsqr, 1, 10, 1e-4, 8, 1e-3, 10.0, 10.0, 1e-12, 1e12),
         data, w, geom, catalog, TEST_PSF, plan, o, 1e-3; ny, nx)
     @test simfit.stats.n_accepted == 1
     up = CrowdPhot._touched_pixels(geom.pixels, length(data))
-    g_ref, c_ref = CrowdPhot._end_of_pass_gnorm(TEST_PSF, plan, simfit.theta, vec(simfit.model), data, w, geom, up, o.R_fit)
-    @test simfit.stats.gnorm ≈ g_ref rtol = 1e-8
-    @test simfit.stats.cost_end ≈ c_ref rtol = 1e-10
+    @test simfit.stats.cost_end ≈ CrowdPhot._cost!(vec(simfit.model), data, w, up) rtol = 1e-10
 end
 
 @testset "separable circular Gaussian kernels" begin
@@ -297,19 +296,23 @@ end
         # The sub-step timings are named buckets, not a partition of `t_fit`: cheap
         # steps are left out, so they may sum to less but never to more.  No tolerance
         # on the difference, which is wall-clock and would be flaky.
-        @test keys(h.fit_timing) == (:setup, :fits, :grad)
+        @test keys(h.fit_timing) == (:setup, :fits)
         @test all(t -> isfinite(t) && t >= 0, values(h.fit_timing))
         @test sum(values(h.fit_timing)) <= h.t_fit
     end
 end
 
-@testset "sweeps and iterations reduce the gradient" begin
+@testset "sweeps and iterations reduce the cost" begin
     img, src, iv = crowded_field(; n = 150, seed = 5)
     kws = (; SMALL_BKG..., inv_var = iv, fixed = TEST_FIXED, max_iter = 3, min_iter = 3)
     r1 = fit_all_stars_multipass(img, TEST_PSF, 4.0; kws..., sweeps_per_pass = 1)
     r3 = fit_all_stars_multipass(img, TEST_PSF, 4.0; kws..., sweeps_per_pass = 3)
     @test all(h.n_lin == 3 for h in r3.pass_history)
-    @test r3.pass_history[end].gnorm < r1.pass_history[end].gnorm
+    # Pass 1 sees the same catalog either way (same background, same detection), so
+    # this isolates the sweeps: three of them must take more cost out than one.
+    p1_1, p1_3 = r1.pass_history[1], r3.pass_history[1]
+    @test p1_1.cost_start ≈ p1_3.cost_start rtol = 1e-12
+    @test p1_3.cost_start - p1_3.cost_end > p1_1.cost_start - p1_1.cost_end
     @test r3.pass_history[end].cost_end <= r1.pass_history[end].cost_end * (1 + 1e-3)
 end
 
