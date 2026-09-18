@@ -1211,11 +1211,20 @@ end
 function _trace_timing(r::NamedTuple)
     println("  timing       bkg ", @sprintf("%.2fs", r.t_background),
         "  detect ", @sprintf("%.2fs", r.t_detect),
+        "  geom ", @sprintf("%.2fs", r.t_geom),
         "  fit ", @sprintf("%.2fs", r.t_fit),
         "  prune ", @sprintf("%.2fs", r.t_prune),
         "  render ", @sprintf("%.2fs", r.t_render))
+    println("  fit detail   ", _timing_fields(r.fit_timing))
     return nothing
 end
+
+# Three decimals, unlike the 2 the pass-level timings use: this is a breakdown of
+# one of those buckets, so at 2 every field of a fast pass reads `0.00s`.
+# Iterated rather than named, so each fitter's own buckets print with no
+# per-fitter printer.
+_timing_fields(t::NamedTuple) =
+    join((string(k, " ", @sprintf("%.3fs", v)) for (k, v) in pairs(t)), "  ")
 
 function _trace_setup(t_setup)
     println("---- setup ", "-"^58)
@@ -1240,7 +1249,7 @@ function _trace_summary(history, converged, criterion, t_setup, t_finalize)
     total_time = t_setup + t_finalize
     for r in history
         pruned = r.n_pruned_snr + r.n_pruned_close + r.n_pruned_nopix
-        t = r.t_background + r.t_detect + r.t_fit + r.t_prune + r.t_render
+        t = r.t_background + r.t_detect + r.t_geom + r.t_fit + r.t_prune + r.t_render
         total_new += r.n_new
         total_pruned += pruned
         total_time += t
@@ -1252,6 +1261,11 @@ function _trace_summary(history, converged, criterion, t_setup, t_finalize)
         @sprintf("%9.2fs", t_finalize))
     println("  passes run ", length(history), ", detected ", total_new, ", pruned ", total_pruned,
         ", final catalog ", isempty(history) ? 0 : last(history).n_catalog)
+    # Where the fitting time went over the whole run.  Every pass of a run reports
+    # the same buckets, so these add field-wise.
+    isempty(history) ||
+        println("  fit detail ", _timing_fields(reduce((a, b) -> map(+, a, b),
+                                                       (r.fit_timing for r in history))))
     println("  ", converged ? "converged" : "stopped", " (", criterion, ")   total ",
         @sprintf("%.2fs", total_time), "  [setup ", @sprintf("%.2fs", t_setup),
         ", finalize ", @sprintf("%.2fs", t_finalize), "]")
@@ -1608,9 +1622,14 @@ A `NamedTuple`:
   detection, fitting, pruning and timing counter the run produced.  The fitting
   counters always include `n_lin`, `n_trials`, `n_accepted`, `cost_start`,
   `cost_end` and `gnorm`; their meaning per fitter is given under that
-  function's fitting keywords.  Populated regardless of `show_trace`.  Its five timing
-  fields -- `t_background`, `t_detect`, `t_fit`, `t_prune`, `t_render` -- sum to
-  that pass's wall time.
+  function's fitting keywords.  Populated regardless of `show_trace`.  Its six timing
+  fields -- `t_background`, `t_detect`, `t_geom`, `t_fit`, `t_prune`, `t_render` --
+  sum to that pass's wall time, where `t_geom` is the weights and stamp geometry and
+  `t_fit` is the fitter alone.
+- `fit_timing::NamedTuple` (inside each `pass_history` entry): `t_fit` broken down by
+  sub-step, with fields chosen per fitter and documented under it.  These target the
+  major fit cost centers, so some small computation is left out; 
+  they sum to slightly less than `t_fit` but the difference should be small.
 - `t_setup::Float64`: seconds spent before the first pass (validation, the
   long-lived state, the `inv_var` copy, seeding the catalog).  Scales with the
   image.
@@ -1660,7 +1679,10 @@ diagnostics and morphology -- and talks to a fitter only through these methods:
   render and the diagnostics were built from.
 - `state`: the state for the next pass.
 - `stats`: a `NamedTuple` for the pass report, starting with `n_lin`,
-  `n_trials`, `n_accepted`, `cost_start`, `cost_end`, `gnorm`.
+  `n_trials`, `n_accepted`, `cost_start`, `cost_end`, `gnorm`, and including a
+  nested `fit_timing` of this fitter's own sub-step timings.  The keys are the
+  fitter's to choose but must not change within a run, and `empty_pass_stats` must
+  offer the same ones zeroed.
 """
 abstract type AbstractMultipassFitter end
 
@@ -1882,6 +1904,7 @@ function _fit_all_stars_multipass(
         n_pruned_nopix = 0
         n_pruned_snr = 0
         n_pruned_close = 0
+        t_geom = 0.0
         t_fit = 0.0
         t_prune = 0.0
         t_render = 0.0
@@ -1890,7 +1913,8 @@ function _fit_all_stars_multipass(
         if isempty(catalog)
             fill!(model, zero(FT))
         else
-            # --- fit ---
+            # --- weights and stamp geometry ---
+            # Timed apart from the fit so that `t_fit` is exactly `fit_pass`
             t0 = time()
             data, w = pass_weights(image, bkg, FT)
             # A source without enough usable pixels -- off image, masked, or
@@ -1905,20 +1929,22 @@ function _fit_all_stars_multipass(
                 catalog = drop!(disc, catalog, geom.ok, :no_pixels, pass)
                 geom = stamp_geometry(catalog, w, R_fit, ny, nx; min_pixels = min_pix)
             end
+            t_geom = time() - t0
 
             # ...and that drop can empty the catalog, which is why this is asked
             # twice rather than once at the top of the pass.
             if isempty(catalog)
                 fill!(model, zero(FT))
-                t_fit = time() - t0
             else
+                # --- fit ---
+                t0 = time()
                 fit = fit_pass(fitter, data, w, geom, catalog, psf, plan, o, state;
                     ny, nx, pass, n_new = det.n_new,
                     freeze_positions = last_pass && freeze_positions_final, show_trace)
+                t_fit = time() - t0
                 state = fit.state
                 stats = fit.stats
                 catalog = fit.catalog
-                t_fit = time() - t0
 
                 # --- prune ---
                 t0 = time()
@@ -1953,7 +1979,7 @@ function _fit_all_stars_multipass(
                     n_dup_catalog = det.n_dup_catalog, n_dup_discarded = det.n_dup_discarded,
                     n_new = det.n_new, n_catalog = length(catalog), stats...,
                     n_pruned_snr, n_pruned_close, n_pruned_nopix, n_new_surviving,
-                    t_background, t_detect, t_fit, t_prune, t_render)
+                    t_background, t_detect, t_geom, t_fit, t_prune, t_render)
         push!(history, report)
         show_trace && _trace_timing(report)
 

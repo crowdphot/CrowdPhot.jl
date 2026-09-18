@@ -48,7 +48,8 @@ n_free_per_source(fitter::SequentialFitter, plan::FitPlan) = plan.p + fitter.fit
 min_stamp_pixels(fitter::SequentialFitter, plan::FitPlan) = n_free_per_source(fitter, plan) + 1
 empty_pass_stats(::SequentialFitter, _, ::Type{FT}) where {FT} =
     (; n_lin = 0, n_trials = 0, n_accepted = 0, cost_start = FT(NaN), cost_end = FT(NaN),
-       gnorm = FT(NaN), n_star_fits = 0, n_skipped = 0, n_capped = 0, sweep_costs = FT[])
+       gnorm = FT(NaN), n_star_fits = 0, n_skipped = 0, n_capped = 0, sweep_costs = FT[],
+       fit_timing = (; setup = 0.0, fits = 0.0, grad = 0.0))
 
 # The `fixed` the per-source fits see: the render plan's, minus the pinned `bkg`
 # when a local pedestal is fit.
@@ -171,11 +172,17 @@ source fit), `n_accepted` (source fits that lowered their own cost),
 `gnorm`, the same cosine-scaled gradient norm the simultaneous fitter reports,
 evaluated at the end of the pass.  With a free pedestal `gnorm` is computed on
 the pedestal-free residual, so it is only indicative.
+
+`stats.fit_timing` breaks the pass's wall time into `setup` (allocation and the
+opening render), `fits` (the whole sweep loop) and `grad` (`gnorm`).  These are
+named buckets, not a partition: cheap work is left out rather than pooled into a
+residual, so they sum to slightly less than the driver's `t_fit`.
 """
 function fit_pass(fitter::SequentialFitter, data::Vector{FT}, w::Vector{FT}, geom,
                   catalog::Catalog{FT}, psf, plan::FitPlan, o, state; ny::Int, nx::Int,
                   pass::Integer = 1, n_new::Integer = 0, freeze_positions::Bool = false,
                   move::Bool = true, show_trace::Bool = false) where {FT}
+    t0 = time()
     n = length(catalog)
     npix = length(data)
     R_fit = o.R_fit
@@ -207,7 +214,12 @@ function fit_pass(fitter::SequentialFitter, data::Vector{FT}, w::Vector{FT}, geo
     n_skipped = 0
     n_capped = 0
     rbuf = Vector{FT}(undef, (2R_fit + 1)^2)
+    t_setup = time() - t0
 
+    # One timer around the whole sweep loop, not per source: the per-source render
+    # and scatter are negligible beside `_checked_fit`, so splitting them would buy
+    # a noise floor and put four `time()` calls in the innermost loop.
+    t0 = time()
     for sweep in 1:n_sweeps
         cost_before = isempty(sweep_costs) ? cost_start : last(sweep_costs)
         fits_before, trials_before = n_star_fits, n_trials
@@ -271,14 +283,20 @@ function fit_pass(fitter::SequentialFitter, data::Vector{FT}, w::Vector{FT}, geo
             n_star_fits - fits_before, n_trials - trials_before)
     end
 
+    t_fits = time() - t0
+
     new_catalog = Catalog{FT}(y, x, flux, snr, copy(catalog.pass), bkg, lambda)
     theta = theta_from_catalog(new_catalog, plan)
-    # `gnorm` is expensive: one full stamp fill and adjoint product per pass, 10-20%
-    # of a sequential pass on the crowding harness, and nothing consumes it.  Kept
-    # as a diagnostic for now; it may be deprecated.
+    # `gnorm` is expensive: one full stamp fill and adjoint product per pass, 12-16%
+    # of `t_fit` on a 1000x1000 / 6k-source field, and nothing consumes it.  Kept as a
+    # diagnostic for now; it may be deprecated.  `fit_timing.grad` is this cost, so the
+    # decision can be made from a run rather than from this comment.
+    t0 = time()
     gnorm, cost_end = _end_of_pass_gnorm(psf, plan, theta, model, data, w, geom, union_pix, R_fit)
+    t_grad = time() - t0
     stats = (; n_lin = move ? n_sweeps : 0, n_trials, n_accepted, cost_start, cost_end, gnorm,
-               n_star_fits, n_skipped, n_capped, sweep_costs)
+               n_star_fits, n_skipped, n_capped, sweep_costs,
+               fit_timing = (; setup = t_setup, fits = t_fits, grad = t_grad))
     return (; catalog = new_catalog, theta, model = reshape(model, ny, nx), model_R, geom, data, w,
               render_buf, render_scratch, state = nothing, stats)
 end
