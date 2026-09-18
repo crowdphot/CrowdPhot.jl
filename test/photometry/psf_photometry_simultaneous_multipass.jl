@@ -637,7 +637,7 @@ end
     iv[3, 3] = NaN
     o = (; bkg_box_size = 10, bkg_box_size_coarse = 40, bkg_coarse_passes = 2,
            bkg_rms_box_size = 10, bkg_estimator = SExtractorBackground(),
-           bkg_rms_estimator = MADStdRMS(), bkg_kws = (;), mask = nothing,
+           bkg_rms_estimator = MADStdRMS(), bkg_kws = (;), bkg_mask = nothing,
            coverage_mask = nothing, fixed_inv_var = iv)
     model = zeros(ny, nx)
 
@@ -682,7 +682,7 @@ end
         CircularGaussianPSF(R + 1.0, R + 1.0, PSF_FWHM, 1.0, 0.0), 1:(2R + 1), 1:(2R + 1)))
     o = (; bkg_box_size = 20, bkg_box_size_coarse = 80, bkg_coarse_passes = 1,
            bkg_rms_box_size = 20, bkg_estimator = SExtractorBackground(),
-           bkg_rms_estimator = MADStdRMS(), bkg_kws = (;), mask = nothing,
+           bkg_rms_estimator = MADStdRMS(), bkg_kws = (;), bkg_mask = nothing,
            coverage_mask = nothing, fixed_inv_var = nothing,
            kernel = kern, detect_sigma = 5.0, normalize_zerosum = true,
            min_separation = 1.5, blend_threshold = nothing,

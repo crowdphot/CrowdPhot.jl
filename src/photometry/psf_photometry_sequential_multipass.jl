@@ -214,9 +214,7 @@ function fit_pass(fitter::SequentialFitter, data::Vector{FT}, w::Vector{FT}, geo
     rbuf = Vector{FT}(undef, (2R_fit + 1)^2)
     t_setup = time() - t0
 
-    # One timer around the whole sweep loop, not per source: the per-source render
-    # and scatter are negligible beside `_checked_fit`, so splitting them would buy
-    # a noise floor and put four `time()` calls in the innermost loop.
+    # One timer around the whole sweep loop
     t0 = time()
     for sweep in 1:n_sweeps
         cost_before = isempty(sweep_costs) ? cost_start : last(sweep_costs)

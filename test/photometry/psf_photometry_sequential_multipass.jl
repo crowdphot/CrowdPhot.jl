@@ -95,7 +95,7 @@ end
     img, src, iv = crowded_field(; n = 60)
     o = (; bkg_box_size = 20, bkg_box_size_coarse = 60, bkg_coarse_passes = 0,
            bkg_rms_box_size = 20, bkg_estimator = CrowdPhot.Background.SExtractorBackground(),
-           bkg_rms_estimator = CrowdPhot.Background.MADStdRMS(), bkg_kws = (;), mask = nothing,
+           bkg_rms_estimator = CrowdPhot.Background.MADStdRMS(), bkg_kws = (;), bkg_mask = nothing,
            coverage_mask = nothing, fixed_inv_var = iv, R_fit = 4, R_cap = 20,
            model_rad = :auto, model_rad_nsigma = 1.0, max_step = 1.0)
     ny, nx = size(img)
