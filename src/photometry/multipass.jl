@@ -551,8 +551,9 @@ a prune produces a *new* catalog rather than compacting one in place.
 - `bkg`: current local pedestal, fit per source over its fitting box on top of
   the global background.  Always zero unless the fitter fits it (only
   [`fit_all_stars_multipass`](@ref) can); never part of the rendered model.
-- `flux_snr`: signed curvature significance `flux * sqrt(H_ff)` from the last
-  linearization, which is what [`prune_mask`](@ref) cuts on.  `NaN` until a fit
+- `flux_snr`: signed curvature significance `flux * sqrt(H_ff)`, with `H_ff`
+  from the last linearization's stamp fill and flux from after its step,
+  which is what [`prune_mask`](@ref) cuts on.  `NaN` until a fit
   has run.  Deliberately not `flux / flux_err`: it uses the diagonal flux
   curvature rather than the inverted per-source block, so it ignores the
   flux-position covariance and runs optimistic.
@@ -1188,13 +1189,12 @@ function _trace_detection(r::NamedTuple)
     return nothing
 end
 
-function _trace_fit_step(pass, lin, trial, cost, cost_cand, lambda, gnorm, status)
+function _trace_fit_step(pass, lin, trial, cost, cost_cand, lambda, status)
     pct = cost > 0 ? 100 * (cost_cand - cost) / cost : zero(cost)
     println("  lin ", lpad(lin, 2), " trial ", lpad(trial, 2),
         " | cost ", @sprintf("%.4e", cost), " -> ", @sprintf("%.4e", cost_cand),
         " (", @sprintf("%+.2f%%", pct), ")",
-        " | lam ", @sprintf("%.1e", lambda),
-        " | |g| ", @sprintf("%.2f", gnorm), " | ", status)
+        " | lam ", @sprintf("%.1e", lambda), " | ", status)
     return nothing
 end
 
@@ -1220,8 +1220,8 @@ function _trace_timing(r::NamedTuple)
 end
 
 # Three decimals, unlike the 2 the pass-level timings use: this is a breakdown of
-# one of those buckets, so at 2 every field of a fast pass reads `0.00s`.
-# Iterated rather than named, so each fitter's own buckets print with no
+# one of those steps, so at 2 every field of a fast pass reads `0.00s`.
+# Iterated rather than named, so each fitter's own steps print with no
 # per-fitter printer.
 _timing_fields(t::NamedTuple) =
     join((string(k, " ", @sprintf("%.3fs", v)) for (k, v) in pairs(t)), "  ")
@@ -1262,7 +1262,7 @@ function _trace_summary(history, converged, criterion, t_setup, t_finalize)
     println("  passes run ", length(history), ", detected ", total_new, ", pruned ", total_pruned,
         ", final catalog ", isempty(history) ? 0 : last(history).n_catalog)
     # Where the fitting time went over the whole run.  Every pass of a run reports
-    # the same buckets, so these add field-wise.
+    # the same steps, so these add field-wise.
     isempty(history) ||
         println("  fit detail ", _timing_fields(reduce((a, b) -> map(+, a, b),
                                                        (r.fit_timing for r in history))))
@@ -1556,7 +1556,7 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   Every phase of the call is timed and every timed phase is counted into the
   summary's total, so that total is comparable with the caller's own wall clock
   rather than silently omitting work: `setup` (validation, the long-lived state,
-  the `inv_var` copy, seeding the catalog), the five per-pass buckets
+  the `inv_var` copy, seeding the catalog), the five per-pass steps
   (`bkg`/`detect`/`fit`/`prune`/`render`), and `finalize` (the validity gate,
   covariance, morphology and diagnostics).  `setup` scales with the image,
   `finalize` with the catalog.
@@ -1620,8 +1620,8 @@ A `NamedTuple`:
   down per pass.
 - `pass_history::Vector{<:NamedTuple}`: one report per pass, with every
   detection, fitting, pruning and timing counter the run produced.  The fitting
-  counters always include `n_lin`, `n_trials`, `n_accepted`, `cost_start`,
-  `cost_end` and `gnorm`; their meaning per fitter is given under that
+  counters always include `n_lin`, `n_trials`, `n_accepted`, `cost_start` and
+  `cost_end`; their meaning per fitter is given under that
   function's fitting keywords.  Populated regardless of `show_trace`.  Its six timing
   fields -- `t_background`, `t_detect`, `t_geom`, `t_fit`, `t_prune`, `t_render` --
   sum to that pass's wall time, where `t_geom` is the weights and stamp geometry and
@@ -1671,7 +1671,7 @@ diagnostics and morphology -- and talks to a fitter only through these methods:
 
 `fit_pass` returns a `NamedTuple` with at least:
 
-- `catalog`: the fitted catalog, with `flux_snr` refreshed.
+- `catalog`: the fitted catalog.
 - `theta`: its `(y, x, flux)` parameter vector in `plan` order.
 - `model`: `ny x nx`, the render at `theta` over each source's `model_R` box,
   without any per-source pedestal.
@@ -1679,7 +1679,7 @@ diagnostics and morphology -- and talks to a fitter only through these methods:
   render and the diagnostics were built from.
 - `state`: the state for the next pass.
 - `stats`: a `NamedTuple` for the pass report, starting with `n_lin`,
-  `n_trials`, `n_accepted`, `cost_start`, `cost_end`, `gnorm`, and including a
+  `n_trials`, `n_accepted`, `cost_start`, `cost_end`, and including a
   nested `fit_timing` of this fitter's own sub-step timings.  The keys are the
   fitter's to choose but must not change within a run, and `empty_pass_stats` must
   offer the same ones zeroed.
@@ -1964,7 +1964,7 @@ function _fit_all_stars_multipass(
 
                 # --- carry the model forward ---
                 # `fit.model` is already the render at the final `theta`, minus
-                # anything just pruned.  Timed in its own bucket so the trace
+                # anything just pruned.  Timed in its own substep so the trace
                 # stays comparable with the re-rendering formulation.
                 t0 = time()
                 copyto!(model, fit.model)

@@ -854,7 +854,7 @@ end
         # Named buckets, not a partition of `t_fit`: cheap steps are left out, so they
         # may sum to less but never to more.  No tolerance on the difference, which is
         # wall-clock and would be flaky.
-        @test keys(h.fit_timing) == (:setup, :stamps, :render, :solve, :grad)
+        @test keys(h.fit_timing) == (:setup, :stamps, :render, :solve)
         @test all(t -> isfinite(t) && t >= 0, values(h.fit_timing))
         @test sum(values(h.fit_timing)) <= h.t_fit
     end
@@ -873,7 +873,7 @@ end
     @test rb.background isa CrowdPhot.Background2D
     # An empty catalog goes through `empty_pass_stats`, which must offer the same
     # `fit_timing` keys or `pass_history` is heterogeneous within a run.
-    @test all(h -> keys(h.fit_timing) == (:setup, :stamps, :render, :solve, :grad),
+    @test all(h -> keys(h.fit_timing) == (:setup, :stamps, :render, :solve),
               rb.pass_history)
 
     # `min_iter > max_iter` is legal: the early-convergence clause never fires.
