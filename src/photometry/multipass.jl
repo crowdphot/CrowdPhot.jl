@@ -58,13 +58,6 @@ the vector passed in.
 - `bkg`: fitted local pedestal on top of the global background model; zero
   unless [`fit_all_stars_multipass`](@ref) was asked to fit one.
 - `bkg_err`: 1-sigma pedestal error (`zero(T)` when not fit).
-- `converged::BitVector`: all `true`; convergence is a property of the run, not
-  of a source (see the `converged` field of the returned `NamedTuple`).
-- `valid::BitVector`: all `true`, since sources that cannot be fit are dropped
-  from the catalog rather than masked.
-- `n_iter::Vector{Int}`: the run's `n_passes`, repeated per source.
-- `n_passes::Int`: the fitter's `n_lin` summed over every pass: linearizations
-  for the simultaneous fitter, sweeps through the catalog for the sequential one.
 - `n_failed::Int`: sources dropped because they had too few usable pixels or
   non-finite or non-positive parameters.
 - `failure_msgs::Vector{String}`: descriptions of the first few such drops.
@@ -146,8 +139,6 @@ struct MultiPassPhotResult{T, M <: NamedTuple}
     flux_err::Vector{T}
     bkg::Vector{T}
     bkg_err::Vector{T}
-    converged::BitVector
-    valid::BitVector
     chisq::Vector{T}
     qfit::Vector{T}
     qfit_expected::Vector{T}
@@ -155,8 +146,6 @@ struct MultiPassPhotResult{T, M <: NamedTuple}
     crowding::Vector{T}
     spread_model::Vector{T}
     spread_model_err::Vector{T}
-    n_iter::Vector{Int}
-    n_passes::Int
     n_failed::Int
     failure_msgs::Vector{String}
     residual::Matrix{T}
@@ -361,7 +350,7 @@ The accumulating half of [`_render_model!`](@ref): add `coef` times each `live`
 source's render into `model_img` *without* clearing it first.  `coef = -1`
 removes a subset of sources from a model that is already rendered, which costs
 `O(n_subset * model_R^2)` instead of the `O(n_active * model_R^2)` of a full
-re-render.
+re-render, used by `subtract_sources!`.
 """
 function _accum_model!(
         model_img::AbstractVector{FT}, model_template, free_names_val, fixed,
@@ -1563,14 +1552,14 @@ const _MULTIPASS_DOC_RETURNS = """
 
 A `NamedTuple`:
 
-- `phot::MultiPassPhotResult`: the fit for the final catalog.  Its `n_passes`
-  field (and every entry of `n_iter`) counts the fitter's `n_lin` summed over
-  all passes -- linearizations for the simultaneous fitter, sweeps through the
-  source list for the sequential one -- not detection passes; use
-  `n_detection_passes` below.  Its `residual` is `image - background - model`.
-  Its `valid` field is all-`true` by construction: this function owns its
-  catalog and drops unfittable sources rather than masking them, so every
-  returned row is a source that was actually fit.  `n_failed`/`failure_msgs` report what was dropped and why.
+- `phot::MultiPassPhotResult`: the fit for the final catalog.  Its `residual` is
+  `image - background - model`.  Every row is a source that was actually fit:
+  this function owns its catalog and drops unfittable sources rather than
+  masking them, so there is no per-source validity flag;
+  `n_failed`/`failure_msgs` report what was dropped and why.  For the fitting
+  effort the run spent, sum `n_lin` over `pass_history` below --
+  linearizations for the simultaneous fitter, sweeps through the source list for
+  the sequential one -- which is not the same as `n_detection_passes`.
 
   !!! note
       The terminal pass does not prune, so the returned catalog can contain
@@ -1838,7 +1827,6 @@ function _fit_all_stars_multipass(
     converged = false
     criterion = "max_iter"
     n_detection_passes = 0
-    n_lin_total = 0
     pass_run = 0
 
     # Main loop over detection and fitting passes
@@ -1911,7 +1899,6 @@ function _fit_all_stars_multipass(
                     freeze_positions = last_pass && freeze_positions_final, show_trace)
                 state = fit.state
                 stats = fit.stats
-                n_lin_total += stats.n_lin
                 catalog = fit.catalog
                 t_fit = time() - t0
 
@@ -2013,7 +2000,7 @@ function _fit_all_stars_multipass(
         isempty(catalog) && fill!(model, zero(FT))
         residual = @. FT(image) - bkg.background - model
         phot = MultiPassPhotResult(FT[], FT[], FT[], FT[], FT[], FT[], FT[], FT[],
-            falses(0), falses(0), FT[], FT[], FT[], FT[], FT[], FT[], FT[], Int[], 0,
+            FT[], FT[], FT[], FT[], FT[], FT[], FT[],
             n_failed, failure_msgs, residual, NamedTuple[])
         return (; phot, background = bkg.result, detection = mfr,
                   pass_number = Int[], n_detection_passes, converged,
@@ -2022,7 +2009,7 @@ function _fit_all_stars_multipass(
     end
 
     phot = finalize_multipass(fitter, image, psf, fit, bkg, plan, o, model, cov_est,
-        spread_model_fwhm, n_lin_total, n_failed, failure_msgs)
+        spread_model_fwhm, n_failed, failure_msgs)
 
     t_finalize = time() - t_finalize_start
     if show_trace
@@ -2139,7 +2126,7 @@ end
 
 """
     finalize_multipass(fitter, image, psf, fit, bkg, plan, o, model, cov_est,
-                       spread_model_fwhm, n_lin_total, n_failed, failure_msgs) -> MultiPassPhotResult
+                       spread_model_fwhm, n_failed, failure_msgs) -> MultiPassPhotResult
 
 Turn the converged fit into the returned photometry: per-source errors from the
 fitter's [`source_errors`](@ref), then one pass over `fit.catalog` computing both
@@ -2151,7 +2138,7 @@ the only part of the run that scales with the catalog rather than with the
 image; keeping it here leaves the pass loop readable in one screen.
 """
 function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bkg, plan::FitPlan, o,
-                            model, cov_est, spread_model_fwhm, n_lin_total, n_failed, failure_msgs)
+                            model, cov_est, spread_model_fwhm, n_failed, failure_msgs)
     catalog = fit.catalog
     FT = eltype(catalog.y)
     ny, nx = size(image)
@@ -2234,8 +2221,7 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
 
     return MultiPassPhotResult(
         copy(catalog.y), copy(catalog.x), errs.y_err, errs.x_err, copy(catalog.flux), errs.flux_err,
-        copy(catalog.bkg), errs.bkg_err, trues(n_src), trues(n_src), diag.chisq, diag.qfit,
+        copy(catalog.bkg), errs.bkg_err, diag.chisq, diag.qfit,
         diag.qfit_expected, diag.qfit_z, diag.crowding, diag.spread_model,
-        diag.spread_model_err, fill(n_lin_total, n_src),
-        n_lin_total, n_failed, failure_msgs, residual, morphology)
+        diag.spread_model_err, n_failed, failure_msgs, residual, morphology)
 end

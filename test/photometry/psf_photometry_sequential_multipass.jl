@@ -242,7 +242,6 @@ end
     @test length(p.morphology) == 1
     # The terminal pass either refits the source or finds it already converged.
     @test r.pass_history[end].n_lin == 1 && r.pass_history[end].n_star_fits + r.pass_history[end].n_skipped == 1
-    @test p.n_passes == sum(h.n_lin for h in r.pass_history)
 
     # A free local pedestal: estimated, with an error, and still zero here.
     rb = fit_all_stars_multipass(img, TEST_PSF, catalog, 8; kws..., fixed = (; fwhm = PSF_FWHM))
@@ -285,7 +284,7 @@ end
     @test median(rel) < 0.01
     @test median(d[good]) < 0.02
     # Every returned source was fit and passes the final gate.
-    @test all(rq.phot.valid) && all(>(0), rq.phot.flux) && all(isfinite, rq.phot.flux_err)
+    @test all(>(0), rq.phot.flux) && all(isfinite, rq.phot.flux_err)
     @test length(rq.phot.morphology) == length(rq.phot.flux)
     # Each pass leaves the model better than it found it.
     for h in rq.pass_history
