@@ -300,8 +300,8 @@ end
 colgap!(fig.layout, 1)
 rowgap!(fig.layout, 1)
 fig</code></pre><img src="4b0bfcbd.png" alt="Example block output"/><h2 id="Empirical-PSF-Construction"><a class="docs-heading-anchor" href="#Empirical-PSF-Construction">Empirical PSF Construction</a><a id="Empirical-PSF-Construction-1"></a><a class="docs-heading-anchor-permalink" href="#Empirical-PSF-Construction" title="Permalink"></a></h2><p>We now build an empirical PSF from the selected stars using <a href="../../psf/empirical/image_psf/#CrowdPhot.PSF.fit_psf-Tuple{Type{ImagePSF}, AbstractMatrix, Any, Any}"><code>fit_psf</code></a> with the Anderson &amp; King (2000) iterative residual-stacking method (<a href="../../refs/#Anderson2000" id="Anderson2000-cite-1">Anderson and King [1]</a>). Stars outside the cutout boundary are dropped (<code>drop_edge=true</code>), and the ePSF is supersampled at 4× the detector pixel scale.</p><pre><code class="language-julia hljs"># Select bright, morphologically-clean stars
-n_psf = 400
-psf_idx = CrowdPhot.PSF.pick_psf_stars(results, n_psf; mag_quantiles=(0.05, 0.95))
+n_psf = 2000
+psf_idx = CrowdPhot.PSF.pick_psf_stars(results, n_psf; mag_quantiles=(0.00, 0.95))
 
 # Use sub-pixel centroids from the morphology measurements
 psf_y = [results[i].centroid.y for i in psf_idx]
@@ -319,7 +319,7 @@ psf, fit_result = CrowdPhot.PSF.fit_psf(
 )
 
 n_used = sum(fit_result.used)
-println(&quot;$(n_used) / $(n_psf) stars used in $(fit_result.iterations) iterations&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">387 / 400 stars used in 6 iterations</code></pre><p>The returned <code>ImagePSF</code> stores the PSF on an oversampled grid.  We convert the grid axes to detector-pixel offsets from the PSF center for display. Note that we use a non-linear colorscale to accentuate the PSF features outside the core. Thick contours show ePSF levels of 0.001, 0.01, and 0.1.</p><pre><code class="language-julia hljs">os_y, os_x = psf.oversampling
+println(&quot;$(n_used) / $(n_psf) stars used in $(fit_result.iterations) iterations&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">1966 / 2000 stars used in 6 iterations</code></pre><p>The returned <code>ImagePSF</code> stores the PSF on an oversampled grid.  We convert the grid axes to detector-pixel offsets from the PSF center for display. Note that we use a non-linear colorscale to accentuate the PSF features outside the core. Thick contours show ePSF levels of 0.001, 0.01, and 0.1.</p><pre><code class="language-julia hljs">os_y, os_x = psf.oversampling
 ny_os, nx_os = size(psf.data)
 
 # Oversampled grid indices relative to the PSF origin, scaled to detector pixels
@@ -344,7 +344,7 @@ contour!(ax, x_pix, y_pix, psf.data&#39;;
     levels = logrange(1e-3,1e-1;length=9), color=:red, linewidth = 1)
 Colorbar(fig[1, 2], psf_hm; label = &quot;relative flux&quot;, height = Relative(0.8), valign = :center)
 
-fig</code></pre><img src="8494fb54.png" alt="Example block output"/><h2 id="Curve-of-Growth-and-Aperture-Correction"><a class="docs-heading-anchor" href="#Curve-of-Growth-and-Aperture-Correction">Curve of Growth and Aperture Correction</a><a id="Curve-of-Growth-and-Aperture-Correction-1"></a><a class="docs-heading-anchor-permalink" href="#Curve-of-Growth-and-Aperture-Correction" title="Permalink"></a></h2><p>We compute the encircled-energy curve from the empirical PSF using <a href="../../photometry/curve_of_growth/#CrowdPhot.curve_of_growth-Union{Tuple{T}, Tuple{AbstractMatrix{T}, Real, Real, AbstractVector{&lt;:Real}}} where T"><code>curve_of_growth</code></a>.  The radii are chosen to stay within the PSF support (<span>$\pm 6$</span> detector pixels from center).  We also load the <a href="../../photometry/curve_of_growth/#CrowdPhot.reference_cog"><code>reference_cog</code></a> for ACS/WFC F814W from <a href="../../refs/#Bohlin2016" id="Bohlin2016-cite-1">Bohlin [2]</a> to compare our measured PSF against the standard reference.</p><pre><code class="language-julia hljs"># Radii in detector pixels, staying within the PSF cutout extent (psf_rad = 6).
+fig</code></pre><img src="1076afa0.png" alt="Example block output"/><h2 id="Curve-of-Growth-and-Aperture-Correction"><a class="docs-heading-anchor" href="#Curve-of-Growth-and-Aperture-Correction">Curve of Growth and Aperture Correction</a><a id="Curve-of-Growth-and-Aperture-Correction-1"></a><a class="docs-heading-anchor-permalink" href="#Curve-of-Growth-and-Aperture-Correction" title="Permalink"></a></h2><p>We compute the encircled-energy curve from the empirical PSF using <a href="../../photometry/curve_of_growth/#CrowdPhot.curve_of_growth-Union{Tuple{T}, Tuple{AbstractMatrix{T}, Real, Real, AbstractVector{&lt;:Real}}} where T"><code>curve_of_growth</code></a>.  The radii are chosen to stay within the PSF support (<span>$\pm 6$</span> detector pixels from center).  We also load the <a href="../../photometry/curve_of_growth/#CrowdPhot.reference_cog"><code>reference_cog</code></a> for ACS/WFC F814W from <a href="../../refs/#Bohlin2016" id="Bohlin2016-cite-1">Bohlin [2]</a> to compare our measured PSF against the standard reference.</p><pre><code class="language-julia hljs"># Radii in detector pixels, staying within the PSF cutout extent (psf_rad = 6).
 radii = 0.5:0.25:5.5
 
 # Compute and normalize the curve of growth from our empirical PSF.
@@ -377,7 +377,7 @@ lines!(ax, ref.radii, ref.flux;
 
 axislegend(ax; position = :rb)
 
-fig</code></pre><img src="696af0ad.png" alt="Example block output"/><p>After renormalizing to match the reference EE curve in the last radial bin, our EE curve for our ePSF fit matches the reference well. We can now calculate the aperture correction to put our measured PSF magnitudes onto the correct infinite-aperture convention for which the HST zeropoints are defined. We evaluate the reference EE curve at <code>psf_rad</code> here because this is radius to which the flux of our ePSF model has been normalized.</p><pre><code class="language-julia hljs">aper_corr = 2.5 * log10(encircled_energy(reference_cog(:WFC, :F814W), psf_rad))</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">-0.149954612480842</code></pre><h2 id="PSF-Fitting-Photometry"><a class="docs-heading-anchor" href="#PSF-Fitting-Photometry">PSF Fitting Photometry</a><a id="PSF-Fitting-Photometry-1"></a><a class="docs-heading-anchor-permalink" href="#PSF-Fitting-Photometry" title="Permalink"></a></h2><p>We prepare to fit our detected sources by preparing the total error map using <a href="../../utilities/#CrowdPhot.calc_total_error"><code>calc_total_error</code></a> to add the source Poisson term to the background RMS. The data are in <span>$\mathrm{e}^- / \mathrm{s}$</span> (<span>$\mathtt{BUNIT} = \mathrm{ELECTRONS}/\mathrm{S}$</span>), so the effective gain is the exposure time, <span>$g_{\mathrm{eff}} = \mathtt{EXPTIME}$</span>, which converts to countable units (electrons).</p><pre><code class="language-julia hljs"># Extract exposure time from the primary header for the effective gain.
+fig</code></pre><img src="eaaa2f79.png" alt="Example block output"/><p>After renormalizing to match the reference EE curve in the last radial bin, our EE curve for our ePSF fit matches the reference well. We can now calculate the aperture correction to put our measured PSF magnitudes onto the correct infinite-aperture convention for which the HST zeropoints are defined. We evaluate the reference EE curve at <code>psf_rad</code> here because this is radius to which the flux of our ePSF model has been normalized.</p><pre><code class="language-julia hljs">aper_corr = 2.5 * log10(encircled_energy(reference_cog(:WFC, :F814W), psf_rad))</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">-0.149954612480842</code></pre><h2 id="PSF-Fitting-Photometry"><a class="docs-heading-anchor" href="#PSF-Fitting-Photometry">PSF Fitting Photometry</a><a id="PSF-Fitting-Photometry-1"></a><a class="docs-heading-anchor-permalink" href="#PSF-Fitting-Photometry" title="Permalink"></a></h2><p>We prepare to fit our detected sources by preparing the total error map using <a href="../../utilities/#CrowdPhot.calc_total_error"><code>calc_total_error</code></a> to add the source Poisson term to the background RMS. The data are in <span>$\mathrm{e}^- / \mathrm{s}$</span> (<span>$\mathtt{BUNIT} = \mathrm{ELECTRONS}/\mathrm{S}$</span>), so the effective gain is the exposure time, <span>$g_{\mathrm{eff}} = \mathtt{EXPTIME}$</span>, which converts to countable units (electrons).</p><pre><code class="language-julia hljs"># Extract exposure time from the primary header for the effective gain.
 exptime = hdr[&quot;EXPTIME&quot;]
 
 # Total 1-sigma error including source Poisson noise, for the PSF fit below.
@@ -406,7 +406,7 @@ valid_total = @. isfinite(total_err) &amp; (total_err &gt; 0)
  65321.764568831786
  69309.921875
  69308.3515625
- 69306.78125</code></pre><p>We now run <a href="../../photometry/psf_fitting/#CrowdPhot.fit_all_stars"><code>fit_all_stars</code></a> on every source in a 250×250 region, using the empirical PSF we just constructed.  After measuring all sources in this region and subtracting their models, the residual image should be nearly empty – only noise should remain where the sources used to be. We will fix the background to 0 since we have already subtracted a background model. We will only do one pass of photometry, since this field is not very crowded (<span>$\sim2$</span> stars per square arcsecond).</p><pre><code class="language-julia hljs"># Select a 250×250 sub-region (lower-right corner of the earlier 500×500 region)
+ 69306.78125</code></pre><p>We now run <a href="../../photometry/psf_fitting/#CrowdPhot.fit_all_stars_multipass"><code>fit_all_stars_multipass</code></a> on a 250×250 region, using the empirical PSF we just constructed.  It owns the background and detection as well as the fit: each pass re-estimates the background from the current residual, detects anything the model is still missing, and re-fits every source one at a time against the residual of all the others.  We pass it the <em>raw</em> cutout and the sources we already detected in this region as a warm start. After the final pass the residual image should be nearly empty – only noise should remain where the sources used to be.  We fix each source&#39;s local background pedestal to 0, since the pipeline&#39;s own background model already handles this uncrowded field (<span>$\sim2$</span> stars per square arcsecond).</p><pre><code class="language-julia hljs"># Select a 250×250 sub-region (lower-right corner of the earlier 500×500 region)
 y1, y2 = 1750, min(ny, 1999)
 x1, x2 = 1750, min(nx, 1999)
 phot_y_range = y1:y2
@@ -420,23 +420,30 @@ end
 region_sources = results[region_idx]
 println(&quot;$(length(region_sources)) sources in the display region&quot;)
 
-# Run single-pass PSF-fitting photometry
-phot_result = fit_all_stars(img_sub_f64, psf, region_sources, 3;
-    n_passes = 1, inv_var, fixed = (; bkg = 0.0))
+# Cutout coordinates start at 1, so shift the warm-start catalog to match.
+img_cut = Float64.(img[phot_y_range, phot_x_range])
+warm = (; y = [s.centroid.y - (y1 - 1) for s in region_sources],
+          x = [s.centroid.x - (x1 - 1) for s in region_sources],
+          flux = [s.flux for s in region_sources])
 
-n_good = sum(phot_result.valid)
-println(&quot;$n_good / $(length(region_sources)) stars fitted successfully&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">340 sources in the display region
-340 / 340 stars fitted successfully</code></pre><p>The <a href="../../photometry/psf_fitting/#CrowdPhot.MultiPassPhotResult"><code>MultiPassPhotResult</code></a> stores the final residual image after all source models have been subtracted.  Below we compare the original image to the residual for this 250×250 region.  Where sources have been successfully subtracted, the residual shows only noise.</p><pre><code class="language-julia hljs">orig_region = img_sub[phot_y_range, phot_x_range]
-resid_region = phot_result.residual[phot_y_range, phot_x_range]
+# Multi-pass background -&gt; detect -&gt; fit
+mp = fit_all_stars_multipass(img_cut, psf, warm, 3;
+    inv_var = inv_var[phot_y_range, phot_x_range], fixed = (; bkg = 0.0),
+    max_iter = 3, min_iter = 3,
+    # blend gating, to prevent bright-star fragmentation
+    blend_threshold_initial = 10.0, blend_threshold = 5.0, blend_passes = 1)
+phot_result = mp.phot
+
+n_good = length(phot_result.flux)
+println(&quot;$n_good sources in the final catalog after $(mp.n_detection_passes) detection passes&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">340 sources in the display region
+557 sources in the final catalog after 3 detection passes</code></pre><p>The <a href="../../photometry/psf_fitting/#CrowdPhot.MultiPassPhotResult"><code>MultiPassPhotResult</code></a> stores the final residual image, <code>image - background - model</code>, after all source models have been subtracted.  Below we compare the original image to the residual for this 250×250 region.  Where sources have been successfully subtracted, the residual shows only noise.</p><pre><code class="language-julia hljs">orig_region = img_sub[phot_y_range, phot_x_range]
+resid_region = phot_result.residual
 region_colorrange = zscale(orig_region[isfinite.(orig_region)])
 
-# Recompute detection circles for this sub-region
-phot_circles = map(filter(mf.peaks) do peak
-    y, x = Tuple(peak)
-    y in phot_y_range &amp;&amp; x in phot_x_range
-end) do peak
-    y, x = Tuple(peak)
-    Circle(Point2f(x, y), 2)
+# Circle every source in the final catalog, including those found by the
+# detection passes.  Catalog positions are cutout-local, so shift them back.
+phot_circles = map(zip(phot_result.y, phot_result.x)) do (y, x)
+    Circle(Point2f(x + (x1 - 1), y + (y1 - 1)), 2)
 end
 
 fig = Figure(size = (500, 900))
@@ -455,23 +462,31 @@ hm2 = heatmap!(ax2, phot_x_range, phot_y_range, resid_region&#39;;
     colormap = :grays, interpolate = false)
 
 # Overlay detection circles on both panels
-# poly!(ax1, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
-#     strokewidth = 1.2)
-# poly!(ax2, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
-#     strokewidth = 1.2)
+poly!(ax1, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
+    strokewidth = 1.2)
+poly!(ax2, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
+    strokewidth = 1.2)
 
 Colorbar(fig[1, 2], hm1; height = Relative(0.8), valign = :center)
 Colorbar(fig[2, 2], hm2; height = Relative(0.8), valign = :center)
 rowgap!(fig.layout, 0)
 
-fig</code></pre><img src="0202e9dc.png" alt="Example block output"/><p>We now examine the photometric quality of the PSF-fit results.  Instrumental magnitudes are computed from the fitted fluxes and placed on the STMAG system using the PHOTFLAM and PHOTZPT header keywords and the aperture correction derived above is applied. For descriptions of the goodness-of-fit statistics, see <a href="../../photometry/psf_fitting/#CrowdPhot.MultiPassPhotResult"><code>CrowdPhot.MultiPassPhotResult</code></a>.</p><pre><code class="language-julia hljs"># Compute ST magnitudes from PSF-fit fluxes
-good = phot_result.valid
+fig</code></pre><img src="c71387ff.png" alt="Example block output"/><p>We now examine the photometric quality of the PSF-fit results.  Instrumental magnitudes are computed from the fitted fluxes and placed on the STMAG system using the PHOTFLAM and PHOTZPT header keywords and the aperture correction derived above is applied. For descriptions of the goodness-of-fit statistics, see <a href="../../photometry/psf_fitting/#CrowdPhot.MultiPassPhotResult"><code>CrowdPhot.MultiPassPhotResult</code></a>.</p><pre><code class="language-julia hljs"># Every returned source was fit; pair each with the nearest morphology
+# measurement from the region, when there is one within a pixel.
+nearest = map(eachindex(phot_result.y)) do j
+    d = [hypot(warm.y[i] - phot_result.y[j], warm.x[i] - phot_result.x[j]) for i in eachindex(warm.y)]
+    i = argmin(d)
+    d[i] &lt; 1 ? i : 0
+end
+good = nearest .&gt; 0
+
+# Compute ST magnitudes from PSF-fit fluxes
 psf_mags = -2.5 .* log10.(phot_result.flux[good]) .+ stmag_zeropoint .+ aper_corr
 psf_mag_errs = (2.5 / log(10)) .* phot_result.flux_err[good] ./ phot_result.flux[good]
 
 # Centroids from measure_star_shapes for the same sources
-morph_y = [results[region_idx[i]].centroid.y for i in findall(good)]
-morph_x = [results[region_idx[i]].centroid.x for i in findall(good)]
+morph_y = warm.y[nearest[good]]
+morph_x = warm.x[nearest[good]]
 fit_y = phot_result.y[good]
 fit_x = phot_result.x[good]
 fit_y_err = phot_result.y_err[good]
@@ -480,7 +495,7 @@ fit_x_err = phot_result.x_err[good]
 # Centroid offset between the two measurement techniques
 centroid_offset = @. hypot(morph_y - fit_y, morph_x - fit_x)
 
-# Fitting statistics returned from `fit_all_stars`
+# Fitting statistics returned from `fit_all_stars_multipass`
 chisq = phot_result.chisq[good]
 qfit = phot_result.qfit[good]
 qfit_z = phot_result.qfit_z[good]
@@ -506,7 +521,7 @@ axislegend(ax2; position = :lt)
 ax3 = Axis(fig[2, 1];
     xlabel = &quot;PSF-fit ST magnitude&quot;,
     ylabel = &quot;Centroid offset (pix)&quot;,
-    title = &quot;Centroid offset: quadratic (`measure_star_shapes`) vs PSF (`fit_all_stars`)&quot;)
+    title = &quot;Centroid offset: quadratic (`measure_star_shapes`) vs PSF fit&quot;)
 scatter!(ax3, psf_mags, centroid_offset; markersize = 4, color = :black)
 ylims!(ax3, 0.0, 0.5)
 
@@ -540,4 +555,4 @@ ax7 = Axis(fig[4,1];
     title = &quot;DOLPHOT crowding&quot;)
 scatter!(ax7, psf_mags, crowding; markersize=4, color = :black)
 
-fig</code></pre><img src="5d7017ab.png" alt="Example block output"/></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../../pixel_conventions/">« Pixel Coordinate Conventions</a><a class="docs-footer-nextpage" href="../../background/">Background Estimation »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.19.0 on <span class="colophon-date" title="Monday 14 September 2026 22:30">Monday 14 September 2026</span>. Using Julia version 1.13.0.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
+fig</code></pre><img src="eb0e1d21.png" alt="Example block output"/></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../../pixel_conventions/">« Pixel Coordinate Conventions</a><a class="docs-footer-nextpage" href="../../background/">Background Estimation »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.19.0 on <span class="colophon-date" title="Saturday 19 September 2026 11:24">Saturday 19 September 2026</span>. Using Julia version 1.13.0.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
