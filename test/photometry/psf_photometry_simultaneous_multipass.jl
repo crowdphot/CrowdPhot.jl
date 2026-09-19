@@ -839,6 +839,34 @@ end
     @test r0.phot.residual ≈ img .- r0.background.background
 end
 
+@testset "residual reports no datum where there was none" begin
+    # `pass_weights` zeroes the data at a non-finite pixel, so the residual the
+    # per-source loop works on is finite there.  The *returned* residual must not
+    # inherit that: a fabricated value is indistinguishable from a pixel whose
+    # model fit perfectly, and `0` is exactly what a clean empty pixel reads.
+    img, src, _ = test_field(; ny = 80, nx = 80, n = 12)
+    img = Float64.(img)
+    img[40, 40] = NaN
+    kws = (; fixed = TEST_FIXED, max_iter = 1, min_iter = 1, bkg_box_size = 20,
+             bkg_coarse_passes = 0)
+
+    # No `inv_var`: the morphology weights (`detect_inv_var`) are positive at the
+    # bad pixel, so a `NaN` reaching `_moments2` -- which gates on the weight and
+    # not on the value -- would poison every cutout covering it.
+    r = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 3.0; kws...)
+    @test findall(!isfinite, r.phot.residual) == [CartesianIndex(40, 40)]
+    @test all(isfinite, r.phot.chisq) && all(isfinite, r.phot.qfit)
+    @test all(m -> isfinite(m.aperture.aperture_sum) && isfinite(m.centroid.y), r.phot.morphology)
+
+    # With `inv_var` zeroed at the bad pixel the diagnostics drop it either way,
+    # and the residual still marks it.
+    iv = fill(1.0, size(img))
+    iv[40, 40] = 0.0
+    r2 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 3.0; kws..., inv_var = iv)
+    @test findall(!isfinite, r2.phot.residual) == [CartesianIndex(40, 40)]
+    @test all(isfinite, r2.phot.chisq)
+end
+
 @testset "pass loop scheduling" begin
     img, src, _ = test_field(; n = 60, seed = 77)
 
