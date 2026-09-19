@@ -456,5 +456,3 @@ end
         @test best.flux ≈ truth.flux rtol = 1.0e-4
     end
 end
-
-println("All GriddedPSFModel construction/validation tests passed.")
