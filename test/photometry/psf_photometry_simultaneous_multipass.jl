@@ -10,6 +10,7 @@ using CrowdPhot.Background: SExtractorBackground, MADStdRMS
 using ConstructionBase
 using Krylov: lsqr!, lsmr!, LsqrWorkspace, LsmrWorkspace, solution
 using LinearAlgebra: dot, I
+using StaticArrays: SMatrix
 using StableRNGs
 using Statistics: median, mean
 using Test
@@ -916,6 +917,40 @@ end
         max_iter = 10, min_iter = 1, few_sources = 1000)
     @test r3.converged
     @test r3.n_detection_passes == 1
+end
+
+@testset "morphology is a column store" begin
+    # `morphology` is a `StructArray` unwrapped all the way down, so a table build
+    # reads whole columns instead of materializing one intermediate array per
+    # nested block.  Rows still read as the `NamedTuple`s they always were.
+    img, _, _ = test_field(; ny = 120, nx = 120, n = 25, seed = 4242)
+    m = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
+        max_iter = 1, min_iter = 1).phot.morphology
+    @test m isa CrowdPhot.StructArray
+    @test !isempty(m)
+
+    # Nested blocks are columns, not vectors of NamedTuple: this is what `unwrap`
+    # buys and what silently regresses without it.
+    @test m.sharpness isa Vector{Float64}                             # top level
+    @test m.core.compactness_core isa Vector{Float64}                 # 2 deep
+    @test m.psf_ref.core.ellipticity1_core isa Vector{Float64}        # 3 deep
+    @test m.psf_ref.aperture.fwhm.y isa Vector{Float64}               # 4 deep
+    # Leaves that are not NamedTuples stay whole.
+    @test eltype(m.core.poly.cov) <: SMatrix{3, 3, Float64}
+    @test m.centroid.source isa Vector{Symbol}
+
+    # Row access is unchanged, and agrees with the columns.
+    @test m[3] isa NamedTuple
+    @test m[3].core.compactness_core == m.core.compactness_core[3]
+    @test getindex.(m, :sharpness) == m.sharpness                     # pre-StructArray idiom
+    @test [e.psf_ref.sharpness for e in m] == m.psf_ref.sharpness
+
+    # A run that finds nothing has no measurement to infer column types from, so
+    # it falls back to an empty vector; `MultiPassPhotResult` must still hold it.
+    blank = fill(100.0, 60, 60)
+    mb = fit_all_stars_simultaneous_multipass(blank, TEST_PSF, 4.0; fixed = TEST_FIXED,
+        max_iter = 1, min_iter = 1, detect_sigma = 1.0e6).phot.morphology
+    @test isempty(mb)
 end
 
 @testset "end-to-end recovery" begin
