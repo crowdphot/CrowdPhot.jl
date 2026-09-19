@@ -41,13 +41,13 @@
 # ==============================================================================
 
 """
-    MultiPassPhotResult{T, M}
+    MultiPassPhotResult{T, M, V}
 
 Photometry returned by [`fit_all_stars_multipass`](@ref) and
 [`fit_all_stars_simultaneous_multipass`](@ref), as their `phot` field.  All
 per-source vectors have the same length, the size of the final catalog, and are
-index aligned.  `M` is the element type of `morphology`, inferred from
-the vector passed in.
+index aligned.  `M` is the element type of `morphology` and `V` its container,
+both inferred from the vector passed in.
 
 # Fields
 
@@ -63,11 +63,22 @@ the vector passed in.
 - `failure_msgs::Vector{String}`: descriptions of the first few such drops.
 - `residual::Matrix{T}`: `image - background - model`, with every source's
   pedestal-free model subtracted over its `model_rad` box.
-- `morphology::Vector{M}`: per-source shape measurements, one entry
+- `morphology::V`: per-source shape measurements, one entry
   per source in catalog order, measured on each source's neighbor-subtracted
   cutout so the moments are not contaminated by its neighbors' light.  Each
   entry is a [`measure_star_shape_ref`](@ref) result with `pixel`,
   `significance` and `flux` merged in; see that function for the fields.
+
+  A `StructArray`, so it indexes as the vector of `NamedTuple`s it reads as
+  (`morphology[j].core.compactness_core`) *and* exposes each field as a column
+  with no copy (`morphology.core.compactness_core` is a `Vector`).  The nesting
+  is unwrapped all the way down, so `morphology.psf_ref.aperture.fwhm.y` is a
+  column too.  Use the column form when building tables.
+
+  !!! note
+      A run that ends with no sources returns an empty `Vector{NamedTuple}`
+      here instead, since there is no measurement from which to infer the
+      column types.  Guard with `isempty` before taking columns.
 
 # Goodness-of-fit diagnostics
 
@@ -130,7 +141,7 @@ weights from the RMS map otherwise.  A source with non-positive flux gets `NaN`.
 - `spread_model_err::Vector{T}`: 1-sigma uncertainty on `spread_model` from
   pixel-noise propagation of the weighted estimator.
 """
-struct MultiPassPhotResult{T, M <: NamedTuple}
+struct MultiPassPhotResult{T, M <: NamedTuple, V <: AbstractVector{M}}
     y::Vector{T}
     x::Vector{T}
     y_err::Vector{T}
@@ -149,7 +160,7 @@ struct MultiPassPhotResult{T, M <: NamedTuple}
     n_failed::Int
     failure_msgs::Vector{String}
     residual::Matrix{T}
-    morphology::Vector{M}
+    morphology::V
 end
 
 # ==============================================================================
@@ -2285,7 +2296,7 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
     ctx = (; image_bs, residual, fit_iv, morph_w = morph_iv, render_buf, render_scratch,
              g_stamp, resid_buf, clean_buf, spread_kernel, R_fit = o.R_fit, R_u, morph_hw,
              sharp_hw, morph_window, p = n_free_per_source(fitter, plan), diag)
-    morphology = map(1:n_src) do j
+    rows = map(1:n_src) do j
         m = PSF.model_from_vector(psf, plan.free_names_val,
                                   view(fit.theta, (j - 1) * p + 1:j * p), plan.fixed)
         # A per-source pedestal is zero unless the fitter fits one locally.
@@ -2293,6 +2304,13 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
         _finalize_source(ctx, m, j, fit.geom.anchor_y[j], fit.geom.anchor_x[j],
                          fit.model_R[j], FT(catalog.flux_snr[j]))
     end
+    # Converting `rows` to a StructArray makes the memory backing struct-of-arrays, so
+    # entries like `morphology.sharpness` are plain Vectors in memory, which makes
+    # building tables simpler and more efficient.  `unwrap` recurses into the nested blocks
+    # (`core`, `aperture`, `psf_ref`) so those become Vectors too; without it only the top
+    # level is split and `morphology.core.compactness_core` fails.  Indexing still
+    # returns the original row, so `morphology[j]` is unchanged.
+    morphology = StructArray(rows; unwrap = t -> t <: NamedTuple)
 
     # `pass_weights` zeroes `data` wherever `image - background` is not finite, so
     # `residual` is finite at those pixels rather than absent. This is required by the
