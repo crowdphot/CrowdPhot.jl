@@ -22,7 +22,7 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 CrowdPhot = {path = ".."}
 
 [compat]
-ASDF = "2"
+ASDF = "2.0.2"
 Bessels = "0.2"
 ConstructionBase = "1"
 Distributions = "0.25"
