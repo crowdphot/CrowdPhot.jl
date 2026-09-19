@@ -1546,9 +1546,13 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   source's wing surface brightness (from the PSF curve of growth) drops below
   `model_rad_nsigma` times the background noise (from the fit weights), so faint
   sources cost little and bright ones reach far.  A scalar applies one value to
-  every source.  Both forms are clamped to `[ceil(fit_rad), ceil(model_rad_max)]`.
-- `model_rad_max::Real = 10 * fit_rad`: hard cap on the auto `model_rad` (and
-  the size of the internal render buffers).
+  every source, used as given.  Both forms are floored at `ceil(fit_rad)`, since
+  the fitting box has to sit inside the model box; only `:auto` is capped, at
+  `ceil(model_rad_max)`.
+- `model_rad_max::Real = 10 * fit_rad`: hard cap on the **auto** `model_rad` (and
+  hence on the size of the internal render buffers).  It bounds the `:auto`
+  search only and is ignored for a scalar `model_rad`, which sizes the buffers
+  itself.
 - `model_rad_nsigma::Real = 1.0`: the auto threshold, in units of the
   background per-pixel noise.  Larger values give smaller `model_rad`.
 - `covariance_estimator = nothing`: an [`AbstractCovarianceEstimator`](@ref)
@@ -2288,6 +2292,17 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
         iszero(catalog.bkg[j]) || (m = ConstructionBase.setproperties(m, (; bkg = catalog.bkg[j])))
         _finalize_source(ctx, m, j, fit.geom.anchor_y[j], fit.geom.anchor_x[j],
                          fit.model_R[j], FT(catalog.flux_snr[j]))
+    end
+
+    # `pass_weights` zeroes `data` wherever `image - background` is not finite, so
+    # `residual` is finite at those pixels rather than absent. This is required by the
+    # loop above, since `_moments2` guards on the weight and not on the value
+    # and one `NaN` would poison every cutout touching it.  But the returned residual is
+    # must not report a value where there was no datum, so those pixels are restored now
+    # that the loop is done.
+    @inbounds for i in eachindex(residual)
+        d = FT(image[i]) - bkg.background[i]
+        isfinite(d) || (residual[i] = d - model[i])
     end
 
     return MultiPassPhotResult(
