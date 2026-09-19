@@ -953,6 +953,64 @@ end
     @test isempty(mb)
 end
 
+@testset "to_table" begin
+    img, _, _ = test_field(; ny = 120, nx = 120, n = 25, seed = 4242)
+    res = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
+        max_iter = 1, min_iter = 1)
+    t = to_table(res)
+    m = res.phot.morphology
+
+    @test length(t) == length(res.phot.y)
+    @test all(getproperty(t, k) isa Vector for k in propertynames(t))
+    @test t[1] isa NamedTuple                     # flat: no nested blocks survive
+    @test all(v -> v isa Real, values(t[1]))
+
+    # Pass-through columns alias rather than copy.
+    @test t.flux === res.phot.flux
+    @test t.pass_number === res.pass_number
+    @test t.significance === m.significance
+    @test t.ellipticity_sq_resid === m.ellipticity_sq_resid
+
+    # A ratio divides value and error by the *same* reference, so the fractional
+    # error is preserved exactly.  A mismatched pairing breaks this and nothing else.
+    for (val, err, v, e, r) in (
+            (t.sharpness, t.sharpness_err, m.sharpness, m.sharpness_err,
+             m.psf_ref.sharpness),
+            (t.curvature_core, t.curvature_core_err, m.core.normalized_curvature,
+             m.core.normalized_curvature_err, m.psf_ref.core.normalized_curvature),
+            (t.compactness_core, t.compactness_core_err, m.core.compactness_core,
+             m.core.compactness_core_err, m.psf_ref.core.compactness_core),
+            (t.compactness_aperture, t.compactness_aperture_err,
+             m.aperture.compactness_aperture, m.aperture.compactness_aperture_err,
+             m.psf_ref.aperture.compactness_aperture))
+        @test all(isapprox.(val, v ./ r; rtol = 1.0e-12, nans = true))
+        @test all(isapprox.(err ./ val, e ./ v; rtol = 1.0e-12, nans = true))
+    end
+
+    # A difference leaves the error alone: subtracting a noiseless constant does not
+    # change the variance.  The error column is the raw one, not a copy of it.
+    @test t.ellipticity1_aperture ≈ m.aperture.ellipticity1_aperture .-
+        m.psf_ref.aperture.ellipticity1_aperture nans=true
+    @test t.ellipticity2_aperture ≈ m.aperture.ellipticity2_aperture .-
+        m.psf_ref.aperture.ellipticity2_aperture nans=true
+    @test t.ellipticity1_core ≈ m.core.ellipticity1_core .-
+        m.psf_ref.core.ellipticity1_core nans=true
+    @test t.ellipticity2_core ≈ m.core.ellipticity2_core .-
+        m.psf_ref.core.ellipticity2_core nans=true
+    @test t.ellipticity1_aperture_err === m.aperture.ellipticity1_aperture_err
+    @test t.ellipticity2_aperture_err === m.aperture.ellipticity2_aperture_err
+
+    # Both fitters share `finalize_multipass`, so one method covers them.
+    @test to_table(fit_all_stars_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
+        max_iter = 1, min_iter = 1)) isa CrowdPhot.StructArray
+
+    # No sources means no columns to read; that has to be said, not returned empty.
+    blank = fill(100.0, 60, 60)
+    rb = fit_all_stars_simultaneous_multipass(blank, TEST_PSF, 4.0; fixed = TEST_FIXED,
+        max_iter = 1, min_iter = 1, detect_sigma = 1.0e6)
+    @test_throws "no sources" to_table(rb)
+end
+
 @testset "end-to-end recovery" begin
     img, src, _ = test_field(; n = 90, seed = 20240905)
     res = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,

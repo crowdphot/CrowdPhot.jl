@@ -19,7 +19,7 @@ export sigma_clip, sigma_clip!, calc_total_error
 export simulate_sources, simulate_image, make_gaussians_image, centroid_poly, choose_centroid
 export matched_filter, MatchedFilterResult
 export measure_star_shape, measure_star_shape_ref, measure_star_shapes, FlatWindow, GaussianWindow
-export MultiPassPhotResult, fit_all_stars_multipass, fit_all_stars_simultaneous_multipass
+export MultiPassPhotResult, fit_all_stars_multipass, fit_all_stars_simultaneous_multipass, to_table
 export CurveOfGrowth, curve_of_growth, encircled_energy, radius_at_energy, normalize, reference_cog
 
 include("correlation.jl")

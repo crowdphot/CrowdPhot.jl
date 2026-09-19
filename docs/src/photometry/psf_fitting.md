@@ -58,3 +58,17 @@ per-star diagnostics computed on the final pass over exactly the fitting box:
 fit_all_stars_multipass
 fit_all_stars_simultaneous_multipass
 ```
+
+## Flat output table
+
+The full return carries a wealth of information that is useful for development
+and diagnostics but excessive for most end users.
+[`to_table`](@ref) reduces it to one flat, columnar table of the
+quantities most analyses need. PSF referencing is already applied to
+morphological quantities.  The result is a `StructArray`, which implements
+the Tables.jl interface and so can be handed straight to any file writer
+supporting the API (Parquet2.jl, CSV.jl, HDF5.jl, etc.).
+
+```@docs
+to_table
+```

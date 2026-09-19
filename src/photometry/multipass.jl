@@ -2329,3 +2329,135 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
         diag.qfit_expected, diag.qfit_z, diag.crowding, diag.spread_model,
         diag.spread_model_err, n_failed, failure_msgs, residual, morphology)
 end
+
+
+"""
+    to_table(result) → StructArray
+
+Flatten the return of [`fit_all_stars_multipass`](@ref) or
+[`fit_all_stars_simultaneous_multipass`](@ref) into a plain columnar table with one
+row per source in catalog order.  This is intended to be what you write to disk,
+as opposed to `result` itself, which is a deep nested schema containing more detailed
+information useful for diagnosing issues but not typically worth saving.
+
+The returned `StructArray` satisfies the Tables.jl interface, so it can be passed
+directly to any output sink (Parquet2.jl, CSV.jl, HDF5.jl, etc.), and `getcolumn`
+hands back the underlying `Vector` with no copy.
+
+# Arguments
+- `result`: the full `NamedTuple` returned by either multipass fitter.
+
+# Returns
+
+A `StructArray` of 33 columns.  Positions, fluxes and goodness-of-fit statistics
+are copied through unchanged from [`MultiPassPhotResult`](@ref); see that docstring
+for their definitions.
+
+- `y`, `x`, `y_err`, `x_err`: fitted centroid and its 1-sigma errors.  These are
+  the PSF-fit positions; the quadratic-fit and center-of-mass centroids that
+  `morphology` also carries are not included.
+- `flux`, `flux_err`, `bkg`, `bkg_err`: fitted flux and local pedestal, if any.
+- `pass_number::Vector{Int}`: the pass that first detected each source.
+- `significance`: detection signal-to-noise, the statistic pruning acts on.
+- `chisq`, `qfit`, `qfit_expected`, `qfit_z`, `crowding`, `spread_model`,
+  `spread_model_err`: goodness-of-fit and blend diagnostics.
+
+The morphology columns are **PSF-referenced**; each statistic is combined with the
+same measurement made on a noiseless render of that source's own model, canceling
+the phase and PSF-width dependence of the parameters, making a fixed threshold
+portable between images.  The right combination differs by statistic, so it is applied
+here rather than left to the caller.  See "PSF-normalized statistics" in the Centroid
+Refinement and Morphology manual page.
+
+Ratios, `value / reference`, which read 1 for a PSF-like source:
+
+- `sharpness`, `sharpness_err`
+- `curvature_core`, `curvature_core_err`: from `normalized_curvature`.
+- `compactness_core`, `compactness_core_err`
+- `compactness_aperture`, `compactness_aperture_err`
+
+Differences, `value - reference`, which read 0 for a PSF-like source.  The
+ellipticity components are signed and pass through zero, so a ratio would be
+unbounded for a round PSF:
+
+- `ellipticity1_core`, `ellipticity2_core`: no errors, `centroid_poly` does not
+  report them for the core ellipticities.
+- `ellipticity1_aperture`, `ellipticity1_aperture_err`
+- `ellipticity2_aperture`, `ellipticity2_aperture_err`
+
+Already reference-corrected by [`measure_star_shape_ref`](@ref) and copied through as-is:
+
+- `ellipticity_sq_resid`, `ellipticity_sq_resid_err`
+
+Each error follows its own value through that combination: a difference leaves the
+error alone, since the reference is noiseless and adds no variance, while a ratio
+divides it by the same reference.  So every `value ± err` pair here is consistent,
+and the fractional error is preserved exactly.
+
+!!! note "Ratio columns can diverge"
+    The references are measured, not assumed, and `normalized_curvature` in
+    particular is signed and can cross zero.  Where it approaches zero the ratio
+    and its error both blow up.  This is real information about a pathological
+    source rather than a numerical artifact, so it is not clipped; check the tails
+    before cutting on these columns.
+
+The columns copied through unchanged alias `result`'s own vectors rather than
+copying them, so mutating one in place is visible in `result`.  The morphology
+columns are freshly allocated by the combination above.
+
+Throws an `ArgumentError` if the run finished with no sources, since `morphology`
+has no columns to read in that case.
+
+# Examples
+```julia
+res = fit_all_stars_simultaneous_multipass(image, psf, fwhm)
+tbl = to_table(res)
+tbl.sharpness            # a Vector, no copy
+tbl[1]                   # the first source as a flat NamedTuple
+count(<(1.2), tbl.sharpness)
+```
+"""
+function to_table(result)
+    phot = result.phot
+    morph = phot.morphology
+    isempty(morph) &&
+        throw(ArgumentError("`result` has no sources, so `morphology` carries no columns " *
+                            "to build a table from; guard with `isempty(result.phot.y)`"))
+    # Nested blocks are unwrapped in the `StructArray`, so these are Vectors already
+    # and naming them copies nothing.  `psf_ref` mirrors the absolute blocks field for
+    # field, which is what lets each statistic pair with its own reference.
+    core, aper = morph.core, morph.aperture
+    cr, ar = morph.psf_ref.core, morph.psf_ref.aperture
+    return StructArray((;
+        # Position and photometry
+        y = phot.y, x = phot.x, y_err = phot.y_err, x_err = phot.x_err,
+        flux = phot.flux, flux_err = phot.flux_err,
+        bkg = phot.bkg, bkg_err = phot.bkg_err,
+        pass_number = result.pass_number, significance = morph.significance,
+        # Goodness of fit
+        chisq = phot.chisq, qfit = phot.qfit, qfit_expected = phot.qfit_expected,
+        qfit_z = phot.qfit_z, crowding = phot.crowding,
+        spread_model = phot.spread_model, spread_model_err = phot.spread_model_err,
+        # PSF-referenced morphology.  Concentration measures take a ratio, the signed
+        # ellipticity components a difference, and each error follows its own value:
+        # a ratio divides the error by the same reference, a difference leaves it alone.
+        sharpness = morph.sharpness ./ morph.psf_ref.sharpness,
+        sharpness_err = morph.sharpness_err ./ morph.psf_ref.sharpness,
+        curvature_core = core.normalized_curvature ./ cr.normalized_curvature,
+        curvature_core_err = core.normalized_curvature_err ./ cr.normalized_curvature,
+        compactness_core = core.compactness_core ./ cr.compactness_core,
+        compactness_core_err = core.compactness_core_err ./ cr.compactness_core,
+        compactness_aperture = aper.compactness_aperture ./ ar.compactness_aperture,
+        compactness_aperture_err = aper.compactness_aperture_err ./ ar.compactness_aperture,
+        ellipticity1_core = core.ellipticity1_core .- cr.ellipticity1_core,
+        ellipticity2_core = core.ellipticity2_core .- cr.ellipticity2_core,
+        ellipticity1_aperture = aper.ellipticity1_aperture .- ar.ellipticity1_aperture,
+        ellipticity1_aperture_err = aper.ellipticity1_aperture_err,
+        ellipticity2_aperture = aper.ellipticity2_aperture .- ar.ellipticity2_aperture,
+        ellipticity2_aperture_err = aper.ellipticity2_aperture_err,
+        # Already PSF-referenced by `measure_star_shape_ref`, which is why this one is
+        # not rebuilt from its components: the debiasing is not a ratio or a difference.
+        ellipticity_sq_resid = morph.ellipticity_sq_resid,
+        ellipticity_sq_resid_err = morph.ellipticity_sq_resid_err,
+    ))
+end
