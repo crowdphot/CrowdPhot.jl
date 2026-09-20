@@ -1,44 +1,76 @@
 ```@meta
-CurrentModule = CrowdPhot.PSF
+CurrentModule = CrowdPhot.Roman
 ```
 
-# [Reading Roman CRDS ePSF reference files](@id roman_crds_epsf)
+# [Roman](@id roman)
 
-## Overview
+Everything specific to the Nancy Grace Roman Space Telescope lives in the
+`CrowdPhot.Roman` submodule.
 
-[`roman_crds_gridded_epsf`](@ref) reads a Roman Space Telescope CRDS ePSF
-reference file (an `.asdf` file, as delivered by CRDS, e.g.
-`roman_wfi_epsf_*.asdf`) into a [`GriddedPSFModel`](@ref) of [`ImagePSF`](@ref)
-nodes, following the same tabulated-node/bilinear-interpolation design used by
-`romanisim` and `romancal` for the same reference files.
+## Reading Level 2 data
 
-This function requires [`ASDF.jl`](https://github.com/JuliaAstro/ASDF.jl) to
-be loaded:
+[`load_l2`](@ref) reads a WFI Level 2 (calibrated rate) file and returns its
+science array, error array, Poisson variance and a boolean bad-pixel mask
+built from the file's DQ array:
 
 ```julia
-using CrowdPhot.PSF: roman_crds_gridded_epsf
-using ASDF  # required: activates the CrowdPhotASDFExt package extension
+using CrowdPhot.Roman: load_l2
 
-model = roman_crds_gridded_epsf("roman_wfi_epsf_0182.asdf")
+l2 = load_l2("r0000101001001001001_0001_wfi01_cal.asdf")
+l2.data          # Matrix{Float32}, in (y, x) order
+l2.dq            # BitMatrix, `true` where the pixel is unusable
 ```
 
-`ASDF.jl` is a **weak dependency** of `CrowdPhot.jl`: it is not installed or
-loaded unless you explicitly `using ASDF` yourself. This keeps `ASDF.jl` (and
-its own dependency tree) out of the load path for users who never need to
-read Roman CRDS reference files, while still making the reader available
-as soon as both packages are loaded together in the same session, via
-Julia's package extension mechanism.
+Roman files are written in Python/C dimension order, and ASDF.jl reads arrays
+back in reverse, so every array is transposed on the way out into CrowdPhot's
+`(y, x)` convention. You shouldn't have to do any additional transposition
+of the matrices or output pixel positions.
+`dq` is `true` for bad pixels, matching the `bkg_mask`
+convention of [`CrowdPhot.fit_all_stars_multipass`](@ref), so it can be passed
+straight through.
+
+Which flags count as unusable is the `dq_flags` keyword`.
+See [Data quality flags](@ref roman_dq) below.
+
+[`load_area`](@ref) reads a pixel area map (PAM) reference file the same way.
+
+## [Data quality flags](@id roman_dq)
+
+[`DQ_FLAGS`](@ref) mirrors the `pixel` enum owned by
+[`roman_datamodels`](https://github.com/spacetelescope/roman_datamodels).
+[`parse_dq_mask`](@ref) turns a raw `UInt32` DQ array into a boolean mask of
+the pixels carrying any of the named flags:
+
+```julia
+using CrowdPhot.Roman: parse_dq_mask
+
+bad = parse_dq_mask(dq_array; flags = (:DO_NOT_USE, :DEAD, :NON_SCIENCE))
+```
+
+An unrecognized flag name raises an `ArgumentError` and lists the valid names.
+
+## Reading CRDS ePSF reference files
+
+[`crds_gridded_epsf`](@ref) reads a Roman CRDS ePSF reference file (an
+`.asdf` file, as delivered by CRDS, e.g. `roman_wfi_epsf_*.asdf`) into a
+[`GriddedPSFModel`](@ref) of [`ImagePSF`](@ref) nodes.
+
+```julia
+using CrowdPhot.Roman: crds_gridded_epsf
+
+model = crds_gridded_epsf("roman_wfi_epsf_0182.asdf")
+```
 
 ## Selecting a node PSF slice
 
 A CRDS ePSF reference file tabulates PSFs on a grid of detector positions,
 for several **spectral types**, and for several degrees of **defocus** -- a
-5-dimensional array. `roman_crds_gridded_epsf` selects one 2D stamp per grid
+5-dimensional array. `crds_gridded_epsf` selects one 2D stamp per grid
 node (for a chosen `spectral_type` and `defocus`) to build the
 `GriddedPSFModel`:
 
 ```julia
-model = roman_crds_gridded_epsf(path; spectral_type = "G2V", defocus = 0, psf_subtype = "psf")
+model = crds_gridded_epsf(path; spectral_type = "G2V", defocus = 0, psf_subtype = "psf")
 ```
 
 - `spectral_type` (default `"G2V"`) selects the spectral-type slice by name,
@@ -51,9 +83,10 @@ model = roman_crds_gridded_epsf(path; spectral_type = "G2V", defocus = 0, psf_su
 - `psf_subtype` (default `"psf"`) selects between `"psf"` (includes the
   detector's interpixel-capacitance response) and `"psf_noipc"` (without
   it). The single, non-gridded `"extended_psf"`/`"extended_psf_noipc"`
-  stamps are not supported by `GriddedPSFModel` (no grid of positions);
-  build an [`ImagePSF`](@ref) directly from `ASDF.load(path)["roman"]["extended_psf"][]`
-  if you need one of those.
+  stamps are not supported by `GriddedPSFModel` as they are not sampled on
+  a grid of positions; the correct representation is an [`ImagePSF`](@ref)
+  which can be built directly from `ASDF.load(path)["roman"]["extended_psf"][]`
+  if you need it.
 
 An invalid `spectral_type`, `defocus`, or `psf_subtype` raises an
 `ArgumentError` listing the values actually available in the file.
@@ -62,7 +95,7 @@ An invalid `spectral_type`, `defocus`, or `psf_subtype` raises an
 
 Every node `ImagePSF`'s `oversampling` is always read from the file's own
 `meta.oversample` field, and is **not** an overridable keyword on
-`roman_crds_gridded_epsf`. This is a fact about how the file's stamps were
+`crds_gridded_epsf`. This is a fact about how the file's stamps were
 tabulated (how many oversampled subpixels correspond to one native detector
 pixel), not a user preference: passing any other value would silently
 mismap the stamp's coordinate grid, distorting the effective PSF rather than
@@ -82,7 +115,7 @@ CRDS ePSF reference files may store PSF stamps in one of two conventions:
 - **Pixel-integrated** ("new format"): the stamp already has the detector's
   pixel response convolved in, and sums to approximately `oversample^2`.
 
-`roman_crds_gridded_epsf` detects which convention a file uses (following
+`crds_gridded_epsf` detects which convention a file uses (following
 the same heuristic as `romancal`'s `get_gridded_psf_model`: the median
 per-node stamp sum, compared against `oversample^2 / 2`) and, for
 old-format files only, convolves each node with the detector's pixel
@@ -102,7 +135,7 @@ against official Roman documentation, and may be revisited.
 
 ## Escape hatch: building the model by hand
 
-`roman_crds_gridded_epsf` intentionally only covers the common case. For
+`crds_gridded_epsf` intentionally only covers the common case. For
 anything it does not support (a corrected `oversample`, the extended PSF,
 a non-CRDS file layout, etc.), read the file directly and construct the
 `GriddedPSFModel` yourself:
@@ -122,5 +155,10 @@ model = GriddedPSFModel(stamps, afr["meta"]["pixel_y"], afr["meta"]["pixel_x"])
 ## Public API
 
 ```@docs
-roman_crds_gridded_epsf
+load_l2
+load_area
+DQ_FLAGS
+dq_mask_value
+parse_dq_mask
+crds_gridded_epsf
 ```

@@ -46,13 +46,15 @@ makedocs(;
             ],
             "Spatially Varying PSF Models" => [
                 "GriddedPSFModel" => "psf/variable/gridded_psf.md",
-                "Roman CRDS ePSF" => "psf/variable/roman_crds_epsf.md",
             ],
             "Picking PSF Stars" => "psf/picking.md",
         ],
         "Photometry" => [
             "PSF Fitting Photometry" => "photometry/psf_fitting.md",
             "Curves of Growth" => "photometry/curve_of_growth.md",
+        ],
+        "Observatories" => [
+            "Roman" => "observatories/roman.md",
         ],
         "Levenberg-Marquardt Fitter" => "lm_fitter.md",
         "Simulation" => "simulation.md",
