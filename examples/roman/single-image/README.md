@@ -69,6 +69,29 @@ If you edit the `main` function in `photometry.jl` on disk, the change does not
 immediately get picked up from an active REPL session, you need to re-include it
 `include("photometry.jl")` to get the updated `main` definition.
 
+### Choosing a fitter
+
+`fit_type` picks between the two multipass fitters. Both take the same keyword arguments
+from `main` and return the same result, so you can switch freely. Note that each fitter
+*also* has keyword arguments adjusting their behavior that are **unique**; these are not
+parsed or passed through from `main`, so to adjust these you should edit the call sites
+for `fit_all_stars_simultaneous_multipass` and `fit_all_stars_multipass`
+within the `mp = ...` line in `photometry.jl` directly. If in an active REPL session,
+remember to issue `include("photometry.jl")` after changing the file on disk to refresh
+the loaded definition of the `main` function.
+
+| `fit_type` | function | how a pass updates sources |
+|---|---|---|
+| `:simultaneous` (default) | `fit_all_stars_simultaneous_multipass` | one damped step moves every source at once, solving the coupled system |
+| `:sequential` | `fit_all_stars_multipass` | sources are visited one at a time, each fit against the current model of its neighbors |
+
+```julia
+julia> main("/path/to/exposure.asdf"; fit_type = :sequential)
+```
+
+The output filename does not encode the
+choice, so pass a different `outdir` if you want to keep both.
+
 For many exposures, edit `l2dir` at the top of `photometry_distributed.jl` and
 run it. It uses 6 worker processes by default; budget about 6 GB of memory each.
 
@@ -124,9 +147,8 @@ above the `include` of `crds_query_pythoncall.jl`.
 4. Inverse-variance weights are built from the error array, with DQ-flagged and
    non-finite pixels zeroed. Zero weight means "ignore this pixel", which is
    how bad pixels are excluded from both detection and fitting.
-5. `fit_all_stars_simultaneous_multipass` iterates background estimation,
-   detection, deblending, a simultaneous fit of every source at once, and
-   pruning, until it converges.
+5. The multipass fitter selected by `fit_type` iterates background estimation,
+   detection, deblending, fitting and pruning, until it converges.
 6. `to_table` flattens the result to the columns most analyses want, with the
    PSF-referencing already applied to the morphology statistics.
 
