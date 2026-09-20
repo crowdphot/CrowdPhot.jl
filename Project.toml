@@ -4,11 +4,13 @@ version = "0.1.0"
 authors = ["Chris Garling <chris.t.garling@gmail.com> and contributors"]
 
 [deps]
+ASDF = "686f71d1-807d-59a4-a860-28280ea06d7b"
 ConstructionBase = "187b0558-2788-49d3-abe0-74a17ed4e7c9"
 FillArrays = "1a297f60-69ca-5386-bcde-b61e274b549b"
 Krylov = "ba0b0d4f-ebba-5204-a429-3ac8c609bfb7"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LinearOperators = "5c8ed15e-5a4c-59e4-a42b-c7e8811fb125"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 LoopVectorization = "bdcacae8-1622-11e9-2a5c-532679323890"
 LossFunctions = "30fc2ffe-d236-52d8-8643-a9d8f7c094a7"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
@@ -19,12 +21,6 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
 
-[weakdeps]
-ASDF = "686f71d1-807d-59a4-a860-28280ea06d7b"
-
-[extensions]
-CrowdPhotASDFExt = "ASDF"
-
 [compat]
 ASDF = "2.0.2"
 ConstructionBase = "1"
@@ -32,6 +28,7 @@ FillArrays = "1"
 Krylov = "0.10"
 LinearAlgebra = "1"
 LinearOperators = "2"
+Logging = "1"
 LoopVectorization = "0.12"
 LossFunctions = "1.2"
 Printf = "1"

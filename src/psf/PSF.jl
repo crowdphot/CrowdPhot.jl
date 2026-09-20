@@ -9,7 +9,7 @@ using SpecialFunctions: erf, sinint
 using StaticArrays: SA, SVector, MMatrix
 using Statistics: median, mean, quantile, std
 
-export AbstractPSFModel, AiryPSF, CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, GaussianPRF, CircularMoffatPSF, MoffatPSF, ImagePSF, GriddedPSFModel, roman_crds_gridded_epsf
+export AbstractPSFModel, AiryPSF, CircularGaussianPSF, GaussianPSF, CircularGaussianPRF, GaussianPRF, CircularMoffatPSF, MoffatPSF, ImagePSF, GriddedPSFModel
 export evaluate, evaluate_fg, centroid, integral, render, peak, amplitude, effective_area, effective_fwhm, fit_star, fit_psf
 export LMResult, MADScale, FixedScale, MScale, estimate_scale, TukeyLoss, weight, KnownWeightsCovarianceEstimator, ReweightedCovarianceEstimator
 
@@ -634,7 +634,6 @@ include("parametric_models.jl")
 include("empirical_models.jl")
 include("empirical_builder.jl")
 include("gridded_psf.jl")
-include("roman_crds.jl")
 include("psf_fitting.jl")
 include("pick.jl")
 
