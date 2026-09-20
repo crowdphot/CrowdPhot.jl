@@ -1,4 +1,4 @@
-# using PrecompileTools: @setup_workload, @compile_workload
+using PrecompileTools: @setup_workload, @compile_workload
 
 # @compile_workload begin
 #     for T in (Float32, Float64)
@@ -77,4 +77,67 @@ for T in (Float32, Float64)
     precompile(Core.kwcall, (NamedTuple{(:half_width,), Tuple{Int}}, typeof(measure_star_shapes), MatchedFilterResult{T}))
 end
 
-# end
+# ==============================================================================
+# Workload
+# ==============================================================================
+
+# `precompile` directives above only cache method signatures the caller names.
+# A workload additionally caches every specialization the call actually reaches,
+# including ones inside other packages -- which is the point here: more than half
+# of `Roman.load_l2`'s first-call cost is inference and codegen inside ASDF.jl,
+# and no `precompile` directive we could write reaches it.
+#
+# Measured on a 4088x4088 Roman L2: running `load_l2` once on a tiny synthetic
+# file first drops a subsequent real load from 7.9 s of compilation to 0.6 s.
+# This moves that 7.9 s to package build time.
+#
+# Everything runs at Float32, the eltype Roman data actually uses.  Adding
+# Float64 would roughly double both the precompile cost and the cache size for a
+# path no Roman user takes.
+@setup_workload begin
+    # A 4-node grid of 25x25 Gaussian renders.  The node model type is what the
+    # simultaneous fitter specializes its render and stamp-fill paths on, and it
+    # is the same type `crds_gridded_epsf` returns, so the two share this work.
+    nodes = [ImagePSF(Matrix{Float32}(PSF.render!(Matrix{Float32}(undef, 25, 25),
+                                                  CircularGaussianPSF(13.0f0, 13.0f0, 3.0f0, 1.0f0, 0.0f0),
+                                                  1:25, 1:25)))
+             for _ in 1:4]
+    # One coordinate per node, not grid axes: a 2x2 grid spanning the frame below.
+    gpsf = GriddedPSFModel(nodes, Float32[1, 1, 60, 60], Float32[1, 60, 1, 60])
+
+    # A 5-D CRDS-style ePSF array, and a tiny L2 with the element types the real
+    # files use: data Float32, err and var_poisson Float16, dq UInt32.  The
+    # element types matter; the array sizes do not.
+    epsf5 = fill(1.0f0, 9, 9, 4, 1, 1)
+    # `ASDF` is imported inside the `Roman` submodule, not here.
+    nd(a, t) = Roman.ASDF.NDArray(Roman.ASDF.LazyBlockHeaders(), nothing, a,
+                                  reverse(collect(size(a))), t, nothing)
+
+    @compile_workload begin
+        mktempdir() do dir
+            l2 = joinpath(dir, "l2.asdf")
+            Roman.ASDF.save(l2, Dict("roman" => Dict(
+                "meta" => Dict("exposure" => Dict("effective_exposure_time" => 1.0)),
+                "data" => nd(rand(Float32, 8, 8), "float32"),
+                "err" => nd(ones(Float16, 8, 8), "float16"),
+                "var_poisson" => nd(ones(Float16, 8, 8), "float16"),
+                "dq" => nd(zeros(UInt32, 8, 8), "uint32"))))
+            Roman.load_l2(l2)
+            Roman.load_area(l2)
+
+            ep = joinpath(dir, "epsf.asdf")
+            Roman.ASDF.save(ep, Dict("roman" => Dict(
+                "meta" => Dict("pixel_x" => [0.0, 40.0, 0.0, 40.0],
+                               "pixel_y" => [0.0, 0.0, 40.0, 40.0],
+                               "oversample" => 1, "spectral_type" => ["G2V"], "defocus" => [0]),
+                "psf" => nd(epsf5, "float32"))))
+            Roman.crds_gridded_epsf(ep)
+        end
+
+        img, _ = simulate_image((60, 60), gpsf, 6; background = 50.0f0,
+                                rng = Random.Xoshiro(1))
+        res = fit_all_stars_simultaneous_multipass(Float32.(img), gpsf, 3.0f0;
+            max_iter = 2, min_iter = 1, show_trace = false)
+        to_table(res)
+    end
+end

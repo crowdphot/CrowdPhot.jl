@@ -5,3 +5,5 @@ Manifest.toml
 /docs/build/
 .CondaPkg
 /.claude/
+# Catalogs written by the examples' default `outdir`
+/examples/**/results/
