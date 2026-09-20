@@ -15,8 +15,8 @@
 #     include("photometry.jl")
 #     main("/path/to/r..._cal.asdf"; fit_rad = 4)
 #
-# The first call spends roughly 17 seconds compiling before it prints anything.
-# Staying in one REPL session pays that once instead of once per file.
+# The first call spends a while compiling before it prints anything.  Staying in
+# one REPL session pays that once instead of once per file.
 
 # Load Julia package code, timing how long it takes.
 const J_PACKAGE_LOADS = @elapsed begin
@@ -32,7 +32,7 @@ const T_PYTHON = @elapsed include(joinpath(@__DIR__, "crds_query_pythoncall.jl")
 # Print one line per phase to show startup costs.
 # On a cold process most of these numbers are Julia compiling, not
 # work: a second call to `main` in the same session is far faster.  See the
-# "Why the first run is slow" section of the README.
+# REPL paragraph under "Running it" in README.md.
 macro step(label, ex)
     quote
         local t = @elapsed local v = $(esc(ex))

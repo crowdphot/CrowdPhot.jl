@@ -108,7 +108,10 @@ end
     # A 5-D CRDS-style ePSF array, and a tiny L2 with the element types the real
     # files use: data Float32, err and var_poisson Float16, dq UInt32.  The
     # element types matter; the array sizes do not.
-    epsf5 = fill(1.0f0, 9, 9, 4, 1, 1)
+    #
+    # `oversample = 4` and stamps summing to ~1 puts `crds_gridded_epsf` down its
+    # `is_old_format` branch, which is the live path for current CRDS files.
+    epsf5 = fill(1.0f0 / (37 * 37), 37, 37, 4, 1, 1)
     # `ASDF` is imported inside the `Roman` submodule, not here.
     nd(a, t) = Roman.ASDF.NDArray(Roman.ASDF.LazyBlockHeaders(), nothing, a,
                                   reverse(collect(size(a))), t, nothing)
@@ -129,7 +132,7 @@ end
             Roman.ASDF.save(ep, Dict("roman" => Dict(
                 "meta" => Dict("pixel_x" => [0.0, 40.0, 0.0, 40.0],
                                "pixel_y" => [0.0, 0.0, 40.0, 40.0],
-                               "oversample" => 1, "spectral_type" => ["G2V"], "defocus" => [0]),
+                               "oversample" => 4, "spectral_type" => ["G2V"], "defocus" => [0]),
                 "psf" => nd(epsf5, "float32"))))
             Roman.crds_gridded_epsf(ep)
         end

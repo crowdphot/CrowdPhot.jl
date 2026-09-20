@@ -14,9 +14,9 @@ science array, error array, Poisson variance and a boolean bad-pixel mask
 built from the file's DQ array:
 
 ```julia
-using CrowdPhot.Roman: load_l2
+using CrowdPhot: Roman
 
-l2 = load_l2("r0000101001001001001_0001_wfi01_cal.asdf")
+l2 = Roman.load_l2("r0000101001001001001_0001_wfi01_cal.asdf")
 l2.data          # Matrix{Float32}, in (y, x) order
 l2.dq            # BitMatrix, `true` where the pixel is unusable
 ```
@@ -42,9 +42,9 @@ See [Data quality flags](@ref roman_dq) below.
 the pixels carrying any of the named flags:
 
 ```julia
-using CrowdPhot.Roman: parse_dq_mask
+using CrowdPhot: Roman
 
-bad = parse_dq_mask(dq_array; flags = (:DO_NOT_USE, :DEAD, :NON_SCIENCE))
+bad = Roman.parse_dq_mask(dq_array; flags = (:DO_NOT_USE, :DEAD, :NON_SCIENCE))
 ```
 
 An unrecognized flag name raises an `ArgumentError` and lists the valid names.
@@ -56,9 +56,9 @@ An unrecognized flag name raises an `ArgumentError` and lists the valid names.
 [`GriddedPSFModel`](@ref) of [`ImagePSF`](@ref) nodes.
 
 ```julia
-using CrowdPhot.Roman: crds_gridded_epsf
+using CrowdPhot: Roman
 
-model = crds_gridded_epsf("roman_wfi_epsf_0182.asdf")
+model = Roman.crds_gridded_epsf("roman_wfi_epsf_0182.asdf")
 ```
 
 ## Selecting a node PSF slice
@@ -70,7 +70,7 @@ node (for a chosen `spectral_type` and `defocus`) to build the
 `GriddedPSFModel`:
 
 ```julia
-model = crds_gridded_epsf(path; spectral_type = "G2V", defocus = 0, psf_subtype = "psf")
+model = Roman.crds_gridded_epsf(path; spectral_type = "G2V", defocus = 0, psf_subtype = "psf")
 ```
 
 - `spectral_type` (default `"G2V"`) selects the spectral-type slice by name,
