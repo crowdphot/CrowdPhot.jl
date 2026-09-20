@@ -2,7 +2,8 @@
 #
 # Minimal end-to-end PSF photometry on one Roman WFI Level 2 exposure.
 # Loads the image, resolves and loads its reference files from CRDS, fits every
-# source simultaneously, writes a flat table of results.
+# source, writes a flat table of results.  `fit_type` selects the simultaneous
+# or the sequential fitter.
 #
 # Run it directly:
 #
@@ -55,13 +56,15 @@ BLAS.set_num_threads(1)
 Photometry on one Roman WFI Level 2 exposure, writing the result to a Parquet
 file under `outdir`, named after the input.  Returns the output path.
 
-The keyword arguments below are the ones worth tuning; they are forwarded to
-[`fit_all_stars_simultaneous_multipass`](@ref), whose docstring documents each
-one in full.  Most are shown at their default values so the whole control
-surface is visible in one place.
+`fit_type` selects the fitter: `:simultaneous` solves for every source at once,
+`:sequential` visits them one at a time.  The remaining keyword arguments are
+the ones worth tuning; they are forwarded to whichever fitter is chosen, and
+both docstrings document each one in full.  Most are shown at their default
+values so the whole control surface is visible in one place.
 """
 function main(l2_path::AbstractString;
         outdir::AbstractString = "results",
+        fit_type::Symbol = :simultaneous,
         # --- detection ---
         kernel_rad::Integer = 10,       # half-width of the matched filter kernel
         detect_sigma::Real = 5.0,       # detection threshold, in sigma
@@ -81,7 +84,9 @@ function main(l2_path::AbstractString;
         max_step::Real = 1.0,           # maximum centroid step per iteration, in pixels
         show_trace::Bool = true,        # show informative output
     )
-    println("Processing ", basename(l2_path))
+    fit_type in (:simultaneous, :sequential) ||
+        throw(ArgumentError("fit_type must be :simultaneous or :sequential, got $(repr(fit_type))"))
+    println("Processing ", basename(l2_path), " (", fit_type, ")")
     t_start = time()
     println("  ", rpad("julia package load", 34), lpad(round(J_PACKAGE_LOADS; digits = 1), 6), " s")
     println("  ", rpad("python startup", 34), lpad(round(T_PYTHON; digits = 1), 6), " s")
@@ -115,13 +120,23 @@ function main(l2_path::AbstractString;
         iv
     end
 
-    # Background estimation, detection, deblending, simultaneous fitting and
-    # pruning, iterated to convergence.  Every source moves together in one
-    # damped step, which is what accounts for blended neighbors.
-    mp = @step "fit" fit_all_stars_simultaneous_multipass(img.data, psf, fit_rad;
-        inv_var, coverage_mask, kernel_rad, detect_sigma, bkg_box_size,
-        blend_threshold, blend_threshold_initial, blend_passes,
-        max_iter, min_iter, few_sources, λ_init, max_step, show_trace)
+    # Background estimation, detection, deblending, fitting and pruning,
+    # iterated to convergence.  The two fitters return the same result type and
+    # share every keyword exposed through `main`; they differ in how a pass updates sources.
+    # Note that there are some keyword arguments that adjust the behavior of the
+    # fitters that are specific to each method (e.g., `linear_tol` for simultaneous and
+    # `sweeps_per_pass` for the sequential one).  Add them here when tuning.
+    mp = @step "fit" if fit_type === :simultaneous
+        fit_all_stars_simultaneous_multipass(img.data, psf, fit_rad;
+            inv_var, coverage_mask, kernel_rad, detect_sigma, bkg_box_size,
+            blend_threshold, blend_threshold_initial, blend_passes,
+            max_iter, min_iter, few_sources, λ_init, max_step, show_trace)
+    else
+        fit_all_stars_multipass(img.data, psf, fit_rad;
+            inv_var, coverage_mask, kernel_rad, detect_sigma, bkg_box_size,
+            blend_threshold, blend_threshold_initial, blend_passes,
+            max_iter, min_iter, few_sources, λ_init, max_step, show_trace)
+    end
 
     println("Fit ", length(mp.phot.y), " sources")
 
