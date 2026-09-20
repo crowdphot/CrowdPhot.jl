@@ -1,0 +1,10 @@
+# CondaPkg provisions a private Python for this example and installs CRDS into
+# it, so nothing has to be set up by hand to run the example.  CRDS is
+# published on PyPI, not conda-forge, hence `[pip.deps]`.
+#
+# To use an existing Python that already has `crds` instead, set
+# `JULIA_CONDAPKG_BACKEND=Null` and `JULIA_PYTHONCALL_EXE=/path/to/python` in
+# the environment *before* starting Julia.  See README.md.
+
+[pip.deps]
+crds = ""

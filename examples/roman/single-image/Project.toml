@@ -1,0 +1,18 @@
+[deps]
+CrowdPhot = "ad925fdb-984f-459a-854d-8ffe66f81286"
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+NetworkOptions = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
+Parquet2 = "98572fba-bba0-415d-956f-fa77e587d26d"
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
+
+[sources]
+CrowdPhot = {url = "https://github.com/crowdphot/CrowdPhot.jl"}
+
+[compat]
+Distributed = "1"
+LinearAlgebra = "1"
+NetworkOptions = "1"
+Parquet2 = "0.2"
+PythonCall = "0.9"
+julia = "1.10"
