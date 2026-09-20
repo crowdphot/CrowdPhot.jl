@@ -31,9 +31,19 @@ println("Found $(length(jobs)) exposures in $l2dir")
 # `@sync @distributed for ...`, splits the loop into equal chunks up front,
 # which stalls on the slowest chunk when exposures take unequal time -- and
 # they do, since run time scales with the number of sources detected.
-pmap(jobs) do l2_path
+#
+# `on_error = identity` returns the exception as that job's result instead of
+# aborting the whole `pmap`.
+results = pmap(jobs; on_error = identity) do l2_path
     println("STARTING $(basename(l2_path)) ON WORKER $(myid())")
     outpath = main(l2_path)
     println("FINISHED $(basename(l2_path)) ON WORKER $(myid())")
     return outpath
+end
+
+# Check if any jobs failed.
+failed = [(job, r) for (job, r) in zip(jobs, results) if r isa Exception]
+println("\n$(length(jobs) - length(failed)) of $(length(jobs)) exposures succeeded")
+for (job, err) in failed
+    println("FAILED $(basename(job)): $err")
 end

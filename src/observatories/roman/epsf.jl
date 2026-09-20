@@ -58,9 +58,7 @@ function crds_gridded_epsf(path::AbstractString;
     length(pixel_x) == length(pixel_y) || throw(ArgumentError("pixel_x and pixel_y have different lengths in reference file $path"))
     spectral_types, defocus_values = meta["spectral_type"], meta["defocus"]
 
-    # `oversample` is always the file's own value -- see Section 3.1 of
-    # gridded_psf_crds_plan.md for why this is never a user-settable
-    # keyword on this function.
+    # Set oversampling from the file's metadata.
     os = Int(meta["oversample"])
     os > 0 || throw(ArgumentError("$path has non-positive meta.oversample=$os"))
 
@@ -78,9 +76,7 @@ function crds_gridded_epsf(path::AbstractString;
     # get_gridded_psf_model): "old format" stamps are the optical PSF only
     # (STPSF output, sum ~ 1), not yet convolved with the detector's pixel
     # response; "new format" stamps already have that convolution baked in
-    # (sum ~ oversample^2). Computed once per (defocus, spectral_type)
-    # slice, from the median sum across grid nodes -- not per-node. See
-    # "Pixel-response convolution" in gridded_psf_crds_plan.md.
+    # (sum ~ oversample^2). Computed once per (defocus, spectral_type) slice.
     is_old_format = median(sum.(stamps)) < os^2 / 2
     if is_old_format
         kernel = T.(PSF.pixel_response_kernel(os; type = pixel_integration))
