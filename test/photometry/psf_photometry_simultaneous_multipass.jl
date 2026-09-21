@@ -1009,6 +1009,39 @@ end
     rb = fit_all_stars_simultaneous_multipass(blank, TEST_PSF, 4.0; fixed = TEST_FIXED,
         max_iter = 1, min_iter = 1, detect_sigma = 1.0e6)
     @test_throws "no sources" to_table(rb)
+
+    @testset "extra columns" begin
+        n = length(res.phot.y)
+        mag = rand(n)
+        mag_err = rand(n)
+        t2 = to_table(res; ABmag = mag, ABmag_err = mag_err)
+
+        # Appended after the built-ins, in the order given.
+        @test propertynames(t2) == (propertynames(t)..., :ABmag, :ABmag_err)
+        @test length(t2) == n
+        # Stored by reference, like every other column.
+        @test t2.ABmag === mag
+        @test t2.ABmag_err === mag_err
+        # The built-ins are untouched and still alias the result.
+        @test t2.flux === res.phot.flux
+        @test t2.sharpness == t.sharpness
+
+        # Omitting `extra` reproduces the old behavior exactly.
+        @test propertynames(to_table(res)) == propertynames(t)
+
+        # A non-Float column is fine; `StructArray` only cares about shape.
+        @test to_table(res; label = fill(:a, n)).label isa Vector{Symbol}
+
+        # Wrong length is caught by StructArrays, so `to_table` need not check it.
+        @test_throws ArgumentError to_table(res; bad = rand(n + 1))
+        @test_throws ArgumentError to_table(res; bad = 1.0)
+
+        # Replacing a built-in is allowed (e.g. rewriting flux in calibrated
+        # units) but must not happen silently.
+        t3 = @test_logs (:warn, r"replaces the built-in") to_table(res; flux = mag)
+        @test t3.flux === mag
+        @test length(propertynames(t3)) == length(propertynames(t))
+    end
 end
 
 @testset "end-to-end recovery" begin

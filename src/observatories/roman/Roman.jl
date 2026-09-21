@@ -15,10 +15,12 @@ using ..CrowdPhot: correlate
 import ..CrowdPhot.PSF
 using ..CrowdPhot.PSF: ImagePSF, GriddedPSFModel
 
-export DQ_FLAGS, dq_mask_value, parse_dq_mask, load_l2, load_area, crds_gridded_epsf
+export DQ_FLAGS, dq_mask_value, parse_dq_mask, load_l2, load_area, crds_gridded_epsf,
+    jansky_per_flux_unit
 
 include("dq.jl")
 include("io.jl")
+include("photom.jl")
 include("epsf.jl")
 
 end # module Roman

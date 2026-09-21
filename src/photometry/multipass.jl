@@ -2332,7 +2332,7 @@ end
 
 
 """
-    to_table(result) → StructArray
+    to_table(result; extra...) → StructArray
 
 Flatten the return of [`fit_all_stars_multipass`](@ref) or
 [`fit_all_stars_simultaneous_multipass`](@ref) into a plain columnar table with one
@@ -2346,6 +2346,17 @@ hands back the underlying `Vector` with no copy.
 
 # Arguments
 - `result`: the full `NamedTuple` returned by either multipass fitter.
+
+# Keyword arguments
+- `extra...`: additional columns to append, each a vector as long as the catalog.
+  They are added after the built-in columns, in the order given, and are stored by
+  reference like the rest.  This is the intended way to carry derived quantities the
+  package cannot compute itself, such as calibrated magnitudes, crossmatch
+  identifiers or user flags, into the same table.  A name matching a built-in column
+  *replaces* it and emits a warning to ensure you do not replace built-in columns
+  unintentionally.  This can be used to rewrite `flux` and
+  `flux_err` in calibrated units, if desired.  A vector of the wrong
+  length raises an error from `StructArray`.
 
 # Returns
 
@@ -2415,9 +2426,12 @@ tbl = to_table(res)
 tbl.sharpness            # a Vector, no copy
 tbl[1]                   # the first source as a flat NamedTuple
 count(<(1.2), tbl.sharpness)
+
+# append derived columns the package cannot compute itself
+tbl = to_table(res; ABmag = mags, ABmag_err = mag_errs)
 ```
 """
-function to_table(result)
+function to_table(result; extra...)
     phot = result.phot
     morph = phot.morphology
     isempty(morph) &&
@@ -2428,7 +2442,7 @@ function to_table(result)
     # field, which is what lets each statistic pair with its own reference.
     core, aper = morph.core, morph.aperture
     cr, ar = morph.psf_ref.core, morph.psf_ref.aperture
-    return StructArray((;
+    cols = (;
         # Position and photometry
         y = phot.y, x = phot.x, y_err = phot.y_err, x_err = phot.x_err,
         flux = phot.flux, flux_err = phot.flux_err,
@@ -2459,5 +2473,14 @@ function to_table(result)
         # not rebuilt from its components: the debiasing is not a ratio or a difference.
         ellipticity_sq_resid = morph.ellipticity_sq_resid,
         ellipticity_sq_resid_err = morph.ellipticity_sq_resid_err,
-    ))
+    )
+    # `merge` would silently drop the built-in, which is occasionally what the caller
+    # wants (e.g. rewriting `flux` in calibrated units), so warn rather than throw.
+    for k in keys(extra)
+        haskey(cols, k) && @warn "`to_table` extra column `$k` replaces the built-in " *
+            "column of the same name"
+    end
+    # `StructArray` raises on any length or shape mismatch among the columns, so
+    # `extra` needs no separate size check here.
+    return StructArray(merge(cols, values(extra)))
 end

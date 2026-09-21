@@ -15,7 +15,7 @@ using Statistics: median, median!, mean, std, quantile
 using StructArrays: StructArray
 
 export Background2D
-export sigma_clip, sigma_clip!, calc_total_error
+export sigma_clip, sigma_clip!, calc_total_error, abmag, abmag_err
 export simulate_sources, simulate_image, make_gaussians_image, centroid_poly, choose_centroid
 export matched_filter, MatchedFilterResult
 export measure_star_shape, measure_star_shape_ref, measure_star_shapes, FlatWindow, GaussianWindow

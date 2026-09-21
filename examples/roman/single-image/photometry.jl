@@ -143,7 +143,15 @@ function main(l2_path::AbstractString;
     # The full result is a deep nested schema carrying every intermediate
     # quantity.  `to_table` flattens it to the columns most analyses want, with
     # the PSF referencing already applied to the morphology statistics.
-    tbl = @step "to_table" to_table(mp)
+    #
+    # Fitted fluxes are in the data units of the pixel-area-corrected image above.
+    # `jansky_per_flux_unit` reads the conversion factors from the image metadata
+    # to put them on the AB system.  `abmag_err` is scale invariant, so it takes
+    # the raw fitted flux and flux error directly and needs no calibration.
+    jy = Roman.jansky_per_flux_unit(img.meta)
+    tbl = @step "to_table" to_table(mp;
+        ABmag = abmag.(mp.phot.flux .* jy),
+        ABmag_err = abmag_err.(mp.phot.flux, mp.phot.flux_err))
 
     mkpath(outdir)
     outpath = joinpath(outdir, replace(basename(l2_path), r"\.asdf$" => "") * ".parquet")

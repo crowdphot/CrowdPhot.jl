@@ -149,8 +149,11 @@ above the `include` of `crds_query_pythoncall.jl`.
    how bad pixels are excluded from both detection and fitting.
 5. The multipass fitter selected by `fit_type` iterates background estimation,
    detection, deblending, fitting and pruning, until it converges.
-6. `to_table` flattens the result to the columns most analyses want, with the
-   PSF-referencing already applied to the morphology statistics.
+6. `Roman.jansky_per_flux_unit` reads the exposure's photometric calibration
+   information and turns the fitted fluxes into AB magnitudes.
+7. `to_table` flattens the result to the columns most analyses want, with the
+   PSF-referencing already applied to the morphology statistics, and the `ABmag`
+   and `ABmag_err` columns appended.
 
 ## What it leaves out
 
