@@ -2360,7 +2360,8 @@ hands back the underlying `Vector` with no copy.
 
 # Returns
 
-A `StructArray` of 33 columns.  Positions, fluxes and goodness-of-fit statistics
+A `StructArray` of 33 columns, plus any passed through `extra`.  Positions, fluxes
+and goodness-of-fit statistics
 are copied through unchanged from [`MultiPassPhotResult`](@ref); see that docstring
 for their definitions.
 

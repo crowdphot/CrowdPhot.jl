@@ -177,10 +177,9 @@ end
     end
 
     @testset "pixel_response_kernel type=:box matches astropy Box2DKernel" begin
-        # Hardcoded from astropy.convolution.Box2DKernel(width=n).array,
-        # verified earlier (see gridded_psf_crds_plan.md, "Pixel-response
-        # convolution"). n=3 (odd) is a naive uniform 3x3 box; n=4 (even)
-        # is a tapered 5x5 kernel, not a naive 4x4 box.
+        # Hardcoded from astropy.convolution.Box2DKernel(width=n).array.
+        # n=3 (odd) is a naive uniform 3x3 box; n=4 (even) is a tapered 5x5
+        # kernel, not a naive 4x4 box.
         k3 = pixel_response_kernel(3; type = :box)
         @test k3 ≈ fill(1 / 9, 3, 3)
 
@@ -341,9 +340,22 @@ end
     @testset "error handling" begin
         @test_throws "has no \"photometry\" key" jansky_per_flux_unit(Dict("exposure" => 1))
         @test_throws "is this the `meta` from a Roman L2 file?" jansky_per_flux_unit(Dict())
-        @test_throws "has no \"pixel_area\" key" jansky_per_flux_unit(
+        # The message names the offending key, so check that and the reason.
+        @test_throws "[\"pixel_area\"]" jansky_per_flux_unit(
             Dict("photometry" => Dict("conversion_megajanskys" => 1.0)))
-        @test_throws "has no \"conversion_megajanskys\" key" jansky_per_flux_unit(
+        @test_throws "is missing or null" jansky_per_flux_unit(
+            Dict("photometry" => Dict("conversion_megajanskys" => 1.0)))
+        @test_throws "[\"conversion_megajanskys\"]" jansky_per_flux_unit(
             Dict("photometry" => Dict("pixel_area" => 1.0)))
+
+        # The Roman schema types both as `anyOf: [number, null]`, so a
+        # present-but-null value is a valid file and must not fall through to a
+        # `MethodError` from `Float64(nothing)`.
+        @test_throws "is missing or null" jansky_per_flux_unit(
+            Dict("photometry" => Dict("conversion_megajanskys" => 1.0, "pixel_area" => nothing)))
+        @test_throws "is missing or null" jansky_per_flux_unit(
+            Dict("photometry" => Dict("conversion_megajanskys" => nothing, "pixel_area" => 1.0)))
+        @test_throws "carries no photometric calibration" jansky_per_flux_unit(
+            Dict("photometry" => Dict("conversion_megajanskys" => nothing, "pixel_area" => nothing)))
     end
 end

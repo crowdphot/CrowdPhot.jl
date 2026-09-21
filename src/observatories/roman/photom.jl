@@ -33,8 +33,12 @@ function jansky_per_flux_unit(meta)
         "`meta` has no \"photometry\" key; is this the `meta` from a Roman L2 file?"))
     p = meta["photometry"]
     for k in ("conversion_megajanskys", "pixel_area")
-        haskey(p, k) || throw(ArgumentError(
-            "`meta[\"photometry\"]` has no \"$k\" key; cannot calibrate fluxes"))
+        # The Roman schema types both of these as `anyOf: [number, null]`, so a
+        # present-but-null value is a valid file, not a malformed one; it means
+        # the exposure was never photometrically calibrated.
+        (haskey(p, k) && p[k] !== nothing) || throw(ArgumentError(
+            "`meta[\"photometry\"][\"$k\"]` is missing or null; this exposure " *
+            "carries no photometric calibration, so fluxes cannot be converted"))
     end
     return Float64(p["conversion_megajanskys"]) * 1.0e6 * Float64(p["pixel_area"])
 end
