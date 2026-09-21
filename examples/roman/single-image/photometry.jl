@@ -148,7 +148,7 @@ function main(l2_path::AbstractString;
     # `jansky_per_flux_unit` reads the conversion factors from the image metadata
     # to put them on the AB system.  `abmag_err` is scale invariant, so it takes
     # the raw fitted flux and flux error directly and needs no calibration.
-    jy = Roman.jansky_per_flux_unit(img.meta)
+    jy = Roman.jansky_per_flux_unit(img.meta) |> eltype(mp.phot.flux)
     tbl = @step "to_table" to_table(mp;
         ABmag = abmag.(mp.phot.flux .* jy),
         ABmag_err = abmag_err.(mp.phot.flux, mp.phot.flux_err))
