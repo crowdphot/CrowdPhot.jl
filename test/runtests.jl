@@ -24,6 +24,7 @@ import CrowdPhot
 @safetestset "Curve of Growth" include("curve_of_growth_tests.jl")
 @safetestset "Detection" include("detection_tests.jl")
 @safetestset "Utilities" include("utilities/calc_total_error_tests.jl")
+@safetestset "AB magnitudes" include("utilities/abmag_tests.jl")
 @safetestset "Bessel functions" include("bessels.jl")
 @safetestset "Multi-pass simultaneous photometry" include("photometry/psf_photometry_simultaneous_multipass.jl")
 @safetestset "Multi-pass sequential photometry" include("photometry/psf_photometry_sequential_multipass.jl")

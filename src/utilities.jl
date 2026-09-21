@@ -263,3 +263,61 @@ function _clamp_inds(yr::AbstractUnitRange{<:Integer}, xr::AbstractUnitRange{<:I
     return yr, xr
 end
 _clamp_inds(inds::CartesianIndices{2}, image::AbstractMatrix) = _clamp_inds(inds.indices..., image)
+
+# ==============================================================================
+# Photometric calibration
+# ==============================================================================
+
+"""
+    abmag(flux_jy)
+
+AB magnitude of a flux density `flux_jy` given in janskys, using the AB zero
+point of 3631 Jy.
+
+Returns `NaN` for non-positive flux rather than throwing, so that a bad
+measurement in a large catalog does not abort the conversion.
+
+# Examples
+```jldoctest
+julia> using CrowdPhot: abmag
+
+julia> abmag(3631.0)
+0.0
+
+julia> abmag(36.31)     # 100x fainter is exactly 5 magnitudes
+5.0
+
+julia> isnan(abmag(-1.0))
+true
+```
+"""
+function abmag(flux_jy::Real)
+    FT = float(typeof(flux_jy))
+    # Written as log10(3631 / f) rather than -log10(f / 3631): bit-identical
+    # across the range, but returns +0.0 instead of -0.0 at the zero point.
+    return flux_jy > 0 ? FT(2.5 * log10(3631 / flux_jy)) : FT(NaN)
+end
+
+"""
+    abmag_err(flux, flux_err)
+
+1-sigma magnitude uncertainty from a flux and its 1-sigma uncertainty,
+`2.5 / log(10) * flux_err / flux`.
+
+The result is scale invariant, so `flux` and `flux_err` may be in any units as
+long as they share them; there is no need to calibrate to janskys first.
+Returns `NaN` for non-positive `flux`, matching [`abmag`](@ref), so the two
+columns are `NaN` together.
+
+# Examples
+```jldoctest
+julia> using CrowdPhot: abmag_err
+
+julia> round(abmag_err(100.0, 10.0); digits = 4)
+0.1086
+```
+"""
+function abmag_err(flux::Real, flux_err::Real)
+    FT = float(promote_type(typeof(flux), typeof(flux_err)))
+    return flux > 0 ? FT(2.5 / log(10) * flux_err / flux) : FT(NaN)
+end

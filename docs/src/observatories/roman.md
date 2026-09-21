@@ -34,6 +34,38 @@ See [Data quality flags](@ref roman_dq) below.
 
 [`load_area`](@ref) reads a pixel area map (PAM) reference file the same way.
 
+## Calibrating fluxes to AB magnitudes
+
+A fitted flux is in the data units of the image it was measured on. Every Level 2
+exposure carries its own photometric calibration information, which
+[`jansky_per_flux_unit`](@ref) reads and combines into the single scalar that
+converts a flux to janskys:
+
+```julia
+using CrowdPhot: Roman
+
+l2 = Roman.load_l2(path)
+pam = Roman.load_area(area_path)
+l2.data .*= pam.data # required; see the warning below
+
+res = fit_all_stars_simultaneous_multipass(l2.data, psf, fit_rad)
+
+f = Roman.jansky_per_flux_unit(l2.meta)
+tbl = to_table(res;
+    ABmag = abmag.(res.phot.flux .* f),
+    ABmag_err = abmag_err.(res.phot.flux, res.phot.flux_err))
+```
+
+[`CrowdPhot.abmag`](@ref) and [`CrowdPhot.abmag_err`](@ref) are generic and
+documented under [Utilities](@ref). `abmag_err` takes the *uncalibrated* flux and
+its error, since the magnitude error depends only on their ratio.
+
+!!! warning
+    The pixel area map must already be multiplied into the image, as in the third
+    line above. Roman L2 data are in surface brightness units, so a flux fitted to
+    an uncorrected frame is not on the scale this factor assumes, and the
+    magnitudes will be wrong by a position-dependent amount.
+
 ## [Data quality flags](@id roman_dq)
 
 [`DQ_FLAGS`](@ref) mirrors the `pixel` enum owned by
@@ -157,6 +189,7 @@ model = GriddedPSFModel(stamps, afr["meta"]["pixel_y"], afr["meta"]["pixel_x"])
 ```@docs
 load_l2
 load_area
+jansky_per_flux_unit
 DQ_FLAGS
 dq_mask_value
 parse_dq_mask

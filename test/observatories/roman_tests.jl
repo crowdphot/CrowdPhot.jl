@@ -1,5 +1,6 @@
 import CrowdPhot
-using CrowdPhot.Roman: crds_gridded_epsf, load_l2, load_area, DQ_FLAGS, dq_mask_value, parse_dq_mask
+using CrowdPhot.Roman: crds_gridded_epsf, load_l2, load_area, DQ_FLAGS, dq_mask_value,
+    parse_dq_mask, jansky_per_flux_unit
 using CrowdPhot.PSF: GriddedPSFModel, ImagePSF, pixel_response_kernel
 using ASDF
 using OrderedCollections: OrderedDict
@@ -16,7 +17,7 @@ using Test
 # `crds_gridded_epsf` expects to read back after round-tripping
 # through ASDF) -- this helper reverses `size(data)` to produce the
 # ASDF/Python-order `shape` field `NDArray` expects, exactly mirroring how
-# the real files are laid out (see gridded_psf_crds_plan.md, Section 3).
+# the real files are laid out.
 function _write_synthetic_epsf(dir, data::Array{Float32, 5}; pixel_x, pixel_y,
                                spectral_type = ["A0V", "G2V"], defocus = [0], oversample = 2, name = "synthetic_epsf.asdf")
     lbh = ASDF.LazyBlockHeaders()
@@ -316,5 +317,33 @@ end
         ASDF.save(bad, OrderedDict("not_roman" => OrderedDict()))
         @test_throws "does not contain a top-level \"roman\" key" load_l2(bad)
         @test_throws "does not contain a top-level \"roman\" key" load_area(bad)
+    end
+end
+
+@testset "jansky_per_flux_unit" begin
+    # Unlike the rest of this file, this reads only the `meta` tree, so a plain
+    # Dict stands in for a file.  `load_l2` passes `meta` through untouched.
+    meta = Dict("photometry" => Dict("conversion_megajanskys" => 0.5,
+                                     "pixel_area" => 2.0e-13))
+    # MJy/sr -> Jy is the 1e6; the steradian factor is the pixel solid angle.
+    @test jansky_per_flux_unit(meta) ≈ 0.5e6 * 2.0e-13 rtol = 1.0e-12
+    @test jansky_per_flux_unit(meta) isa Float64
+
+    # Values from a real romanisim f129 exposure, to pin the magnitude of the result.
+    real_meta = Dict("photometry" => Dict("conversion_megajanskys" => 0.772980320486332,
+                                          "pixel_area" => 2.7796187051343e-13))
+    @test jansky_per_flux_unit(real_meta) ≈ 2.1486e-7 rtol = 1.0e-4
+
+    # Integer-valued metadata must not trip the Float64 conversion.
+    @test jansky_per_flux_unit(Dict("photometry" => Dict("conversion_megajanskys" => 1,
+                                                        "pixel_area" => 1))) == 1.0e6
+
+    @testset "error handling" begin
+        @test_throws "has no \"photometry\" key" jansky_per_flux_unit(Dict("exposure" => 1))
+        @test_throws "is this the `meta` from a Roman L2 file?" jansky_per_flux_unit(Dict())
+        @test_throws "has no \"pixel_area\" key" jansky_per_flux_unit(
+            Dict("photometry" => Dict("conversion_megajanskys" => 1.0)))
+        @test_throws "has no \"conversion_megajanskys\" key" jansky_per_flux_unit(
+            Dict("photometry" => Dict("pixel_area" => 1.0)))
     end
 end
