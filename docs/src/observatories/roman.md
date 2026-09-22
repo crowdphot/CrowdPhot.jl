@@ -29,7 +29,7 @@ of the matrices or output pixel positions.
 convention of [`CrowdPhot.fit_all_stars_multipass`](@ref), so it can be passed
 straight through.
 
-Which flags count as unusable is the `dq_flags` keyword`.
+Which flags count as unusable is the `dq_flags` keyword.
 See [Data quality flags](@ref roman_dq) below.
 
 [`load_area`](@ref) reads a pixel area map (PAM) reference file the same way.
@@ -151,8 +151,7 @@ CRDS ePSF reference files may store PSF stamps in one of two conventions:
 the same heuristic as `romancal`'s `get_gridded_psf_model`: the median
 per-node stamp sum, compared against `oversample^2 / 2`) and, for
 old-format files only, convolves each node with the detector's pixel
-response (a flat `oversample`-wide box, discretized the same way as
-`astropy.convolution.Box2DKernel`) and rescales by `oversample^2` before
+response (a flat `oversample`-wide box) and rescales by `oversample^2` before
 constructing the `ImagePSF`s. New-format stamps are used unchanged.
 
 Each node `ImagePSF` is constructed with `normalize = false` (also
