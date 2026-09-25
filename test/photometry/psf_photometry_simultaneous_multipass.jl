@@ -437,7 +437,10 @@ end
                  flux = [3000.0, 800.0, 5000.0, 1500.0, 2500.0, 2000.0])
         n = length(src.y)
         w = fill(1 / 120.0, ny * nx)
-        geom = stamp_geometry(Catalog{Float64}(src, psf), w, R, ny, nx)
+        # `Catalog` sorts sources spatially; the index claims below need the input order.
+        cat = Catalog{Float64}(src, psf)
+        @test cat.x == src.x
+        geom = stamp_geometry(cat, w, R, ny, nx)
         stamp = StampDerivatives{Float64, Int32}(zeros(p, geom.S2, n), geom.pixels, zeros(p, n), ny * nx, p, geom.S2)
         θ = vec(permutedims(hcat(src.y, src.x, src.flux)))
         _fill_stamps!(stamp, psf, Val(free_names), fixed, θ, w, grad_col, geom.dy_off, geom.dx_off,
@@ -469,6 +472,7 @@ end
         @test all(e8 .<= exact .* (1 + 1e-8))
         @test e8[3, 2] > 1.25 * e0[3, 2]
         @test_throws "max_neighbors must be non-negative" errs(-1)
+        @test_throws "max_neighbors must be at most" errs(CrowdPhot.MAX_NEIGHBORS + 1)
 
         # A duplicated source is a fully degenerate pair.  Its group factorization
         # must succeed on the ridge (in `Float32` too) rather than fall back to the
@@ -483,6 +487,48 @@ end
                 CrowdPhot.KnownWeightsCovarianceEstimator(), one(FT), 1, K)
             @test all(derrs(1) .> 100 .* derrs(0))
         end
+
+        # Neighbor cap.  40 mutually overlapping sources (anchors within 2R), each
+        # keeping only its 5 nearest: the pair list is the union of those nearest
+        # sets, and a group holding two sources whose pair the cap dropped must still
+        # get their true coupling, built from the stamps, not zero.  The reference is
+        # the same group of the equilibrated, ridged `J' J` the code factors: this
+        # field is degenerate enough (condition ~1e13 at smaller R) that the ridge
+        # is visible against an unridged inverse.
+        rng = StableRNG(4242)
+        nc, cap, K, cR = 40, 5, 3, 10
+        csrc = (; y = 20 .+ 20 .* rand(rng, nc), x = 20 .+ 20 .* rand(rng, nc), flux = 1000 .+ 4000 .* rand(rng, nc))
+        cw = fill(1 / 120.0, 100 * 100)
+        ccat = Catalog{Float64}(csrc, psf)   # sorted spatially, so read positions back from it
+        cgeom = stamp_geometry(ccat, cw, cR, 100, 100)
+        cst = StampDerivatives{Float64, Int32}(zeros(p, cgeom.S2, nc), cgeom.pixels, zeros(p, nc), 100 * 100, p, cgeom.S2)
+        _fill_stamps!(cst, psf, Val(free_names), fixed, vec(permutedims(hcat(ccat.y, ccat.x, ccat.flux))), cw, grad_col,
+            cgeom.dy_off, cgeom.dx_off, cgeom.anchor_y, cgeom.anchor_x, row_y, row_x, row_flux, trues(nc), nothing)
+        ay, ax = cgeom.anchor_y, cgeom.anchor_x
+        @test all(abs(ay[i] - ay[j]) <= 2cR && abs(ax[i] - ax[j]) <= 2cR for i in 1:nc, j in 1:nc)
+        nearest(j) = partialsort([((ay[i] - ay[j])^2 + (ax[i] - ax[j])^2, i) for i in 1:nc if i != j], 1:cap)
+        kept = Set(minmax(i, j) for j in 1:nc for (_, i) in nearest(j))
+        g = CrowdPhot._overlap_pairs(cst, ay, ax, cap)
+        @test Set(minmax(a, Int(g.nbr[q])) for a in 1:nc for q in g.ptr[a]:(g.ptr[a + 1] - 1)) == kept
+        @test length(kept) < nc * (nc - 1) ÷ 2
+        @test length(CrowdPhot._overlap_pairs(cst, ay, ax, nc - 1).nbr) == nc * (nc - 1)
+        Je = dense_J(cst)
+        He = Je' * Je
+        for j in 1:nc
+            b = idx(j)
+            He[b, b] += 1e-12 * sum(diag(He[b, b])) * I
+        end
+        ce = CrowdPhot._source_errors!(zeros(p, nc), cst, cgeom, CrowdPhot.KnownWeightsCovarianceEstimator(), 1.0, 1, K, cap)
+        n_dropped = 0
+        for a in 1:nc
+            slots = g.ptr[a]:(g.ptr[a + 1] - 1)
+            sc = [sum(abs2, view(g.B, :, :, abs(g.pair[q]))) for q in slots]
+            nbrs = Int.(g.nbr[slots[partialsortperm(sc, 1:K; rev = true)]])
+            n_dropped += count(minmax(u, v) ∉ kept for u in nbrs, v in nbrs if u < v)
+            cols = reduce(vcat, idx.([nbrs; a]))
+            @test ce[:, a] ≈ sqrt.(diag(inv(He[cols, cols]))[end - p + 1:end]) ./ cst.colnorm[:, a] rtol = 1e-6
+        end
+        @test n_dropped > 0
     end
 end
 
@@ -874,6 +920,8 @@ end
         img, TEST_PSF, 3.0; fixed = TEST_FIXED, few_sources = -1)
     @test_throws "solver must be :lsqr or :lsmr" fit_all_stars_simultaneous_multipass(
         img, TEST_PSF, 3.0; fixed = TEST_FIXED, solver = :cg)
+    @test_throws "error_neighbors must be between 0 and" fit_all_stars_simultaneous_multipass(
+        img, TEST_PSF, 3.0; fixed = TEST_FIXED, error_neighbors = CrowdPhot.MAX_NEIGHBORS + 1)
     # Only (y, x, flux) may be free; `bkg` is pinned automatically.
     @test_throws "fits only (y, x, flux)" fit_all_stars_simultaneous_multipass(
         img, TEST_PSF, 3.0)

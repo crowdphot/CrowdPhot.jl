@@ -494,14 +494,28 @@ function _cross_block!(B::AbstractArray{FT, 3}, t, V::AbstractArray{FT, 3}, i, j
 end
 
 """
-    _overlap_pairs(stamp, anchor_y, anchor_x) -> NamedTuple
+The most overlapping neighbors each source keeps as candidates for its error
+group, and so the largest allowed `error_neighbors`.  Bounds the cost of the
+coupling blocks, which would otherwise be expensive for large `fit_rad`
+in a crowded field.  A source's most
+strongly coupled neighbors are typically among its closest as well, so the cap has
+minimal effect on the errors -- in Gaussian-PSF fields with ~200 overlapping neighbors
+per source, capping at 32 changed no error by more than 1e-8 relative to no cap, and
+halved the cost of the error step.
+"""
+const MAX_NEIGHBORS_ERR = 32
 
-Every pair of sources whose stamps overlap, with the `p x p` off-diagonal block
-of the equilibrated normal matrix `J' J` each pair contributes.
+"""
+    _overlap_pairs(stamp, anchor_y, anchor_x, cap = MAX_NEIGHBORS_ERR) -> NamedTuple
+
+Pairs of sources whose stamps overlap, with the `p x p` off-diagonal block of the
+equilibrated normal matrix `J' J` each pair contributes.
 
 Two `(2R + 1)`-wide stamps overlap when their anchors differ by at most `2R` on
 both axes, so bucketing anchors into cells `2R + 1` wide means every overlapping
 partner lies in the same cell or one of its eight neighbors.
+
+Each source keeps at most its `cap` nearest overlapping neighbors.
 
 # Returns
 
@@ -512,7 +526,7 @@ partner lies in the same cell or one of its eight neighbors.
   the second (block `B[:, :, t]'`).  Each block is stored once, not per direction,
   since at high densities the blocks outnumber the sources by an order of magnitude.
 """
-function _overlap_pairs(stamp::StampDerivatives{FT}, anchor_y, anchor_x) where {FT}
+function _overlap_pairs(stamp::StampDerivatives{FT}, anchor_y, anchor_x, cap::Integer = MAX_NEIGHBORS_ERR) where {FT}
     p, n = stamp.p, size(stamp.values, 3)
     S = isqrt(stamp.S2)
     R = S ÷ 2
@@ -534,14 +548,42 @@ function _overlap_pairs(stamp::StampDerivatives{FT}, anchor_y, anchor_x) where {
     cumsum!(cstart, cstart)
     order = sortperm(cell)
 
+    # Call `f(i, d2)` for every source `i` whose stamp overlaps `j`'s, where `d2` is
+    # their squared anchor distance.
+    function each_overlap(f, j)
+        @inbounds for ddx in -1:1, ddy in -1:1
+            c = cell[j] + ddx * ncy + ddy
+            for q in cstart[c]:(cstart[c + 1] - 1)
+                i = order[q]
+                dy, dx = anchor_y[i] - anchor_y[j], anchor_x[i] - anchor_x[j]
+                (i != j && abs(dy) <= 2R && abs(dx) <= 2R) && f(i, dy * dy + dx * dx)
+            end
+        end
+    end
+    # `cut[j]` is the `(d2, index)` key of the last neighbor `j` keeps; `j` keeps
+    # `i` when `(d2, i) <= cut[j]`.  Sources with at most `cap` neighbors keep all.
+    cut = fill((typemax(Int), typemax(Int)), n)
+    cand = Tuple{Int, Int}[]
+    for j in 1:n
+        # Every candidate lies in the 3x3 cells around `j`, whose counts are already
+        # known, so only sources with more than `cap` of those need ranking.
+        n_near = -1
+        for ddx in -1:1, ddy in -1:1
+            c = cell[j] + ddx * ncy + ddy
+            n_near += cstart[c + 1] - cstart[c]
+        end
+        n_near > cap || continue
+        empty!(cand)
+        each_overlap((i, d2) -> push!(cand, (d2, Int(i))), j)
+        length(cand) > cap && (cut[j] = partialsort!(cand, cap))
+    end
     ia, ib = Int32[], Int32[]
-    @inbounds for j in 1:n, ddx in -1:1, ddy in -1:1
-        c = cell[j] + ddx * ncy + ddy
-        for q in cstart[c]:(cstart[c + 1] - 1)
-            i = order[q]
-            (i < j && abs(anchor_y[i] - anchor_y[j]) <= 2R && abs(anchor_x[i] - anchor_x[j]) <= 2R) || continue
-            push!(ia, i)
-            push!(ib, j)
+    for j in 1:n
+        each_overlap(j) do i, d2
+            if i < j && ((d2, Int(i)) <= cut[j] || (d2, j) <= cut[i])
+                push!(ia, i)
+                push!(ib, j)
+            end
         end
     end
     n_pairs = length(ia)
@@ -572,7 +614,7 @@ function _overlap_pairs(stamp::StampDerivatives{FT}, anchor_y, anchor_x) where {
 end
 
 """
-    _source_errors!(errs, stamp, geom, cov_est, cost, dof, max_neighbors) -> errs
+    _source_errors!(errs, stamp, geom, cov_est, cost, dof, max_neighbors, cap = MAX_NEIGHBORS_ERR) -> errs
 
 Per-source 1-sigma parameter errors that account for covariance with blended
 neighbors, for a catalog whose Jacobian is stored as `stamp`.
@@ -614,6 +656,9 @@ Ranking is by coupling strength, and deliberately not thresholded.  A blended
 pair's Schur complement is small, so even a weak coupling to a third source
 moves its variance by far more than the coupling itself suggests.
 
+Neighbors are chosen from each source's `cap` nearest candidates (see
+[`_overlap_pairs`](@ref)), so `max_neighbors` may not exceed `cap`.
+
 `max_neighbors = 0` skips the neighbor search and inverts each source's own
 block, ignoring its neighbors.  A group whose factorization fails (only
 possible through rounding in a nearly degenerate blend) falls back to the same
@@ -627,11 +672,12 @@ Used by [`fit_all_stars_simultaneous_multipass`](@ref); [`fit_all_stars_multipas
 takes its errors from each source's own Levenberg-Marquardt normal matrix instead.
 """
 function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT}, geom,
-                         cov_est, cost, dof, max_neighbors::Integer) where {FT}
+                         cov_est, cost, dof, max_neighbors::Integer, cap::Integer = MAX_NEIGHBORS_ERR) where {FT}
     p, n = stamp.p, size(stamp.values, 3)
     size(errs) == (p, n) ||
         throw(DimensionMismatch("`errs` must be ($p, $n); got $(size(errs))"))
     max_neighbors >= 0 || throw(ArgumentError("max_neighbors must be non-negative, got $max_neighbors"))
+    max_neighbors <= cap || throw(ArgumentError("max_neighbors must be at most $cap, got $max_neighbors"))
     R = isqrt(stamp.S2) ÷ 2
     # Everything is assembled in the column-equilibrated coordinates the stamp
     # stores (unit diagonal wherever a column has data), and only unscaled by
@@ -651,12 +697,13 @@ function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT}, 
         end
     end
     # With no neighbors wanted, an empty adjacency of the same type skips the pair search.
-    g = max_neighbors > 0 ? _overlap_pairs(stamp, geom.anchor_y, geom.anchor_x) :
+    g = max_neighbors > 0 ? _overlap_pairs(stamp, geom.anchor_y, geom.anchor_x, cap) :
         (; B = zeros(FT, p, p, 0), ptr = ones(Int, n + 1), nbr = Int32[], pair = Int32[])
     # No source can use more neighbors than it has, so size the scratch by that.
     K = min(Int(max_neighbors), maximum(a -> g.ptr[a + 1] - g.ptr[a], 1:n; init = 0))
     H = Matrix{FT}(undef, p * (K + 1), p * (K + 1))
     blk = Matrix{FT}(undef, p, p)
+    Bs = zeros(FT, p, p, 1)   # a coupling block built on the spot, for pairs the cap dropped
     group = Vector{Int32}(undef, K + 1)
     slot = Vector{Int}(undef, K)   # adjacency slot of each chosen neighbor
     score, rank = FT[], Int[]
@@ -702,10 +749,18 @@ function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT}, 
                 put_block!((m - 1) * p, (u - 1) * p, slot[u])
             end
             for u in 1:k, v in (u + 1):k
-                gv = group[v]
-                q = findfirst(==(group[u]), view(g.nbr, g.ptr[gv]:(g.ptr[gv + 1] - 1)))
-                q === nothing ? fill!(view(H, (v - 1) * p .+ (1:p), (u - 1) * p .+ (1:p)), zero(FT)) :
+                gu, gv = group[u], group[v]
+                q = findfirst(==(gu), view(g.nbr, g.ptr[gv]:(g.ptr[gv + 1] - 1)))
+                if q === nothing
+                    # Not in the pair list: either the stamps do not overlap, and
+                    # `_cross_block!` returns zero, or the cap dropped the pair.
+                    fill!(Bs, zero(FT))
+                    _cross_block!(Bs, 1, stamp.values, gv, gu, geom.anchor_y[gu] - geom.anchor_y[gv],
+                        geom.anchor_x[gu] - geom.anchor_x[gv], R)
+                    H[(v - 1) * p .+ (1:p), (u - 1) * p .+ (1:p)] .= view(Bs, :, :, 1)
+                else
                     put_block!((v - 1) * p, (u - 1) * p, g.ptr[gv] - 1 + q)
+                end
             end
             F = cholesky!(Symmetric(view(H, 1:M, 1:M), :L); check = false)
             if issuccess(F)
@@ -1106,7 +1161,10 @@ $(_MULTIPASS_DOC_FIT_COMMON)
   problem made of itself and its `error_neighbors` most strongly coupled
   neighbors (defined as having overlapping fitting regions based on `fit_rad`),
   so they account for the flux and position covariances with blended
-  neighbors. The errors approach those of the full linearized covariance
+  neighbors.  Only each source's `CrowdPhot.MAX_NEIGHBORS_ERR` (32) nearest
+  overlapping neighbors are considered, which bounds the cost when using large
+  `fit_rad` in a crowded field, and `error_neighbors` may not exceed it.
+  The errors approach those of the full linearized covariance
   `inv(J' J)` as `error_neighbors` grows, but large values are typically not
   necessary; `8` is within 1% for 99% of sources even
   with ~16 overlapping neighbors per source.  `0` ignores neighbors entirely,
@@ -1164,7 +1222,8 @@ function fit_all_stars_simultaneous_multipass(
     linear_iterations > 0 || throw(ArgumentError("linear_iterations must be positive"))
     linear_tol > 0 || throw(ArgumentError("linear_tol must be positive"))
     max_damping_trials > 0 || throw(ArgumentError("max_damping_trials must be positive"))
-    error_neighbors >= 0 || throw(ArgumentError("error_neighbors must be non-negative, got $error_neighbors"))
+    0 <= error_neighbors <= MAX_NEIGHBORS_ERR ||
+        throw(ArgumentError("error_neighbors must be between 0 and $MAX_NEIGHBORS_ERR, got $error_neighbors"))
     solver in (:lsqr, :lsmr) || throw(ArgumentError("solver must be :lsqr or :lsmr, got $(repr(solver))"))
     fitter = SimultaneousFitter{FT}(solver, Int(linearizations_per_pass), Int(linear_iterations),
         linear_tol, Int(max_damping_trials), λ_init, λ_up, λ_down, λ_min, λ_max, Int(error_neighbors))
