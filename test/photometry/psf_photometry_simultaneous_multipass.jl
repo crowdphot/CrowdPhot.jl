@@ -9,7 +9,7 @@ using CrowdPhot.PSF: CircularGaussianPSF, GriddedPSFModel, GaussianPRF
 using CrowdPhot.Background: SExtractorBackground, MADStdRMS
 using ConstructionBase
 using Krylov: lsqr!, lsmr!, LsqrWorkspace, LsmrWorkspace, solution
-using LinearAlgebra: dot, I
+using LinearAlgebra: dot, I, diag
 using StaticArrays: SMatrix
 using StableRNGs
 using Statistics: median, mean
@@ -413,10 +413,76 @@ end
         _fill_stamps!(stamp, psf, Val(free_names), fixed, θ, w, grad_col, dy_off, dx_off,
             anchor_y, anchor_x, row_y, row_x, row_flux, trues(1), nothing)
         errs = zeros(p, 1)
-        CrowdPhot._source_errors!(errs, stamp, CrowdPhot.KnownWeightsCovarianceEstimator(), 1.0, 1)
+        CrowdPhot._source_errors!(errs, stamp, (; anchor_y, anchor_x),
+            CrowdPhot.KnownWeightsCovarianceEstimator(), 1.0, 1, 8)
         J = dense_J(stamp) .* reshape(stamp.colnorm, 1, p)   # undo the equilibration
         exact = sqrt.([inv(J' * J)[k, k] for k in 1:p])
         @test vec(errs) ≈ exact rtol = 1e-8
+    end
+
+    @testset "_source_errors! marginalizes over blended neighbors" begin
+        # A chain of five blended sources 3 px apart plus one isolated source.
+        # With R = 5 two stamps overlap when their anchors are <= 10 px apart, so
+        # the chain's ends do not overlap each other and the middle source's group
+        # holds a non-overlapping pair, whose block must be zero.
+        psf = CircularGaussianPSF(y = 0.0, x = 0.0, fwhm = 2.9, flux = 1.0, bkg = 0.0)
+        fixed = (; fwhm = 2.9, bkg = 0.0)
+        free_names, free_idx, _ = PSF.free_params(psf, fixed)
+        p = length(free_idx)
+        prop_names = collect(keys(ConstructionBase.getproperties(psf)))
+        row_y, row_x, row_flux = findfirst(==(:y), prop_names), findfirst(==(:x), prop_names), findfirst(==(:flux), prop_names)
+        grad_col = [free_names[k] === :y ? 1 : (free_names[k] === :x ? 2 : 3) for k in 1:p]
+        ny, nx, R = 40, 70, 5
+        src = (; y = [20.1, 19.8, 20.3, 20.0, 19.9, 20.2], x = [15.0, 18.2, 20.9, 24.1, 27.0, 55.0],
+                 flux = [3000.0, 800.0, 5000.0, 1500.0, 2500.0, 2000.0])
+        n = length(src.y)
+        w = fill(1 / 120.0, ny * nx)
+        geom = stamp_geometry(Catalog{Float64}(src, psf), w, R, ny, nx)
+        stamp = StampDerivatives{Float64, Int32}(zeros(p, geom.S2, n), geom.pixels, zeros(p, n), ny * nx, p, geom.S2)
+        θ = vec(permutedims(hcat(src.y, src.x, src.flux)))
+        _fill_stamps!(stamp, psf, Val(free_names), fixed, θ, w, grad_col, geom.dy_off, geom.dx_off,
+            geom.anchor_y, geom.anchor_x, row_y, row_x, row_flux, trues(n), nothing)
+        J = dense_J(stamp) .* reshape(stamp.colnorm, 1, p * n)   # undo the equilibration
+        H = J' * J
+        idx(j) = (j - 1) * p .+ (1:p)
+        # Marginal errors of source `a` with only the sources in `grp` free.
+        group_err(a, grp) = (cols = reduce(vcat, idx.(grp)); C = inv(H[cols, cols]);
+            sqrt.(diag(C)[findfirst(==(a), grp) * p .- (p - 1:-1:0)]))
+        errs(K) = CrowdPhot._source_errors!(zeros(p, n), stamp, geom,
+            CrowdPhot.KnownWeightsCovarianceEstimator(), 1.0, 1, K)
+        e0, e1, e8 = errs(0), errs(1), errs(8)
+        exact = reshape(sqrt.(diag(inv(H))), p, n)
+
+        # `0` inverts each source's own block; the isolated source never changes.
+        @test all(e0[:, j] ≈ group_err(j, [j]) for j in 1:n)
+        @test e1[:, 6] ≈ e0[:, 6] rtol = 1e-12
+        @test e8[:, 6] ≈ exact[:, 6] rtol = 1e-8
+        # The middle source overlaps every other chain member, so its group is the
+        # whole chain and its errors are exact; the ends miss the far end's
+        # coupling through the chain and match their own group's inverse.
+        @test e8[:, 3] ≈ exact[:, 3] rtol = 1e-8
+        @test e8[:, 1] ≈ group_err(1, [1, 2, 3, 4]) rtol = 1e-8
+        @test e8[:, 5] ≈ group_err(5, [2, 3, 4, 5]) rtol = 1e-8
+        # More neighbors can only raise an error, never past the exact one, and
+        # blending here raises it well above the own-block value.
+        @test all(e0 .<= e1 .* (1 + 1e-10)) && all(e1 .<= e8 .* (1 + 1e-10))
+        @test all(e8 .<= exact .* (1 + 1e-8))
+        @test e8[3, 2] > 1.25 * e0[3, 2]
+        @test_throws "max_neighbors must be non-negative" errs(-1)
+
+        # A duplicated source is a fully degenerate pair.  Its group factorization
+        # must succeed on the ridge (in `Float32` too) rather than fall back to the
+        # own block, which would report the error of an isolated source.
+        for FT in (Float64, Float32)
+            dgeom = stamp_geometry(Catalog{FT}((; y = FT[20, 20], x = FT[20, 20], flux = FT[3000, 3000]), psf),
+                FT.(w), R, ny, nx)
+            dst = StampDerivatives{FT, Int32}(zeros(FT, p, dgeom.S2, 2), dgeom.pixels, zeros(FT, p, 2), ny * nx, p, dgeom.S2)
+            _fill_stamps!(dst, psf, Val(free_names), fixed, FT[20, 20, 3000, 20, 20, 3000], FT.(w), grad_col,
+                dgeom.dy_off, dgeom.dx_off, dgeom.anchor_y, dgeom.anchor_x, row_y, row_x, row_flux, trues(2), nothing)
+            derrs(K) = CrowdPhot._source_errors!(zeros(FT, p, 2), dst, dgeom,
+                CrowdPhot.KnownWeightsCovarianceEstimator(), one(FT), 1, K)
+            @test all(derrs(1) .> 100 .* derrs(0))
+        end
     end
 end
 

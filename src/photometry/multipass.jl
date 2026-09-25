@@ -1497,8 +1497,8 @@ rejections are permanent.
 - `prune_snr_min::Real = 3 * detect_sigma / 5`: minimum **signed** curvature
   significance, `flux * sqrt(H_ff)`.  This is proportional to but not equal to
   `flux / flux_err`: it uses the diagonal flux curvature, while the reported
-  `flux_err` inverts the full per-source block, so the two differ by the
-  flux-position covariance and this threshold runs optimistic.  Note that this is
+  `flux_err` also accounts for the flux-position covariance (and, for the
+  simultaneous fitter, blended neighbors), so this threshold runs optimistic.  Note that this is
   signed, not absolute, so it will also prune sources that resolve to have negative flux).
 - `prune_separation::Real = 1.0`: if two sources are closer than this, drop the
   one with lower SNR.
@@ -1569,9 +1569,11 @@ const _MULTIPASS_DOC_FIT_COMMON = """
 - `covariance_estimator = nothing`: an [`AbstractCovarianceEstimator`](@ref)
   used for the final per-source errors.  `nothing` selects
   [`KnownWeightsCovarianceEstimator`](@ref) when `inv_var` is given and
-  [`ReweightedCovarianceEstimator`](@ref) otherwise.  Errors invert each
-  source's own normal-matrix block, ignoring covariance with blended neighbors,
-  so they underestimate marginal errors in a crowded field.
+  [`ReweightedCovarianceEstimator`](@ref) otherwise.  The sequential fitter's
+  errors invert each source's own normal-matrix block, ignoring covariance with
+  blended neighbors, so they underestimate marginal errors in a crowded field;
+  the simultaneous fitter's are marginalized over up to `error_neighbors`
+  blended neighbors.
 - `spread_model_fwhm::Union{Nothing, Real} = nothing`: FWHM of the reference
   exponential disk for `spread_model`; `nothing` derives it from the PSF's
   effective area (see [`MultiPassPhotResult`](@ref)).

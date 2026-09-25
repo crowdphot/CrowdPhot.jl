@@ -106,7 +106,7 @@ end
     geom = stamp_geometry(catalog, w, o.R_fit, ny, nx; min_pixels = 5)
     seq = fit_pass(SequentialFitter(1, 3, false, 1e-4, 0.1, (;)), data, w, geom, catalog, TEST_PSF, plan, o,
         nothing; ny, nx, move = false)
-    sim = fit_pass(SimultaneousFitter{Float64}(:lsqr, 1, 10, 1e-4, 8, 1e-3, 10.0, 10.0, 1e-12, 1e12),
+    sim = fit_pass(SimultaneousFitter{Float64}(:lsqr, 1, 10, 1e-4, 8, 1e-3, 10.0, 10.0, 1e-12, 1e12, 8),
         data, w, geom, catalog, TEST_PSF, plan, o, 1e-3; ny, nx, move = false)
     @test seq.catalog.y == catalog.y && seq.catalog.flux == catalog.flux
     @test seq.catalog.flux_snr ≈ sim.catalog.flux_snr rtol = 1e-10
@@ -117,7 +117,7 @@ end
     # `cost_end` is the cost at the parameters the pass returns, not at the ones the
     # last linearization started from: after an accepted step it must match an
     # independent evaluation against the returned model.
-    simfit = fit_pass(SimultaneousFitter{Float64}(:lsqr, 1, 10, 1e-4, 8, 1e-3, 10.0, 10.0, 1e-12, 1e12),
+    simfit = fit_pass(SimultaneousFitter{Float64}(:lsqr, 1, 10, 1e-4, 8, 1e-3, 10.0, 10.0, 1e-12, 1e12, 8),
         data, w, geom, catalog, TEST_PSF, plan, o, 1e-3; ny, nx)
     @test simfit.stats.n_accepted == 1
     up = CrowdPhot._touched_pixels(geom.pixels, length(data))
