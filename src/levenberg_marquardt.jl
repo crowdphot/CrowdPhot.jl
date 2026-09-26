@@ -22,7 +22,9 @@ Fields:
 - `iterations::Int`: total number of Levenberg-Marquardt iterations performed
 - `λ_final::T`: damping parameter value at termination
 - `σ_final::T`: final scale estimate (NaN if not applicable)
-- `cov::M`: covariance matrix of the free parameters
+- `cov::M`: covariance matrix of the free parameters; all `NaN` when the Hessian
+  `J'WJ` at the solution is not positive definite (some parameter combination is
+  unconstrained)
 - `chisq::T`: final reduced chi-squared (cost per degree of freedom)
 """
 struct LMResult{T, V <: AbstractVector{T}, M <: AbstractMatrix{T}}
@@ -363,31 +365,36 @@ Abstract base type for covariance estimators used in Levenberg-Marquardt fits.
 """
 abstract type AbstractCovarianceEstimator end
 
-"""`KnownWeightsCovarianceEstimator()` assumes that the weights provided (e.g. via `inv_var`) are correct and returns the covariance as the inverse of the Gauss-Newton Hessian approximation.
+"""
+    KnownWeightsCovarianceEstimator()
+
+Assumes that the weights provided (e.g. via `inv_var`) are correct and returns the
+covariance as the inverse of the Gauss-Newton Hessian approximation `J'WJ`.
+
+`covariance!(::KnownWeightsCovarianceEstimator, JTJ, cost_val, dof)` reads only the
+upper triangle of `JTJ`, overwrites it with its Cholesky factor, and returns a newly
+allocated covariance matrix.  When the factorization fails, `JTJ` is singular to
+working precision (some parameter combination is unconstrained, so its variance is
+unbounded) and every entry of the returned matrix is `NaN`.
 """
 struct KnownWeightsCovarianceEstimator <: AbstractCovarianceEstimator end
 function covariance!(::KnownWeightsCovarianceEstimator, JTJ, cost_val, dof)
-    # For known weights (e.g. from inv_var), the covariance
-    # is simply the inverse of the Gauss-Newton Hessian approximation
-    cov = try
-        F = cholesky!(Symmetric(JTJ))
-        F \ I # = inv(JTJ), more stable
-    catch
-        pinv(JTJ) # fallback to pseudo-inverse if JTJ is not positive definite
-    end
-    return cov
+    # No pseudo-inverse fallback: it would report an unconstrained direction as having
+    # zero or small variance, which is worse than an obvious `NaN`.
+    F = cholesky!(Symmetric(JTJ); check = false)
+    return issuccess(F) ? inv(F) : fill!(similar(JTJ), NaN)
 end
-"""`ReweightedCovarianceEstimator()` inflates the covariance by the reduced cost per degree of freedom to account for the fact that the IRLS weights are estimated from the data and may not be correct."""
+"""
+    ReweightedCovarianceEstimator()
+
+Inflates the covariance by the reduced cost per degree of freedom to account for the
+fact that the IRLS weights are estimated from the data and may not be correct.
+Otherwise identical to [`KnownWeightsCovarianceEstimator`](@ref), including the
+overwritten `JTJ` and the all-`NaN` result when the Cholesky factorization fails.
+"""
 struct ReweightedCovarianceEstimator <: AbstractCovarianceEstimator end
 function covariance!(::ReweightedCovarianceEstimator, JTJ, cost_val, dof)
-    # For reweighted estimates, the covariance is inflated by the reduced cost per degree of freedom
-    cov = try
-        F = cholesky!(Symmetric(JTJ))
-        F \ I # = inv(JTJ), more stable
-    catch
-        pinv(JTJ) # fallback to pseudo-inverse if JTJ is not positive definite
-    end
-    return (cost_val / dof) * cov
+    return (cost_val / dof) * covariance!(KnownWeightsCovarianceEstimator(), JTJ, cost_val, dof)
 end
 
 # ---------------------------------------------------------------------------
