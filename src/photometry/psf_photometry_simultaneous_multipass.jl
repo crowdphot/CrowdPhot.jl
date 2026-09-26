@@ -452,24 +452,225 @@ function _fill_stamps!(
 end
 
 """
-    _source_errors!(errs, stamp, cov_est, cost, dof) -> errs
+    _cross_block!(B, t, V, i, j, dy, dx, R) -> B
 
-Per-source 1-sigma parameter errors from the `p x p` diagonal block of the
-normal equations, for a catalog whose Jacobian is stored as `stamp`.
+Add the `(i, j)` block of the column-equilibrated Gauss-Newton normal matrix
+`D⁻¹ J'WJ D⁻¹` into `B[:, :, t]`: the `p x p` coupling between source `i`'s
+parameters (rows) and source `j`'s (columns).  `W` is the diagonal inverse-variance
+weight matrix and `D = Diagonal(vec(colnorm))` the column equilibration matrix, so
+the matrix has a unit diagonal wherever a column has data.  The `(j, i)` block is
+the transpose.
+
+Each source's Jacobian is zero outside its stamp, so the block is a sum over the
+pixels both stamps cover:
+
+    B[k, l, t] += Σ V[k, m, i] * V[l, m′, j]
+
+where `m` and `m′` index the same image pixel in the two stamps.  With `i == j` and
+zero offset this is source `i`'s own (diagonal) block.  Used by `_overlap_pairs` to
+calculate each overlapping pair's block and `_source_errors!` for each source's own block.
+
+Stamps are the `(2R + 1)^2` footprints of [`stamp_geometry`](@ref), stored `x`-major;
+the pixel at offset `(oy, ox)` from the anchor is `m = (ox + R) * S + oy + R + 1`,
+with `S = 2R + 1`.  That pixel sits at offset `(oy - dy, ox - dx)` in `j`'s stamp, so
+the shared pixels are one contiguous run of rows per shared column.  A masked or
+off-image stamp entry has `V == 0` and drops out of the sum without a test.
+
+# Arguments
+
+- `B`: `(p, p, N)` output.  The block is *added* into slot `t`, which the caller
+  must have zeroed.
+- `t`: slot of `B` to accumulate into.
+- `V`: `StampDerivatives.values`, `(p, S^2, n)`.  `V[k, m, i]` is source `i`'s
+  derivative with respect to its parameter `k` at stamp pixel `m`, times `sqrt(w)`
+  there, divided by `colnorm[k, i]`.
+- `i`, `j`: source indices.
+- `dy`, `dx`: `j`'s anchor minus `i`'s.
+- `R`: stamp half-width.
+"""
+function _cross_block!(B::AbstractArray{FT, 3}, t, V::AbstractArray{FT, 3}, i, j, dy, dx, R) where {FT}
+    p = size(V, 1)
+    S = 2R + 1
+    cols = max(-R, dx - R):min(R, dx + R)
+    rows = max(-R, dy - R):min(R, dy + R)
+    # `@turbo` assumes non-empty ranges; stamps that do not overlap contribute nothing.
+    (isempty(cols) || isempty(rows)) && return B
+    LV.@turbo for ox in cols, oy in rows, l in 1:p, k in 1:p
+        B[k, l, t] += V[k, (ox + R) * S + oy + R + 1, i] * V[l, (ox - dx + R) * S + oy - dy + R + 1, j]
+    end
+    return B
+end
+
+"""
+The most overlapping neighbors each source keeps as candidates for its error
+group, and so the largest allowed `error_neighbors`.  Bounds the cost of the
+coupling blocks, which would otherwise be expensive for large `fit_rad`
+in a crowded field.  A source's most
+strongly coupled neighbors are typically among its closest as well, so the cap has
+minimal effect on the errors -- in Gaussian-PSF fields with ~200 overlapping neighbors
+per source, capping at 32 changed no error by more than 1e-8 relative to no cap, and
+halved the cost of the error step.
+"""
+const MAX_NEIGHBORS_ERR = 32
+
+"""
+    _overlap_pairs(stamp, anchor_y, anchor_x, cap = MAX_NEIGHBORS_ERR) -> NamedTuple
+
+Pairs of sources whose stamps overlap, with the `p x p` off-diagonal block of the
+equilibrated normal matrix `J' J` each pair contributes.
+
+Two `(2R + 1)`-wide stamps overlap when their anchors differ by at most `2R` on
+both axes, so bucketing anchors into cells `2R + 1` wide means every overlapping
+partner lies in the same cell or one of its eight neighbors.
+
+Each source keeps at most its `cap` nearest overlapping neighbors.
+
+# Returns
+
+- `B`: `(p, p, n_pairs)`, `B[:, :, t] = V_i' V_j` for the pair's first source `i`.
+- `ptr`, `nbr`, `pair`: the adjacency in compressed form.  Source `a`'s
+  neighbors are `nbr[ptr[a]:(ptr[a + 1] - 1)]`; the matching `pair` entry is `t`
+  when `a` is the pair's first source (block `B[:, :, t]`) and `-t` when it is
+  the second (block `B[:, :, t]'`).  Each block is stored once, not per direction,
+  since at high densities the blocks outnumber the sources by an order of magnitude.
+"""
+function _overlap_pairs(stamp::StampDerivatives{FT}, anchor_y, anchor_x, cap::Integer = MAX_NEIGHBORS_ERR) where {FT}
+    p, n = stamp.p, size(stamp.values, 3)
+    S = isqrt(stamp.S2)
+    R = S ÷ 2
+    n == 0 && return (; B = zeros(FT, p, p, 0), ptr = ones(Int, 1), nbr = Int32[], pair = Int32[])
+    # Cell-sorted source order: `cstart[c]:(cstart[c + 1] - 1)` indexes `order`.
+    # One empty cell of padding on every side keeps the 3x3 scan in range.
+    ymin, ymax = extrema(anchor_y)
+    xmin, xmax = extrema(anchor_x)
+    cy0 = fld(ymin, S) - 2
+    cx0 = fld(xmin, S) - 2
+    ncy = fld(ymax, S) - cy0 + 2
+    ncx = fld(xmax, S) - cx0 + 2
+    cell = [(fld(anchor_x[j], S) - cx0) * ncy + fld(anchor_y[j], S) - cy0 + 1 for j in 1:n]
+    cstart = zeros(Int, ncy * ncx + 1)
+    for c in cell
+        cstart[c + 1] += 1
+    end
+    cstart[1] = 1
+    cumsum!(cstart, cstart)
+    order = sortperm(cell)
+
+    # Call `f(i, d2)` for every source `i` whose stamp overlaps `j`'s, where `d2` is
+    # their squared anchor distance.
+    function each_overlap(f, j)
+        @inbounds for ddx in -1:1, ddy in -1:1
+            c = cell[j] + ddx * ncy + ddy
+            for q in cstart[c]:(cstart[c + 1] - 1)
+                i = order[q]
+                dy, dx = anchor_y[i] - anchor_y[j], anchor_x[i] - anchor_x[j]
+                (i != j && abs(dy) <= 2R && abs(dx) <= 2R) && f(i, dy * dy + dx * dx)
+            end
+        end
+    end
+    # `cut[j]` is the `(d2, index)` key of the last neighbor `j` keeps; `j` keeps
+    # `i` when `(d2, i) <= cut[j]`.  Sources with at most `cap` neighbors keep all.
+    cut = fill((typemax(Int), typemax(Int)), n)
+    cand = Tuple{Int, Int}[]
+    for j in 1:n
+        # Every candidate lies in the 3x3 cells around `j`, whose counts are already
+        # known, so only sources with more than `cap` of those need ranking.
+        n_near = -1
+        for ddx in -1:1, ddy in -1:1
+            c = cell[j] + ddx * ncy + ddy
+            n_near += cstart[c + 1] - cstart[c]
+        end
+        n_near > cap || continue
+        empty!(cand)
+        each_overlap((i, d2) -> push!(cand, (d2, Int(i))), j)
+        length(cand) > cap && (cut[j] = partialsort!(cand, cap))
+    end
+    ia, ib = Int32[], Int32[]
+    for j in 1:n
+        each_overlap(j) do i, d2
+            if i < j && ((d2, Int(i)) <= cut[j] || (d2, j) <= cut[i])
+                push!(ia, i)
+                push!(ib, j)
+            end
+        end
+    end
+    n_pairs = length(ia)
+    B = zeros(FT, p, p, n_pairs)
+    for t in 1:n_pairs
+        i, j = ia[t], ib[t]
+        _cross_block!(B, t, stamp.values, i, j, anchor_y[j] - anchor_y[i], anchor_x[j] - anchor_x[i], R)
+    end
+
+    ptr = zeros(Int, n + 1)
+    for t in 1:n_pairs
+        ptr[ia[t] + 1] += 1
+        ptr[ib[t] + 1] += 1
+    end
+    ptr[1] = 1
+    cumsum!(ptr, ptr)
+    nbr = Vector{Int32}(undef, 2n_pairs)
+    pair = Vector{Int32}(undef, 2n_pairs)
+    next = ptr[1:n]
+    for t in 1:n_pairs
+        i, j = ia[t], ib[t]
+        nbr[next[i]], pair[next[i]] = j, t
+        nbr[next[j]], pair[next[j]] = i, -t
+        next[i] += 1
+        next[j] += 1
+    end
+    return (; B, ptr, nbr, pair)
+end
+
+"""
+    _source_errors!(errs, stamp, geom, cov_est, cost, dof, max_neighbors, cap = MAX_NEIGHBORS_ERR) -> errs
+
+Per-source 1-sigma parameter errors that account for covariance with blended
+neighbors, for a catalog whose Jacobian is stored as `stamp`.
 
 `stamp` must already hold the derivatives at the final `θ`, filled with every
 source live (see `_fill_stamps!`): a source frozen during the fit has
-zeroed columns, and its reported errors must not inherit that.
+zeroed columns, and its reported errors must not inherit that.  `geom` supplies
+the stamp anchors (`anchor_y`, `anchor_x`) that `stamp` was filled on.
 
-Each block is `J' J` restricted to source `j`'s stamp pixels.  It is assembled
-and inverted in the column-equilibrated coordinates the stamp already stores
-(unit diagonal wherever a column has data), ridged there by `1e-12 * tr`, and
-only then unscaled by `stamp.colnorm`.
+# Method
 
-The ridge must go on the equilibrated block.  On the raw block the position
-curvatures of a bright source (`~ flux^2`) exceed its flux curvature by many
-orders of magnitude, so `1e-12 * tr` rivaled the flux diagonal and shrank the
-flux error of a 7e5-count star by 20%.
+Under a linearized Gaussian likelihood the parameter covariance is `inv(J' J)`,
+the inverse Fisher information; under the Gauss-Newton approximation the
+second-order term `Σ r ∇²m` of the χ² Hessian is dropped, leaving only `J' J` .
+Each source's marginal errors are its diagonal block of that inverse.
+Computing those blocks needs a
+factorization of the whole `pn x pn` normal matrix, for number of free parameters
+per source `p` and number of sources `n`.  Its fill-in grows
+steeply with the number of overlapping neighbors and the inversion becomes impractical.
+Instead each source gets its own small problem.
+
+Source `a` and up to `max_neighbors` of the sources whose stamps overlap its
+own, ranked by the Frobenius norm of their coupling block, form a principal
+submatrix of `J' J`, with `a` placed last.  Its Cholesky factor's last diagonal
+block `L_aa` gives the Schur complement `L_aa L_aa'`, the Gauss-Newton Hessian
+of χ² in `a`'s parameters with those neighbors marginalized out, which  `covariance!`
+subsequently inverts to give the marginal covariance of `a`'s parameters.
+This treats every source outside the group as
+fixed, so the variance is still a lower bound on the full-matrix solution `inv(J' J)` but
+is much better than the own-block variance alone.  It increases
+monotonically toward the full-matrix variance as the group grows, and the principal submatrix
+of a positive-definite `J' J` is itself positive definite, so no neighbor choice can
+break the factorization.  Measured against a full selected inverse on fields up to 145k sources
+with ~16 overlapping neighbors each, `max_neighbors = 8` came within 1% of the full-matrix variance for
+99% of sources and within 4% for 99.9%, while the own-block variance alone was low by a factor of
+up to ~20 at the first percentile.
+
+Ranking is by coupling strength, and deliberately not thresholded.  A blended
+pair's Schur complement is small, so even a weak coupling to a third source
+moves its variance by far more than the coupling itself suggests.
+
+Neighbors are chosen from each source's `cap` nearest candidates (see
+[`_overlap_pairs`](@ref)), so `max_neighbors` may not exceed `cap`.
+
+`max_neighbors = 0` skips the neighbor search and inverts each source's own
+block, ignoring its neighbors.  A group whose factorization fails (only
+possible through rounding in a nearly degenerate blend) falls back to the same
+own-block inversion for that source.
 
 `errs` is filled as `(p, n)` in the stamp's own column order, so `errs[k, j]`
 is the error on free parameter `k` (the `k`-th entry of `free_names`) of
@@ -478,33 +679,116 @@ source `j`.  Callers scatter it into whatever layout they report.
 Used by [`fit_all_stars_simultaneous_multipass`](@ref); [`fit_all_stars_multipass`](@ref)
 takes its errors from each source's own Levenberg-Marquardt normal matrix instead.
 """
-function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT},
-                         cov_est, cost, dof) where {FT}
-    p, S2 = stamp.p, stamp.S2
-    n = size(stamp.values, 3)
+function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT}, geom,
+                         cov_est, cost, dof, max_neighbors::Integer, cap::Integer = MAX_NEIGHBORS_ERR) where {FT}
+    p, n = stamp.p, size(stamp.values, 3)
     size(errs) == (p, n) ||
         throw(DimensionMismatch("`errs` must be ($p, $n); got $(size(errs))"))
-    # `covariance!` factors in place, so `blk` is rebuilt per source anyway.
-    blk = zeros(FT, p, p)
+    max_neighbors >= 0 || throw(ArgumentError("max_neighbors must be non-negative, got $max_neighbors"))
+    max_neighbors <= cap || throw(ArgumentError("max_neighbors must be at most $cap, got $max_neighbors"))
+    R = isqrt(stamp.S2) ÷ 2
+    # Everything is assembled in the column-equilibrated coordinates the stamp
+    # stores (unit diagonal wherever a column has data), and only unscaled by
+    # `stamp.colnorm` at the end.  The `1e-12 * tr` ridge must go on these
+    # equilibrated blocks: on the raw block a bright source's position Hessian entries
+    # (`~ flux^2`) exceed its flux entry by many orders of magnitude, so the
+    # ridge rivaled the flux diagonal and shrank a 7e5-count star's flux error by 20%.
+    D = zeros(FT, p, p, n)
     for j in 1:n
-        fill!(blk, zero(FT))
-        @inbounds for m in 1:S2
-            stamp.pixels[m, j] != 0 || continue
-            for k in 1:p, l in 1:p
-                blk[k, l] += stamp.values[k, m, j] * stamp.values[l, m, j]
-            end
-        end
+        _cross_block!(D, j, stamp.values, j, j, 0, 0, R)
         tr = zero(FT)
         for k in 1:p
-            tr += blk[k, k]
+            tr += D[k, k, j]
         end
         for k in 1:p
-            blk[k, k] += FT(1.0e-12) * tr
+            D[k, k, j] += max(FT(1.0e-12), eps(FT)) * tr
         end
+    end
+    # With no neighbors wanted, an empty adjacency of the same type skips the pair search.
+    g = max_neighbors > 0 ? _overlap_pairs(stamp, geom.anchor_y, geom.anchor_x, cap) :
+        (; B = zeros(FT, p, p, 0), ptr = ones(Int, n + 1), nbr = Int32[], pair = Int32[])
+    # No source can use more neighbors than it has, so size the scratch by that.
+    K = min(Int(max_neighbors), maximum(a -> g.ptr[a + 1] - g.ptr[a], 1:n; init = 0))
+    H = Matrix{FT}(undef, p * (K + 1), p * (K + 1))
+    blk = Matrix{FT}(undef, p, p)
+    Bs = zeros(FT, p, p, 1)   # a coupling block built on the spot, for pairs the cap dropped
+    group = Vector{Int32}(undef, K + 1)
+    slot = Vector{Int}(undef, K)   # adjacency slot of each chosen neighbor
+    score, rank = FT[], Int[]
+    # Copy a pair's block, as seen from the source whose adjacency slot `q` holds
+    # it, into `H` at offset `(ro, co)`.
+    function put_block!(ro, co, q)
+        t = g.pair[q]
+        @inbounds for c in 1:p, r in 1:p
+            H[ro + r, co + c] = t > 0 ? g.B[r, c, t] : g.B[c, r, -t]
+        end
+    end
+    for a in 1:n
+        lo, hi = g.ptr[a], g.ptr[a + 1] - 1
+        k = min(K, hi - lo + 1)
+        if k < hi - lo + 1
+            resize!(score, hi - lo + 1)
+            resize!(rank, hi - lo + 1)
+            for q in lo:hi
+                score[q - lo + 1] = sum(abs2, view(g.B, :, :, abs(g.pair[q])))
+            end
+            partialsortperm!(rank, score, 1:k; rev = true)
+            for u in 1:k
+                slot[u] = lo - 1 + rank[u]
+            end
+        else
+            for u in 1:k
+                slot[u] = lo - 1 + u
+            end
+        end
+        ok = false
+        if k > 0
+            m = k + 1
+            M = p * m
+            for u in 1:k
+                group[u] = g.nbr[slot[u]]
+            end
+            group[m] = a
+            # Lower triangle only: own blocks, then `a`'s row, then neighbor pairs.
+            for u in 1:m
+                H[(u - 1) * p .+ (1:p), (u - 1) * p .+ (1:p)] .= view(D, :, :, group[u])
+            end
+            for u in 1:k
+                put_block!((m - 1) * p, (u - 1) * p, slot[u])
+            end
+            for u in 1:k, v in (u + 1):k
+                gu, gv = group[u], group[v]
+                q = findfirst(==(gu), view(g.nbr, g.ptr[gv]:(g.ptr[gv + 1] - 1)))
+                if q === nothing
+                    # Not in the pair list: either the stamps do not overlap, and
+                    # `_cross_block!` returns zero, or the cap dropped the pair.
+                    fill!(Bs, zero(FT))
+                    _cross_block!(Bs, 1, stamp.values, gv, gu, geom.anchor_y[gu] - geom.anchor_y[gv],
+                        geom.anchor_x[gu] - geom.anchor_x[gv], R)
+                    H[(v - 1) * p .+ (1:p), (u - 1) * p .+ (1:p)] .= view(Bs, :, :, 1)
+                else
+                    put_block!((v - 1) * p, (u - 1) * p, g.ptr[gv] - 1 + q)
+                end
+            end
+            F = cholesky!(Symmetric(view(H, 1:M, 1:M), :L); check = false)
+            if issuccess(F)
+                # `a`'s Schur complement `L_aa L_aa'`, from the lower-triangular last block.
+                L = view(H, (M - p + 1):M, (M - p + 1):M)
+                for c in 1:p, r in 1:p
+                    acc = zero(FT)
+                    for s in 1:min(r, c)
+                        acc += L[r, s] * L[c, s]
+                    end
+                    blk[r, c] = acc
+                end
+                ok = true
+            end
+        end
+        ok || copyto!(blk, view(D, :, :, a))
         # `inv(D B D) = D⁻¹ inv(B) D⁻¹`, and both estimators are `inv` times a scalar.
         cov = covariance!(cov_est, blk, cost, dof)
-        for k in 1:p
-            errs[k, j] = sqrt(max(zero(FT), cov[k, k])) / stamp.colnorm[k, j]
+        for c in 1:p
+            errs[c, a] = sqrt(max(zero(FT), cov[c, c])) / stamp.colnorm[c, a]
         end
     end
     return errs
@@ -563,6 +847,7 @@ struct SimultaneousFitter{FT} <: AbstractMultipassFitter
     lambda_down::FT
     lambda_min::FT
     lambda_max::FT
+    error_neighbors::Int
 end
 
 initial_fit_state(fitter::SimultaneousFitter, ::Type{FT}) where {FT} = FT(fitter.lambda_init)
@@ -593,7 +878,8 @@ function catalog_from_theta(catalog::Catalog{FT}, fit, plan::FitPlan) where {FT}
             v = theta[base + k]
             nm === :y ? (y[j] = v) : nm === :x ? (x[j] = v) : (flux[j] = v)
         end
-        # Signed curvature significance `flux * sqrt(H_ff)`: column equilibration
+        # Signed significance `flux * sqrt(H_ff)`, `H_ff` the flux diagonal entry of
+        # the Hessian: column equilibration
         # already computed `colnorm[k_flux, j] == sqrt(H_ff)`, so pruning needs
         # no extra linear algebra.
         snr[j] = theta[base + plan.k_flux] * colnorm[plan.k_flux, j]
@@ -795,9 +1081,9 @@ end
 """
     source_errors(fitter::SimultaneousFitter, fit, psf, plan, cov_est) -> NamedTuple
 
-Per-source errors from the `p x p` diagonal blocks of the normal matrix at the
-final `theta` (see `_source_errors!`), with the global `cost / dof` for
-estimators that rescale by it.
+Per-source errors from the normal matrix at the final `theta`, each marginalized
+over up to `fitter.error_neighbors` blended neighbors (see `_source_errors!`),
+with the global `cost / dof` for estimators that rescale by it.
 
 The stamps are refilled at `fit.theta` first, for two reasons.
 `freeze_positions` may have zeroed the position columns during the fit, and the
@@ -805,7 +1091,7 @@ reported position errors must not inherit that.  The stamp refill also allows th
 errors to reflect the parameters the final pass returned, since `fit_pass` leaves `stamp`
 at the last linearization's, one accepted step behind.
 """
-function source_errors(::SimultaneousFitter, fit, psf, plan::FitPlan, cov_est)
+function source_errors(fitter::SimultaneousFitter, fit, psf, plan::FitPlan, cov_est)
     FT = eltype(fit.theta)
     n_src = length(fit.catalog)
     p = plan.p
@@ -817,7 +1103,7 @@ function source_errors(::SimultaneousFitter, fit, psf, plan::FitPlan, cov_est)
     x_err = zeros(FT, n_src)
     flux_err = zeros(FT, n_src)
     errs = Matrix{FT}(undef, p, n_src)
-    _source_errors!(errs, stamp, cov_est, fit.cost, fit.dof)
+    _source_errors!(errs, stamp, fit.geom, cov_est, fit.cost, fit.dof, fitter.error_neighbors)
     for j in 1:n_src, k in 1:p
         plan.grad_col[k] == 1 ? (y_err[j] = errs[k, j]) :
             plan.grad_col[k] == 2 ? (x_err[j] = errs[k, j]) : (flux_err[j] = errs[k, j])
@@ -879,6 +1165,20 @@ $(_MULTIPASS_DOC_FIT_COMMON)
 - `λ_up::Real = 10.0`: damping increase factor on a failed trial.
 - `λ_down::Real = 10.0`: damping decrease factor on a successful trial.
 - `λ_min::Real = 1.0e-12`, `λ_max::Real = 1.0e12`: damping bounds.
+- `error_neighbors::Integer = 8`: the most overlapping neighbors each source's
+  reported errors are marginalized over.  Each source's errors come from a small
+  problem made of itself and its `error_neighbors` most strongly coupled
+  neighbors (defined as having overlapping fitting regions based on `fit_rad`),
+  so they account for the flux and position covariances with blended
+  neighbors.  Only each source's `CrowdPhot.MAX_NEIGHBORS_ERR` (32) nearest
+  overlapping neighbors are considered, which bounds the cost when using large
+  `fit_rad` in a crowded field, and `error_neighbors` may not exceed it.
+  The errors approach those of the full linearized covariance
+  `inv(J' J)` as `error_neighbors` grows, but large values are typically not
+  necessary; `8` is within 1% for 99% of sources even
+  with ~16 overlapping neighbors per source.  `0` ignores neighbors entirely,
+  which underestimates errors of blended sources, relative to that full
+  covariance, by up to an order of magnitude.
 
 In `pass_history`, `n_lin` counts linearizations, `n_trials` damping trials and
 `n_accepted` accepted trials; `lambda_start` / `lambda_end` bracket the
@@ -923,6 +1223,7 @@ function fit_all_stars_simultaneous_multipass(
         λ_down::Real = 10.0,
         λ_min::Real = 1.0e-12,
         λ_max::Real = 1.0e12,
+        error_neighbors::Integer = 8,
         kws...,
     ) where {T}
     FT = float(T)
@@ -930,9 +1231,11 @@ function fit_all_stars_simultaneous_multipass(
     linear_iterations > 0 || throw(ArgumentError("linear_iterations must be positive"))
     linear_tol > 0 || throw(ArgumentError("linear_tol must be positive"))
     max_damping_trials > 0 || throw(ArgumentError("max_damping_trials must be positive"))
+    0 <= error_neighbors <= MAX_NEIGHBORS_ERR ||
+        throw(ArgumentError("error_neighbors must be between 0 and $MAX_NEIGHBORS_ERR, got $error_neighbors"))
     solver in (:lsqr, :lsmr) || throw(ArgumentError("solver must be :lsqr or :lsmr, got $(repr(solver))"))
     fitter = SimultaneousFitter{FT}(solver, Int(linearizations_per_pass), Int(linear_iterations),
-        linear_tol, Int(max_damping_trials), λ_init, λ_up, λ_down, λ_min, λ_max)
+        linear_tol, Int(max_damping_trials), λ_init, λ_up, λ_down, λ_min, λ_max, Int(error_neighbors))
     return _fit_all_stars_multipass(fitter, image, psf, sources, fit_rad; kws...)
 end
 

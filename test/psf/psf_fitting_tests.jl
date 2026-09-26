@@ -1,7 +1,7 @@
 using CrowdPhot
 using CrowdPhot.PSF
 using CrowdPhot.PSF: free_params, model_from_vector, _has_hessian, _has_deriv, fit_star
-using CrowdPhot: TukeyLoss, weight, FixedScale, LMProblem, lm_irls
+using CrowdPhot: TukeyLoss, weight, FixedScale, LMProblem, lm_irls, covariance!
 using Distributions: Poisson
 import LossFunctions
 using LinearAlgebra: diag
@@ -181,6 +181,20 @@ end
     @test result.converged
     @test result.minimizer ≈ [2.0, 1.0] rtol = 1.0e-8
     @test result.minimum < 1.0e-18
+end
+
+@testset "covariance! returns NaN when the Cholesky fails" begin
+    # A parameter with zero derivative everywhere (e.g. position at zero flux) has
+    # unbounded variance; a pseudo-inverse would report it as 0.
+    Z = [4.0 0; 0 0]
+    @test all(isnan, covariance!(KnownWeightsCovarianceEstimator(), copy(Z), 1.0, 1))
+    # Indefinite, and singular in its upper-left block.
+    A = [4.0 2 0; 2 1 0; 0 0 -1]
+    @test all(isnan, covariance!(KnownWeightsCovarianceEstimator(), copy(A), 2.0, 1))
+    @test all(isnan, covariance!(ReweightedCovarianceEstimator(), copy(A), 2.0, 1))
+    P = [4.0 1 0; 1 3 0.5; 0 0.5 2]
+    @test covariance!(KnownWeightsCovarianceEstimator(), copy(P), 1.0, 1) ≈ inv(P)
+    @test covariance!(ReweightedCovarianceEstimator(), copy(P), 3.0, 2) ≈ 1.5 .* inv(P)
 end
 
 @testset "lm_irls IRLS weight reset threshold" begin

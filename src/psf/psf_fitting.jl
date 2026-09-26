@@ -200,6 +200,9 @@ the covariance is simply the inverse of this Hessian approximation. Use
 However, when IRLS reweighting is used and the weights are estimated from the data,
 the covariance is inflated by the reduced cost per degree of freedom to account for
 uncertainty in the weights. In this case, use [`ReweightedCovarianceEstimator`](@ref ReweightedCovarianceEstimator).
+With either estimator the covariance is all `NaN` when the Hessian at the solution is
+not positive definite, i.e. some parameter combination is unconstrained (for example
+a free position when the flux is zero, or a stamp with no weighted pixels).
 
 # Damping Strategies
 - [`MarquardtDamping`](@ref CrowdPhot.MarquardtDamping): diagonal entries are scaled by `max(A[i, i], min_diagonal)` to
