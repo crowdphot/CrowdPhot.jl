@@ -472,7 +472,12 @@ end
         @test all(e8 .<= exact .* (1 + 1e-8))
         @test e8[3, 2] > 1.25 * e0[3, 2]
         @test_throws "max_neighbors must be non-negative" errs(-1)
-        @test_throws "max_neighbors must be at most" errs(CrowdPhot.MAX_NEIGHBORS + 1)
+        @test_throws "max_neighbors must be at most" errs(CrowdPhot.MAX_NEIGHBORS_ERR + 1)
+        # Stamps that do not overlap contribute nothing
+        Bz = zeros(p, p, 1)
+        CrowdPhot._cross_block!(Bz, 1, stamp.values, 1, 2, 0, 2R + 1, R)
+        CrowdPhot._cross_block!(Bz, 1, stamp.values, 1, 2, -(2R + 1), 0, R)
+        @test all(iszero, Bz)
 
         # A duplicated source is a fully degenerate pair.  Its group factorization
         # must succeed on the ridge (in `Float32` too) rather than fall back to the
@@ -921,7 +926,7 @@ end
     @test_throws "solver must be :lsqr or :lsmr" fit_all_stars_simultaneous_multipass(
         img, TEST_PSF, 3.0; fixed = TEST_FIXED, solver = :cg)
     @test_throws "error_neighbors must be between 0 and" fit_all_stars_simultaneous_multipass(
-        img, TEST_PSF, 3.0; fixed = TEST_FIXED, error_neighbors = CrowdPhot.MAX_NEIGHBORS + 1)
+        img, TEST_PSF, 3.0; fixed = TEST_FIXED, error_neighbors = CrowdPhot.MAX_NEIGHBORS_ERR + 1)
     # Only (y, x, flux) may be free; `bkg` is pinned automatically.
     @test_throws "fits only (y, x, flux)" fit_all_stars_simultaneous_multipass(
         img, TEST_PSF, 3.0)

@@ -454,41 +454,49 @@ end
 """
     _cross_block!(B, t, V, i, j, dy, dx, R) -> B
 
-Add `V_i' V_j`, summed over the pixels the stamps of sources `i` and `j` share,
-into `B[:, :, t]`.  `V` is `StampDerivatives.values` and `(dy, dx)` is `j`'s
-anchor minus `i`'s.  Stamps are the `(2R + 1)^2` footprints of
-[`stamp_geometry`](@ref), stored `x`-major (`m = (dx + R) * S + dy + R + 1`), so
-the shared pixels are one contiguous run of rows per shared column.  With
-`i == j` and zero offset this is source `i`'s own block of `J' J`.
+Add the `(i, j)` block of the column-equilibrated Gauss-Newton normal matrix
+`D⁻¹ J'WJ D⁻¹` into `B[:, :, t]`: the `p x p` coupling between source `i`'s
+parameters (rows) and source `j`'s (columns).  `W` is the diagonal inverse-variance
+weight matrix and `D = Diagonal(vec(colnorm))` the column equilibration matrix, so
+the matrix has a unit diagonal wherever a column has data.  The `(j, i)` block is
+the transpose.
 
-A masked stamp entry has `V == 0`, so it drops out of the sum without a test.
+Each source's Jacobian is zero outside its stamp, so the block is a sum over the
+pixels both stamps cover:
+
+    B[k, l, t] += Σ V[k, m, i] * V[l, m′, j]
+
+where `m` and `m′` index the same image pixel in the two stamps.  With `i == j` and
+zero offset this is source `i`'s own (diagonal) block.  Used by `_overlap_pairs` to
+calculate each overlapping pair's block and `_source_errors!` for each source's own block.
+
+Stamps are the `(2R + 1)^2` footprints of [`stamp_geometry`](@ref), stored `x`-major;
+the pixel at offset `(oy, ox)` from the anchor is `m = (ox + R) * S + oy + R + 1`,
+with `S = 2R + 1`.  That pixel sits at offset `(oy - dy, ox - dx)` in `j`'s stamp, so
+the shared pixels are one contiguous run of rows per shared column.  A masked or
+off-image stamp entry has `V == 0` and drops out of the sum without a test.
+
+# Arguments
+
+- `B`: `(p, p, N)` output.  The block is *added* into slot `t`, which the caller
+  must have zeroed.
+- `t`: slot of `B` to accumulate into.
+- `V`: `StampDerivatives.values`, `(p, S^2, n)`.  `V[k, m, i]` is source `i`'s
+  derivative with respect to its parameter `k` at stamp pixel `m`, times `sqrt(w)`
+  there, divided by `colnorm[k, i]`.
+- `i`, `j`: source indices.
+- `dy`, `dx`: `j`'s anchor minus `i`'s.
+- `R`: stamp half-width.
 """
 function _cross_block!(B::AbstractArray{FT, 3}, t, V::AbstractArray{FT, 3}, i, j, dy, dx, R) where {FT}
     p = size(V, 1)
     S = 2R + 1
-    @inbounds for ox in max(-R, dx - R):min(R, dx + R)
-        mi0 = (ox + R) * S + R + 1
-        mj0 = (ox - dx + R) * S + R - dy + 1
-        rows = max(-R, dy - R):min(R, dy + R)
-        if p == 3
-            # Nine scalar accumulators: `B[k, l, t] +=` in the loop would store
-            # through memory on every pixel.
-            b11 = b21 = b31 = b12 = b22 = b32 = b13 = b23 = b33 = zero(FT)
-            @simd for oy in rows
-                u1, u2, u3 = V[1, mi0 + oy, i], V[2, mi0 + oy, i], V[3, mi0 + oy, i]
-                v1, v2, v3 = V[1, mj0 + oy, j], V[2, mj0 + oy, j], V[3, mj0 + oy, j]
-                b11 += u1 * v1; b21 += u2 * v1; b31 += u3 * v1
-                b12 += u1 * v2; b22 += u2 * v2; b32 += u3 * v2
-                b13 += u1 * v3; b23 += u2 * v3; b33 += u3 * v3
-            end
-            B[1, 1, t] += b11; B[2, 1, t] += b21; B[3, 1, t] += b31
-            B[1, 2, t] += b12; B[2, 2, t] += b22; B[3, 2, t] += b32
-            B[1, 3, t] += b13; B[2, 3, t] += b23; B[3, 3, t] += b33
-        else
-            for oy in rows, l in 1:p, k in 1:p
-                B[k, l, t] += V[k, mi0 + oy, i] * V[l, mj0 + oy, j]
-            end
-        end
+    cols = max(-R, dx - R):min(R, dx + R)
+    rows = max(-R, dy - R):min(R, dy + R)
+    # `@turbo` assumes non-empty ranges; stamps that do not overlap contribute nothing.
+    (isempty(cols) || isempty(rows)) && return B
+    LV.@turbo for ox in cols, oy in rows, l in 1:p, k in 1:p
+        B[k, l, t] += V[k, (ox + R) * S + oy + R + 1, i] * V[l, (ox - dx + R) * S + oy - dy + R + 1, j]
     end
     return B
 end
@@ -639,7 +647,7 @@ Instead each source gets its own small problem.
 Source `a` and up to `max_neighbors` of the sources whose stamps overlap its
 own, ranked by the Frobenius norm of their coupling block, form a principal
 submatrix of `J' J`, with `a` placed last.  Its Cholesky factor's last diagonal
-block `L_aa` gives the Schur complement `L_aa L_aa'`, the Gauss-Newton curvature
+block `L_aa` gives the Schur complement `L_aa L_aa'`, the Gauss-Newton Hessian
 of χ² in `a`'s parameters with those neighbors marginalized out, which  `covariance!`
 subsequently inverts to give the marginal covariance of `a`'s parameters.
 This treats every source outside the group as
@@ -682,8 +690,8 @@ function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT}, 
     # Everything is assembled in the column-equilibrated coordinates the stamp
     # stores (unit diagonal wherever a column has data), and only unscaled by
     # `stamp.colnorm` at the end.  The `1e-12 * tr` ridge must go on these
-    # equilibrated blocks: on the raw block a bright source's position curvatures
-    # (`~ flux^2`) exceed its flux curvature by many orders of magnitude, so the
+    # equilibrated blocks: on the raw block a bright source's position Hessian entries
+    # (`~ flux^2`) exceed its flux entry by many orders of magnitude, so the
     # ridge rivaled the flux diagonal and shrank a 7e5-count star's flux error by 20%.
     D = zeros(FT, p, p, n)
     for j in 1:n
@@ -870,7 +878,8 @@ function catalog_from_theta(catalog::Catalog{FT}, fit, plan::FitPlan) where {FT}
             v = theta[base + k]
             nm === :y ? (y[j] = v) : nm === :x ? (x[j] = v) : (flux[j] = v)
         end
-        # Signed curvature significance `flux * sqrt(H_ff)`: column equilibration
+        # Signed significance `flux * sqrt(H_ff)`, `H_ff` the flux diagonal entry of
+        # the Hessian: column equilibration
         # already computed `colnorm[k_flux, j] == sqrt(H_ff)`, so pruning needs
         # no extra linear algebra.
         snr[j] = theta[base + plan.k_flux] * colnorm[plan.k_flux, j]

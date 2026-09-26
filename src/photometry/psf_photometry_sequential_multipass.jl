@@ -68,7 +68,7 @@ function _render_unit!(buf, psf, plan::FitPlan, yj, xj, ay::Int, ax::Int, R::Int
 end
 
 # Add `coef` times a unit render into `model` and take it out of `resid`, in
-# lockstep, and return the flux curvature `H_ff = sum(w * u^2)` over the fitting
+# lockstep, and return the Hessian's flux diagonal entry `H_ff = sum(w * u^2)` over the fitting
 # box `anchor +- R_fit` -- the same `colnorm` the simultaneous fitter's flux
 # column carries, so both fitters prune on the same `flux * sqrt(H_ff)`.
 function _scatter_source!(resid, model, buf, coef, w, ay::Int, ax::Int, R::Int, R_fit::Int,

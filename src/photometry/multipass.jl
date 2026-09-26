@@ -562,11 +562,12 @@ a prune produces a *new* catalog rather than compacting one in place.
 - `bkg`: current local pedestal, fit per source over its fitting box on top of
   the global background.  Always zero unless the fitter fits it (only
   [`fit_all_stars_multipass`](@ref) can); never part of the rendered model.
-- `flux_snr`: signed curvature significance `flux * sqrt(H_ff)`, with `H_ff`
-  from the last linearization's stamp fill and flux from after its step,
+- `flux_snr`: signed significance `flux * sqrt(H_ff)`, with `H_ff` the flux
+  diagonal entry of the source's Hessian, from the last linearization's stamp
+  fill and flux from after its step,
   which is what [`prune_mask`](@ref) cuts on.  `NaN` until a fit
-  has run.  Deliberately not `flux / flux_err`: it uses the diagonal flux
-  curvature rather than the inverted per-source block, so it ignores the
+  has run.  Deliberately not `flux / flux_err`: it uses only the Hessian's flux
+  diagonal entry rather than the inverted per-source block, so it ignores the
   flux-position covariance and runs optimistic.
 - `pass`: pass on which each source was detected (`0` for warm-start sources).
 - `lambda`: the LM damping factor each source's last fit ended at, `NaN` before
@@ -1494,12 +1495,13 @@ rejections are permanent.
 ## Pruning
 
 - `prune::Bool = true`: drop unreliable sources from the catalog after each fit.
-- `prune_snr_min::Real = 3 * detect_sigma / 5`: minimum **signed** curvature
-  significance, `flux * sqrt(H_ff)`.  This is proportional to but not equal to
-  `flux / flux_err`: it uses the diagonal flux curvature, while the reported
-  `flux_err` also accounts for the flux-position covariance (and, for the
-  simultaneous fitter, blended neighbors), so this threshold runs optimistic.  Note that this is
-  signed, not absolute, so it will also prune sources that resolve to have negative flux).
+- `prune_snr_min::Real = 3 * detect_sigma / 5`: minimum **signed**
+  significance, `flux * sqrt(H_ff)`, with `H_ff` the flux diagonal entry of the Hessian.
+  This is proportional to but not equal to
+  `flux / flux_err`: it uses only the Hessian's flux diagonal entry, so this threshold
+  runs optimistic. Note that the final `flux_err` reported by the fitter uses a more
+  complete error accounting. This is signed, not absolute, so it will also prune sources
+  that fit with negative flux.
 - `prune_separation::Real = 1.0`: if two sources are closer than this, drop the
   one with lower SNR.
 
@@ -1571,8 +1573,8 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   [`KnownWeightsCovarianceEstimator`](@ref) when `inv_var` is given and
   [`ReweightedCovarianceEstimator`](@ref) otherwise.  The sequential fitter's
   errors invert each source's own normal-matrix block, ignoring covariance with
-  blended neighbors, so they underestimate marginal errors in a crowded field;
-  the simultaneous fitter's are marginalized over up to `error_neighbors`
+  blended neighbors, so they underestimate marginal errors in a crowded field.
+  The simultaneous fitter's errors are marginalized over up to `error_neighbors`
   blended neighbors.
 - `spread_model_fwhm::Union{Nothing, Real} = nothing`: FWHM of the reference
   exponential disk for `spread_model`; `nothing` derives it from the PSF's
