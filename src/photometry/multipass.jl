@@ -835,16 +835,15 @@ end
 Estimate the background level, RMS, weight maps, and detection residual for one
 pass, from `image - model`.
 
-The level and the RMS want different mesh scales, so they come from two
-`Background2D` calls; the level call's struct is returned with the RMS call's
-map written into it, so its `box_size` and `mesh_background_rms` describe the
-*level* mesh only.  The coarse → fine level schedule (`pass <= coarse_passes`
+When the level and RMS meshes are the same size (every fine pass under the
+defaults), one `Background2D` call gives both maps; otherwise each comes from its
+own call.  Both take the RMS about the `bkg_estimator` location.  The coarse →
+fine level schedule (`pass <= coarse_passes`
 uses the coarse mesh) lives here, so it is one branch in one function rather
 than a condition threaded through the pass body.
 
 # Returns
 
-- `result`: the `Background2D`, for the caller's result.
 - `background`, `rms`: full-resolution level and RMS maps.
 - `detect_inv_var`: `1 / rms^2`, zeroed wherever `o.fixed_inv_var` is zero,
   negative or non-finite.  Background-only and smooth; never source-inclusive.
@@ -860,10 +859,15 @@ function estimate_background_multipass(image::AbstractMatrix, model::AbstractMat
     coarse = pass <= o.bkg_coarse_passes
     box = coarse ? o.bkg_box_size_coarse : o.bkg_box_size
     common = merge((; mask = o.bkg_mask, coverage_mask = o.coverage_mask), o.bkg_kws)
-    level = Background2D(work, box; estimator = o.bkg_estimator, common...)
-    rmsb = Background2D(work, o.bkg_rms_box_size; rms_estimator = o.bkg_rms_estimator, common...)
-    level.background_rms .= rmsb.background_rms
-    background, rms = level.background, level.background_rms
+    level = Background2D(work, box; estimator = o.bkg_estimator, rms_estimator = o.bkg_rms_estimator, common...)
+    # One mesh serves both maps when the scales agree, which is every fine pass by default.
+    rms = if o.bkg_rms_box_size == box
+        level.background_rms
+    else
+        Background2D(work, o.bkg_rms_box_size; estimator = o.bkg_estimator,
+            rms_estimator = o.bkg_rms_estimator, common...).background_rms
+    end
+    background = level.background
 
     fx = o.fixed_inv_var
     detect_inv_var = Matrix{FT}(undef, size(background))
@@ -887,7 +891,7 @@ function estimate_background_multipass(image::AbstractMatrix, model::AbstractMat
     # keeps the detection stream identical to a full re-derivation.
     resid = work
     @. resid = FT(image) - background - model
-    return (; result = level, background, rms, detect_inv_var,
+    return (; background, rms, detect_inv_var,
               fit_inv_var = fx === nothing ? detect_inv_var : fx, resid, coarse, box)
 end
 
@@ -1317,9 +1321,6 @@ const _MULTIPASS_DOC_ARGUMENTS = """
 const _MULTIPASS_DOC_PIPELINE = """
 ## Background
 
-The background level and the background RMS want different mesh scales, so they
-are estimated by two separate [`Background2D`](@ref) calls.
-
 - `bkg_box_size::Integer = 20`: mesh size for the background *level* once the
   model is good enough to trust a fine mesh.
 - `bkg_box_size_coarse::Integer = 8 * bkg_box_size`: mesh size for the level
@@ -1632,12 +1633,9 @@ A `NamedTuple`:
   *normalized* quantity is model error, structure only in the raw one is not.
   Which comparison each statistic takes is tabulated under "PSF-normalized
   statistics" in the Centroid Refinement and Morphology manual page.
-- `background::Background2D`: the final background model.  Its `background` comes
-  from a `bkg_box_size` mesh and its `background_rms` from a separate
-  `bkg_rms_box_size` mesh, overwritten into the same struct.  The two
-  full-resolution maps are the usable products; the struct's `box_size` and
-  `mesh_background_rms` describe only the level mesh, so do not read them as
-  metadata for the RMS map.
+- `background::NamedTuple`: the final pass's full-resolution maps,
+  `(; background, background_rms)`, from the `bkg_box_size` and
+  `bkg_rms_box_size` meshes.
 - `detection::MatchedFilterResult`: the result of the last pass that actually
   ran detection.  The terminal pass skips detection, so this is normally from the
   pass before it.
@@ -2094,7 +2092,7 @@ function _fit_all_stars_multipass(
         phot = MultiPassPhotResult(FT[], FT[], FT[], FT[], FT[], FT[], FT[], FT[],
             FT[], FT[], FT[], FT[], FT[], FT[], FT[],
             n_failed, failure_msgs, residual, NamedTuple[])
-        return (; phot, background = bkg.result, detection = mfr,
+        return (; phot, background = (; background = bkg.background, background_rms = bkg.rms), detection = mfr,
                   pass_number = Int[], n_detection_passes, converged,
                   n_pruned = length(disc), pass_history = history,
                   t_setup, t_finalize = time() - t_finalize_start)
@@ -2108,7 +2106,7 @@ function _fit_all_stars_multipass(
         _trace_finalize(t_finalize)
         _trace_summary(history, converged, criterion, t_setup, t_finalize)
     end
-    return (; phot, background = bkg.result, detection = mfr,
+    return (; phot, background = (; background = bkg.background, background_rms = bkg.rms), detection = mfr,
               pass_number = copy(catalog.pass), n_detection_passes,
               converged, n_pruned = length(disc), pass_history = history, t_setup, t_finalize)
 end

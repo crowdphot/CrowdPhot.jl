@@ -1018,7 +1018,8 @@ end
     @test isempty(rb.phot.y)
     @test isempty(rb.phot.morphology)
     @test size(rb.phot.residual) == size(blank)
-    @test rb.background isa CrowdPhot.Background2D
+    @test keys(rb.background) == (:background, :background_rms)
+    @test size(rb.background.background) == size(rb.background.background_rms) == size(blank)
     # An empty catalog goes through `empty_pass_stats`, which must offer the same
     # `fit_timing` keys or `pass_history` is heterogeneous within a run.
     @test all(h -> keys(h.fit_timing) == (:setup, :stamps, :render, :solve),
