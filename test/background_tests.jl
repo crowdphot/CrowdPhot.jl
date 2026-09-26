@@ -3,7 +3,7 @@ using CrowdPhot
 using CrowdPhot.Background
 using CrowdPhot.Background: _catmull_rom, _catmull_rom_weights, _bicubic_zoom, _fill_nans!
 using StableRNGs: StableRNG
-using Statistics: mean, std
+using Statistics: mean, median, std
 
 # ─── Shared fixture ────────────────────────────────────────────────────────────
 const _FLAT100  = fill(100.0, 32, 32)
@@ -462,4 +462,55 @@ end
                                      read_noise = 2.0, gain = 1.0)
         @test mean(img0) ≈ 100.0 rtol = 0.05
     end
+end
+
+# ─── Background covariance ─────────────────────────────────────────────────────
+@testset "Background covariance" begin
+    BG = CrowdPhot.Background
+    # Separable Gaussian smoothing with a unit-L2 kernel, so unit white noise in gives a
+    # unit-variance field whose covariance is `exp(-|Δ|² / 4σ²)`.
+    function smooth_field(rng, n, σ)
+        R = ceil(Int, 4σ)
+        k = [exp(-t^2 / (2σ^2)) for t in -R:R]
+        k ./= sqrt(sum(abs2, k))
+        z = randn(rng, n, n)
+        tmp = zeros(n, n); out = zeros(n, n)
+        for x in 1:n, y in 1:n, t in -R:R
+            tmp[y, x] += k[t + R + 1] * z[mod1(y + t, n), x]
+        end
+        for x in 1:n, y in 1:n, t in -R:R
+            out[y, x] += k[t + R + 1] * tmp[y, mod1(x + t, n)]
+        end
+        return out
+    end
+    L, σp, n, noise = 6, 1.1, 400, 5.0
+    acf(y, x) = [exp(-(dy^2 + dx^2) / (4σp^2)) for dy in -L:L, dx in -L:L]
+    iv = fill(1 / noise^2, n, n)
+
+    rng = StableRNG(1)
+    white = noise .* randn(rng, n, n)
+    bw = BG._background_covariance(white, trues(n, n), iv, 20, L, acf)
+    @test size(bw.a) == (20, 20)
+    # White noise has no excess covariance: a few percent of the noise variance at most.
+    @test median(bw.a) < 0.01 * noise^2
+    @test median(bw.b) < 0.01 * noise^2
+    @test all(iszero, BG._sigma_b_lags(bw, 1, 1)) == (iszero(bw.a[1, 1]) && iszero(bw.b[1, 1]))
+
+    atrue, btrue, ℓtrue = 9.0, 4.0, 8.0
+    img = white .+ sqrt(atrue) .* smooth_field(rng, n, σp) .+ sqrt(btrue) .* smooth_field(rng, n, ℓtrue / sqrt(2))
+    bc = BG._background_covariance(img, trues(n, n), iv, 20, L, acf)
+    @test median(bc.a) ≈ atrue rtol = 0.1
+    @test median(bc.b) ≈ btrue rtol = 0.25
+    @test median(bc.ell) == ℓtrue
+    T = BG._sigma_b_lags(bc, 205, 105)
+    @test size(T) == (2L + 1, 2L + 1)
+    ci, cj = 11, 6
+    @test T[L + 1, L + 1] ≈ bc.a[ci, cj] + bc.b[ci, cj]
+    @test T ≈ reverse(T)
+
+    # Masked pixels are ignored: masking half the image leaves the estimate in the other half.
+    valid = trues(n, n); valid[:, 1:200] .= false
+    bm = BG._background_covariance(img, valid, iv, 20, L, acf)
+    @test all(iszero, bm.a[:, 1:9]) && all(iszero, bm.b[:, 1:9])
+    @test median(bm.a[:, 12:end]) ≈ atrue rtol = 0.15
 end

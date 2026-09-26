@@ -301,16 +301,17 @@ function _trace_sweep(pass, sweep, cost, cost_after, n_fits, n_iter)
 end
 
 """
-    source_errors(fitter::SequentialFitter, fit, psf, plan, cov_est) -> NamedTuple
+    source_errors(fitter::SequentialFitter, fit, psf, plan) -> NamedTuple
 
 Per-source errors from each source's own LM normal matrix, evaluated at the
 final parameters against the final residual of every other source: one
 zero-iteration [`fit_star`](@ref CrowdPhot.PSF.fit_star) per source, which
 builds the normal matrix at the incoming parameters and inverts it without
-moving anything.  `cov_est` rescales by that source's own `cost / dof` where it
-rescales at all.  IRLS reweighting from the sweeps is not reapplied.
+moving anything.  The weights are taken as known
+([`KnownWeightsCovarianceEstimator`](@ref)).  IRLS reweighting from the sweeps is
+not reapplied.
 """
-function source_errors(fitter::SequentialFitter, fit, psf, plan::FitPlan, cov_est)
+function source_errors(fitter::SequentialFitter, fit, psf, plan::FitPlan)
     catalog = fit.catalog
     FT = eltype(catalog.y)
     n = length(catalog)
@@ -334,7 +335,7 @@ function source_errors(fitter::SequentialFitter, fit, psf, plan::FitPlan, cov_es
         m0 = ConstructionBase.setproperties(psf, merge((; y = catalog.y[j], x = catalog.x[j],
             flux = catalog.flux[j], bkg = catalog.bkg[j]), fit_fixed))
         _, res = PSF.fit_star(m0, resid_mat, inds; fixed = fit_fixed, inv_var = w_mat,
-            max_iter = 0, covariance_estimator = cov_est)
+            max_iter = 0, covariance_estimator = KnownWeightsCovarianceEstimator())
         cov = res.cov
         k_y === nothing || (y_err[j] = sqrt(max(zero(FT), cov[k_y, k_y])))
         k_x === nothing || (x_err[j] = sqrt(max(zero(FT), cov[k_x, k_x])))
@@ -344,6 +345,30 @@ function source_errors(fitter::SequentialFitter, fit, psf, plan::FitPlan, cov_es
     end
     return (; y_err, x_err, flux_err, bkg_err)
 end
+
+function _finalize_derivatives!(Jt::AbstractMatrix, ::SequentialFitter, fit, psf, plan::FitPlan, j::Integer)
+    geom, p = fit.geom, plan.p
+    m = PSF.model_from_vector(psf, plan.free_names_val, view(fit.theta, (j - 1) * p + 1:j * p), plan.fixed)
+    ay, ax = geom.anchor_y[j], geom.anchor_x[j]
+    @inbounds for mi in 1:geom.S2
+        fi = geom.pixels[mi, j]
+        if fi == 0
+            for k in 1:p
+                Jt[mi, k] = 0
+            end
+            continue
+        end
+        _, g = PSF.evaluate_fg(m, ay + geom.dy_off[mi], ax + geom.dx_off[mi])
+        sw = sqrt(fit.w[fi])
+        for k in 1:p
+            gc = plan.grad_col[k]
+            Jt[mi, k] = sw * (gc == 1 ? g[plan.row_y] : gc == 2 ? g[plan.row_x] : g[plan.row_flux])
+        end
+    end
+    return Jt
+end
+# `source_errors` marginalizes the in-loop pedestal when one is fit.
+_errors_include_pedestal(fitter::SequentialFitter) = fitter.fit_bkg
 
 
 # ==============================================================================
@@ -426,7 +451,7 @@ all source fits, and `n_accepted` source fits that lowered their own cost;
 this fitter.
 
 Errors come from each source's own LM normal matrix at its final parameters,
-evaluated against the final residual of all other sources; like the
+evaluated against the final residual of all other sources; unlike the
 simultaneous fitter's they ignore covariance with blended neighbors.
 
 $(_MULTIPASS_DOC_RETURNS)"""

@@ -634,6 +634,7 @@ include("parametric_models.jl")
 include("empirical_models.jl")
 include("empirical_builder.jl")
 include("gridded_psf.jl")
+include("autocorrelation.jl")
 include("psf_fitting.jl")
 include("pick.jl")
 
