@@ -1,6 +1,7 @@
 using CrowdPhot
 using CrowdPhot.PSF
 using Distributions: Poisson
+using Statistics: mean
 using StableRNGs: StableRNG
 using Test
 
@@ -149,5 +150,11 @@ end
             y = rand(rng, Poisson(val), 100_000)
             @test ks_2sample_statistic(x, y) < 0.01
         end
+        # A zero or underflowing rate (exp(-λ) == 1) is exactly zero counts, not -1.
+        rng = StableRNG(123)
+        @test all(iszero, CrowdPhot.rand_poisson(rng, λ) for λ in (0.0, 1e-20, 1e-300) for _ in 1:100)
+        zimg = CrowdPhot.add_noise!(zeros(64, 64); noise = :poisson, rng)
+        @test all(iszero, zimg)
+        @test abs(mean(CrowdPhot.add_noise!(fill(0.1, 256, 256); noise = :poisson, rng)) - 0.1) < 0.005
     end
 end
