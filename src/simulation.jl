@@ -346,37 +346,19 @@ function render_sources!(
     return image
 end
 
-function _rand_poisson(rng::Random.AbstractRNG, λ::Real)
-    # Use exact inversion for small means.
-    λf = float(max(λ, zero(λ)))
-    if λf < 30
-        L = exp(-λf)
-        k = 0
-        p = 1.0
-        while p > L
-            k += 1
-            p *= rand(rng)
-        end
-        return k - 1
-    else
-        # Use a Gaussian approximation for large means to avoid slow loops.
-        return max(0, round(Int, λf + sqrt(λf) * randn(rng)))
-    end
-end
-
 function rand_poisson(rng::Random.AbstractRNG, λ::Real)
     # Use exact inversion for small means and Gaussian approximation for large means.
     function _rand_poisson_knuth(rng::Random.AbstractRNG, λ::T) where T
+        # Draw before the first comparison: for λ below ~1e-16, `exp(-λ)` rounds to
+        # 1 and the draw-after form returned -1.
         L = exp(-λ)
         k = 0
-        p = one(T)
-
+        p = rand(rng, T)
         while p > L
             k += 1
             p *= rand(rng, T)
         end
-
-        return k - 1
+        return k
     end
 
     function _rand_poisson_normal(rng::Random.AbstractRNG, λ::T) where T
@@ -419,7 +401,7 @@ function add_noise!(
         return image
     elseif noise === :poisson
         for idx in eachindex(image)
-            image[idx] = _rand_poisson(rng, max(zero(float(image[idx])), float(image[idx]) * gain)) / gain
+            image[idx] = rand_poisson(rng, max(zero(float(image[idx])), float(image[idx]) * gain)) / gain
         end
     elseif noise === :gaussian
         for idx in eachindex(image)
