@@ -3,7 +3,7 @@ module CrowdPhot
 import ConstructionBase
 using FillArrays: Fill
 import Krylov
-using LinearAlgebra: cholesky, cholesky!, ldiv!, dot, norm, I, Symmetric, pinv, PosDefException, svd, issuccess
+using LinearAlgebra: cholesky, cholesky!, ldiv!, mul!, diag, dot, norm, I, Symmetric, pinv, PosDefException, svd, issuccess
 import LinearOperators
 import LoopVectorization as LV
 import LossFunctions

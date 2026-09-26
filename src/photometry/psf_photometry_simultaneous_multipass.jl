@@ -622,7 +622,7 @@ function _overlap_pairs(stamp::StampDerivatives{FT}, anchor_y, anchor_x, cap::In
 end
 
 """
-    _source_errors!(errs, stamp, geom, cov_est, cost, dof, max_neighbors, cap = MAX_NEIGHBORS_ERR) -> errs
+    _source_errors!(errs, stamp, geom, max_neighbors, cap = MAX_NEIGHBORS_ERR) -> errs
 
 Per-source 1-sigma parameter errors that account for covariance with blended
 neighbors, for a catalog whose Jacobian is stored as `stamp`.
@@ -648,8 +648,9 @@ Source `a` and up to `max_neighbors` of the sources whose stamps overlap its
 own, ranked by the Frobenius norm of their coupling block, form a principal
 submatrix of `J' J`, with `a` placed last.  Its Cholesky factor's last diagonal
 block `L_aa` gives the Schur complement `L_aa L_aa'`, the Gauss-Newton Hessian
-of χ² in `a`'s parameters with those neighbors marginalized out, which  `covariance!`
-subsequently inverts to give the marginal covariance of `a`'s parameters.
+of χ² in `a`'s parameters with those neighbors marginalized out, whose inverse is the
+marginal covariance of `a`'s parameters.  The weights are taken as known: no `cost / dof`
+rescaling is applied.
 This treats every source outside the group as
 fixed, so the variance is still a lower bound on the full-matrix solution `inv(J' J)` but
 is much better than the own-block variance alone.  It increases
@@ -674,13 +675,15 @@ own-block inversion for that source.
 
 `errs` is filled as `(p, n)` in the stamp's own column order, so `errs[k, j]`
 is the error on free parameter `k` (the `k`-th entry of `free_names`) of
-source `j`.  Callers scatter it into whatever layout they report.
+source `j`.  Callers scatter it into whatever layout they report.  A source whose
+own (ridged) block is still not positive definite -- one with no weighted pixels --
+gets `NaN` for every parameter.
 
 Used by [`fit_all_stars_simultaneous_multipass`](@ref); [`fit_all_stars_multipass`](@ref)
 takes its errors from each source's own Levenberg-Marquardt normal matrix instead.
 """
 function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT}, geom,
-                         cov_est, cost, dof, max_neighbors::Integer, cap::Integer = MAX_NEIGHBORS_ERR) where {FT}
+                         max_neighbors::Integer, cap::Integer = MAX_NEIGHBORS_ERR) where {FT}
     p, n = stamp.p, size(stamp.values, 3)
     size(errs) == (p, n) ||
         throw(DimensionMismatch("`errs` must be ($p, $n); got $(size(errs))"))
@@ -785,10 +788,15 @@ function _source_errors!(errs::AbstractMatrix{FT}, stamp::StampDerivatives{FT}, 
             end
         end
         ok || copyto!(blk, view(D, :, :, a))
-        # `inv(D B D) = D⁻¹ inv(B) D⁻¹`, and both estimators are `inv` times a scalar.
-        cov = covariance!(cov_est, blk, cost, dof)
-        for c in 1:p
-            errs[c, a] = sqrt(max(zero(FT), cov[c, c])) / stamp.colnorm[c, a]
+        # `inv(D B D) = D⁻¹ inv(B) D⁻¹`.
+        Fb = cholesky!(Symmetric(blk); check = false)
+        if issuccess(Fb)
+            cov = inv(Fb)
+            for c in 1:p
+                errs[c, a] = sqrt(max(zero(FT), cov[c, c])) / stamp.colnorm[c, a]
+            end
+        else
+            errs[:, a] .= FT(NaN)
         end
     end
     return errs
@@ -1079,11 +1087,11 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
 end
 
 """
-    source_errors(fitter::SimultaneousFitter, fit, psf, plan, cov_est) -> NamedTuple
+    source_errors(fitter::SimultaneousFitter, fit, psf, plan) -> NamedTuple
 
 Per-source errors from the normal matrix at the final `theta`, each marginalized
 over up to `fitter.error_neighbors` blended neighbors (see `_source_errors!`),
-with the global `cost / dof` for estimators that rescale by it.
+with the weights taken as known.
 
 The stamps are refilled at `fit.theta` first, for two reasons.
 `freeze_positions` may have zeroed the position columns during the fit, and the
@@ -1091,7 +1099,7 @@ reported position errors must not inherit that.  The stamp refill also allows th
 errors to reflect the parameters the final pass returned, since `fit_pass` leaves `stamp`
 at the last linearization's, one accepted step behind.
 """
-function source_errors(fitter::SimultaneousFitter, fit, psf, plan::FitPlan, cov_est)
+function source_errors(fitter::SimultaneousFitter, fit, psf, plan::FitPlan)
     FT = eltype(fit.theta)
     n_src = length(fit.catalog)
     p = plan.p
@@ -1103,13 +1111,24 @@ function source_errors(fitter::SimultaneousFitter, fit, psf, plan::FitPlan, cov_
     x_err = zeros(FT, n_src)
     flux_err = zeros(FT, n_src)
     errs = Matrix{FT}(undef, p, n_src)
-    _source_errors!(errs, stamp, fit.geom, cov_est, fit.cost, fit.dof, fitter.error_neighbors)
+    _source_errors!(errs, stamp, fit.geom, fitter.error_neighbors)
     for j in 1:n_src, k in 1:p
         plan.grad_col[k] == 1 ? (y_err[j] = errs[k, j]) :
             plan.grad_col[k] == 2 ? (x_err[j] = errs[k, j]) : (flux_err[j] = errs[k, j])
     end
     return (; y_err, x_err, flux_err, bkg_err = zeros(FT, n_src))
 end
+
+# The stamp holds `sqrt(w) ∂m/∂θ / colnorm` at the final `theta` after `source_errors`
+# refilled it, so undoing the equilibration gives the weighted derivatives.
+function _finalize_derivatives!(Jt::AbstractMatrix, ::SimultaneousFitter, fit, psf, plan::FitPlan, j::Integer)
+    st = fit.stamp
+    @inbounds for k in 1:plan.p, mi in 1:st.S2
+        Jt[mi, k] = st.values[k, mi, j] * st.colnorm[k, j]
+    end
+    return Jt
+end
+_errors_include_pedestal(::SimultaneousFitter) = false
 
 
 # ==============================================================================

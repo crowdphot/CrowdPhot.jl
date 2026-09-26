@@ -363,3 +363,65 @@ end
     @test abs(p.spread_model[1]) < 3 * p.spread_model_err[1]
     @test p.spread_model[1] ≈ q.spread_model[1] rtol = 1e-3
 end
+
+
+@testset "background_covariance" begin
+    # Flat sky plus PSF-scale structure at `amp` times unit variance; weights from the
+    # noiseless expectation.
+    function structured(; n = 200, nsrc = 300, amp = 0.0, σ = 1.0, seed = 5)
+        rng = StableRNG(seed)
+        R = ceil(Int, 4σ)
+        k = [exp(-t^2 / (2σ^2)) for t in -R:R]
+        k ./= sqrt(sum(abs2, k))
+        z = randn(rng, n, n)
+        tmp = zeros(n, n); field = zeros(n, n)
+        for x in 1:n, y in 1:n, t in -R:R
+            tmp[y, x] += k[t + R + 1] * z[mod1(y + t, n), x]
+        end
+        for x in 1:n, y in 1:n, t in -R:R
+            field[y, x] += k[t + R + 1] * tmp[y, mod1(x + t, n)]
+        end
+        src = simulate_sources((n, n), nsrc; flux = (800.0, 30000.0), flux_distribution = :powerlaw,
+            min_separation = 0, border = 8, rng)
+        expected = 100.0 .+ amp .* field .+ simulate_image((n, n), TEST_PSF, src; background = 0, noise = :none)
+        return CrowdPhot.add_noise!(copy(expected); noise = :poisson, gain = 1.0, rng), src, 1 ./ expected
+    end
+    function zs(ph, src)
+        z = Float64[]
+        for i in eachindex(src.y)
+            d, j = findmin((ph.y .- src.y[i]) .^ 2 .+ (ph.x .- src.x[i]) .^ 2)
+            d < 1 && push!(z, (ph.flux[j] - src.flux[i]) / ph.flux_err[j])
+        end
+        q = sort(z)
+        return (q[round(Int, 0.84 * length(q))] - q[round(Int, 0.16 * length(q))]) / 2
+    end
+    kw = (; max_iter = 2, min_iter = 1, SMALL_BKG...)
+    @testset "flat sky" begin
+        img, src, iv = structured()
+        # No in-loop pedestal: the finalize step adds one, and only variance.
+        a = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = TEST_FIXED, kw...).phot
+        b = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = TEST_FIXED, kw...,
+            background_covariance = true).phot
+        @test all(iszero, a.bkg)
+        @test all(isfinite, b.flux_err) && all(isfinite, b.bkg_err)
+        @test all(b.flux_err .>= a.flux_err .* (1 - 1.0e-8))
+        @test 1 < median(b.flux_err ./ a.flux_err) < 1.3
+        # With the in-loop pedestal the fitter's errors already marginalize one over the
+        # same stamp, so on a flat sky the step changes almost nothing, and its pedestal
+        # agrees with the in-loop one.
+        fx = (; fwhm = PSF_FWHM)
+        c = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = fx, kw...).phot
+        d = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = fx, kw...,
+            background_covariance = true).phot
+        @test median(d.flux_err ./ c.flux_err) ≈ 1 atol = 0.02
+        @test median(abs.(d.bkg .- c.bkg) ./ c.bkg_err) < 0.1
+    end
+    @testset "structured background" begin
+        img, src, iv = structured(; amp = 20.0)
+        a = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = TEST_FIXED, kw...).phot
+        b = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = TEST_FIXED, kw...,
+            background_covariance = true).phot
+        @test zs(a, src) > 1.5
+        @test abs(zs(b, src) - 1) < 0.2
+    end
+end

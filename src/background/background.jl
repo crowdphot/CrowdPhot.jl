@@ -898,4 +898,6 @@ function _copy_box_data!(box::AbstractMatrix{T}, image, mask, coverage_mask,
     return n_covered
 end
 
+include("covariance.jl")
+
 end # module Background

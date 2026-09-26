@@ -12,7 +12,7 @@ using Krylov: lsqr!, lsmr!, LsqrWorkspace, LsmrWorkspace, solution
 using LinearAlgebra: dot, I, diag
 using StaticArrays: SMatrix
 using StableRNGs
-using Statistics: median, mean
+using Statistics: median, mean, quantile
 using Test
 
 const PSF_FWHM = 3.0
@@ -413,8 +413,7 @@ end
         _fill_stamps!(stamp, psf, Val(free_names), fixed, θ, w, grad_col, dy_off, dx_off,
             anchor_y, anchor_x, row_y, row_x, row_flux, trues(1), nothing)
         errs = zeros(p, 1)
-        CrowdPhot._source_errors!(errs, stamp, (; anchor_y, anchor_x),
-            CrowdPhot.KnownWeightsCovarianceEstimator(), 1.0, 1, 8)
+        CrowdPhot._source_errors!(errs, stamp, (; anchor_y, anchor_x), 8)
         J = dense_J(stamp) .* reshape(stamp.colnorm, 1, p)   # undo the equilibration
         exact = sqrt.([inv(J' * J)[k, k] for k in 1:p])
         @test vec(errs) ≈ exact rtol = 1e-8
@@ -451,8 +450,7 @@ end
         # Marginal errors of source `a` with only the sources in `grp` free.
         group_err(a, grp) = (cols = reduce(vcat, idx.(grp)); C = inv(H[cols, cols]);
             sqrt.(diag(C)[findfirst(==(a), grp) * p .- (p - 1:-1:0)]))
-        errs(K) = CrowdPhot._source_errors!(zeros(p, n), stamp, geom,
-            CrowdPhot.KnownWeightsCovarianceEstimator(), 1.0, 1, K)
+        errs(K) = CrowdPhot._source_errors!(zeros(p, n), stamp, geom, K)
         e0, e1, e8 = errs(0), errs(1), errs(8)
         exact = reshape(sqrt.(diag(inv(H))), p, n)
 
@@ -488,8 +486,7 @@ end
             dst = StampDerivatives{FT, Int32}(zeros(FT, p, dgeom.S2, 2), dgeom.pixels, zeros(FT, p, 2), ny * nx, p, dgeom.S2)
             _fill_stamps!(dst, psf, Val(free_names), fixed, FT[20, 20, 3000, 20, 20, 3000], FT.(w), grad_col,
                 dgeom.dy_off, dgeom.dx_off, dgeom.anchor_y, dgeom.anchor_x, row_y, row_x, row_flux, trues(2), nothing)
-            derrs(K) = CrowdPhot._source_errors!(zeros(FT, p, 2), dst, dgeom,
-                CrowdPhot.KnownWeightsCovarianceEstimator(), one(FT), 1, K)
+            derrs(K) = CrowdPhot._source_errors!(zeros(FT, p, 2), dst, dgeom, K)
             @test all(derrs(1) .> 100 .* derrs(0))
         end
 
@@ -523,7 +520,7 @@ end
             b = idx(j)
             He[b, b] += 1e-12 * sum(diag(He[b, b])) * I
         end
-        ce = CrowdPhot._source_errors!(zeros(p, nc), cst, cgeom, CrowdPhot.KnownWeightsCovarianceEstimator(), 1.0, 1, K, cap)
+        ce = CrowdPhot._source_errors!(zeros(p, nc), cst, cgeom, K, cap)
         n_dropped = 0
         for a in 1:nc
             slots = g.ptr[a]:(g.ptr[a + 1] - 1)
@@ -1511,4 +1508,81 @@ end
     on = off == 1 ? 2 : 1
     @test isfinite(ph.morphology[on].sharpness)
     @test isfinite(ph.morphology[on].aperture.ellipticity1_aperture)
+end
+
+# A flat sky plus unit-variance structure with covariance `exp(-|Δ|²/4σ²)` scaled to
+# `amp²`, and stars at known fluxes; weights from the noiseless expectation.
+function structured_field(; n = 256, nsrc = 500, amp = 0.0, σ = 1.2, sky = 100.0, seed = 7)
+    rng = StableRNG(seed)
+    R = ceil(Int, 4σ)
+    k = [exp(-t^2 / (2σ^2)) for t in -R:R]
+    k ./= sqrt(sum(abs2, k))
+    z = randn(rng, n, n)
+    tmp = zeros(n, n); field = zeros(n, n)
+    for x in 1:n, y in 1:n, t in -R:R
+        tmp[y, x] += k[t + R + 1] * z[mod1(y + t, n), x]
+    end
+    for x in 1:n, y in 1:n, t in -R:R
+        field[y, x] += k[t + R + 1] * tmp[y, mod1(x + t, n)]
+    end
+    src = simulate_sources((n, n), nsrc; flux = (800.0, 30000.0), flux_distribution = :powerlaw,
+        min_separation = 0, border = 8, rng)
+    stars = simulate_image((n, n), TEST_PSF, src; background = 0, noise = :none)
+    expected = sky .+ amp .* field .+ stars
+    img = CrowdPhot.add_noise!(copy(expected); noise = :poisson, gain = 1.0, rng)
+    return img, src, 1 ./ expected
+end
+
+# Flux z-scores of the returned sources matched (nearest, within 1 px) to `src`.
+function matched_z(ph, src)
+    z = Float64[]
+    for i in eachindex(src.y)
+        d, j = findmin((ph.y .- src.y[i]) .^ 2 .+ (ph.x .- src.x[i]) .^ 2)
+        d < 1 && push!(z, (ph.flux[j] - src.flux[i]) / ph.flux_err[j])
+    end
+    return z
+end
+zwidth(z) = (quantile(z, 0.84) - quantile(z, 0.16)) / 2
+
+@testset "background_covariance" begin
+    kw = (; fixed = TEST_FIXED, max_iter = 2, min_iter = 1)
+    @testset "flat sky" begin
+        img, src, iv = structured_field(; amp = 0.0)
+        r0 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw...)
+        r1 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw..., background_covariance = true)
+        a, b = r0.phot, r1.phot
+        @test length(a.flux) == length(b.flux)
+        @test all(iszero, a.bkg) && all(iszero, a.bkg_err)
+        @test all(isfinite, b.flux_err) && all(isfinite, b.bkg) && all(isfinite, b.bkg_err)
+        # The increment is positive semidefinite: no error shrinks.
+        @test all(b.flux_err .>= a.flux_err .* (1 - 1.0e-8))
+        @test all(b.y_err .>= a.y_err .* (1 - 1.0e-8)) && all(b.x_err .>= a.x_err .* (1 - 1.0e-8))
+        # On a flat sky the only added variance is the pedestal's: a few percent for a
+        # 7x7 stamp's worth of wings on a 3 px FWHM PSF, and far from the structured case.
+        @test 1 < median(b.flux_err ./ a.flux_err) < 1.3
+        # The residual and model are re-rendered at the returned parameters.
+        @test b.residual != a.residual
+        @test zwidth(matched_z(b, src)) ≈ 1 atol = 0.15
+    end
+    @testset "structured background" begin
+        img, src, iv = structured_field(; amp = 20.0)
+        r0 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw...)
+        r1 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw..., background_covariance = true)
+        z0, z1 = matched_z(r0.phot, src), matched_z(r1.phot, src)
+        @test length(z1) > 400
+        # PSF-scale structure at twice the pixel noise leaves the pipeline's errors far
+        # too small; the correction brings the z-score width back near 1.
+        @test zwidth(z0) > 1.5
+        @test abs(zwidth(z1) - 1) < 0.15
+        @test abs(zwidth(z1) - 1) < abs(zwidth(z0) - 1)
+    end
+    @testset "frozen positions" begin
+        img, src, iv = structured_field(; amp = 20.0, nsrc = 200)
+        r1 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw...,
+            background_covariance = true, freeze_positions_final = true)
+        r0 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw...,
+            freeze_positions_final = true)
+        @test r1.phot.y == r0.phot.y && r1.phot.x == r0.phot.x
+        @test r1.phot.flux != r0.phot.flux
+    end
 end

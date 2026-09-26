@@ -1523,6 +1523,8 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   `nothing` derives background-only weights from the pass's RMS map, and so
   will overstate the precision of bright stars and is only supported for testing
   purposes; it is not recommended for actual science measurements.
+  The final errors treat these weights as known: they are not rescaled by the
+  fit's reduced χ².
   This also serves as the bad pixel mask; set `inv_var` to zero at
   every pixel that should be excluded from detection and fitting.  Such pixels are
   also excluded from the background and RMS mesh statistics, so they do not need
@@ -1544,7 +1546,29 @@ const _MULTIPASS_DOC_FIT_COMMON = """
 - `freeze_positions_final::Bool = false`: hold `(y, x)` fixed on the terminal
   pass, fitting only fluxes (and local pedestals, where fit).  crowdsource does
   this (`tpsfderiv = False` when `titer == lastiter`); with a real LM optimizer it
-  should not be needed.
+  should not be needed.  With `background_covariance`, the finalize step also leaves
+  positions where they are.
+- `background_covariance::Bool = false`: account for spatially correlated
+  background structure (nebulosity, filaments, confusion from unresolved sources)
+  in the final errors and fluxes.  The per-pixel weights assume independent noise,
+  so on structured backgrounds the reported errors can be too small by a large
+  factor (about 4x on a WISE nebulosity test at 1 source per 100 pixels) and each
+  source's flux carries the local background error the mesh cannot follow.
+
+  After the terminal pass, the covariance of the residual background is fitted per
+  `bkg_rms_box_size` mesh cell as a PSF-shaped (confusion-like) term plus a smooth
+  term.  Each source then gets one Gauss-Newton step, against the final residual
+  with its neighbors held fixed, of its free parameters plus a local pedestal over
+  its `fit_rad` stamp, weighted by `N + Σ_B`, where `N` is the pixel noise from
+  `inv_var` and `Σ_B` is that covariance restricted to the PSF core
+  (`clamp(ceil(0.75 FWHM), 3, fit_rad)` pixels from the anchor).  Its errors
+  are the usual neighbor-marginalized errors plus the variance this adds; the
+  pedestal and its error are reported as `bkg` and `bkg_err`, and the returned
+  model and residual are re-rendered at the new parameters.  The residual still
+  shows the background structure: the pedestal is marginalized per source, not
+  rendered.  Costs roughly 15 µs per source for a PSF FWHM up to ~4 pixels (a 7x7
+  core), growing steeply with larger PSFs (~150 µs at FWHM 7), plus ~20 ns per
+  image pixel for the covariance estimate.
 - `model_rad::Union{Symbol, Real} = :auto`: half-width of the box each source's
   model is rendered/subtracted over -- distinct from the `fit_rad` fitting box
   (DAOPHOT's PSF radius vs fitting radius).  `fit_rad` can safely be kept small
@@ -1569,14 +1593,6 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   itself.
 - `model_rad_nsigma::Real = 1.0`: the auto threshold, in units of the
   background per-pixel noise.  Larger values give smaller `model_rad`.
-- `covariance_estimator = nothing`: an [`AbstractCovarianceEstimator`](@ref)
-  used for the final per-source errors.  `nothing` selects
-  [`KnownWeightsCovarianceEstimator`](@ref) when `inv_var` is given and
-  [`ReweightedCovarianceEstimator`](@ref) otherwise.  The sequential fitter's
-  errors invert each source's own normal-matrix block, ignoring covariance with
-  blended neighbors, so they underestimate marginal errors in a crowded field.
-  The simultaneous fitter's errors are marginalized over up to `error_neighbors`
-  blended neighbors.
 - `spread_model_fwhm::Union{Nothing, Real} = nothing`: FWHM of the reference
   exponential disk for `spread_model`; `nothing` derives it from the PSF's
   effective area (see [`MultiPassPhotResult`](@ref)).
@@ -1690,7 +1706,7 @@ diagnostics and morphology -- and talks to a fitter only through these methods:
   n_new, freeze_positions, move, show_trace)`: one pass over the whole catalog.
   `move = false` must leave every parameter where it is and only rebuild what
   finalization reads; the final validity gate uses it after dropping sources.
-- `source_errors(fitter, fit, psf, plan, cov_est)`: calculates marginalized
+- `source_errors(fitter, fit, psf, plan)`: calculates marginalized
   parameter uncertainties `(; y_err, x_err, flux_err, bkg_err)` for `fit.catalog`.
 - `empty_pass_stats(fitter, state, FT)`: the `stats` fields `fit_pass` would
   have produced, for a pass whose catalog is empty.
@@ -1767,8 +1783,8 @@ function _fit_all_stars_multipass(
         min_iter::Integer = 4,
         few_sources::Integer = 100,
         freeze_positions_final::Bool = false,
+        background_covariance::Bool = false,
         show_trace::Bool = false,
-        covariance_estimator = nothing,
     ) where {T}
 
     FT = float(T)
@@ -1884,12 +1900,9 @@ function _fit_all_stars_multipass(
         # fit
         R_fit, R_cap = ceil(Int, model_rad === :auto ? model_rad_max : max(float(model_rad), float(fit_rad))),
         model_rad, model_rad_nsigma = FT(model_rad_nsigma), max_step = FT(max_step),
+        freeze_positions_final, background_covariance,
     )
 
-    # Same default-selection rule as `lm_irls`; with no IRLS reweighting in the
-    # error computation the choice reduces to whether `inv_var` was given.
-    cov_est = covariance_estimator !== nothing ? covariance_estimator :
-        (inv_var !== nothing ? KnownWeightsCovarianceEstimator() : ReweightedCovarianceEstimator())
     min_pix = min_stamp_pixels(fitter, plan)
 
     # ------------------------------------------------------------------
@@ -2098,7 +2111,7 @@ function _fit_all_stars_multipass(
                   t_setup, t_finalize = time() - t_finalize_start)
     end
 
-    phot = finalize_multipass(fitter, image, psf, fit, bkg, plan, o, model, cov_est,
+    phot = finalize_multipass(fitter, image, psf, fit, bkg, plan, o, model,
         spread_model_fwhm, n_failed, failure_msgs)
 
     t_finalize = time() - t_finalize_start
@@ -2114,6 +2127,204 @@ end
 # ==============================================================================
 # Finalization
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Background covariance (`background_covariance = true`)
+# ------------------------------------------------------------------------------
+
+# Half-width of the Σ core, where the background covariance enters each source's
+# solve: about 1.5 FWHM across and at least 7x7, capped at the fit box.
+_sigma_core_radius(psf_fwhm, R_fit::Int) =
+    min(R_fit, isfinite(psf_fwhm) && psf_fwhm > 0 ? max(3, ceil(Int, 0.75 * psf_fwhm)) : 3)
+
+# Pixels the background covariance is measured on: positive weight, and at least one
+# pixel away from anywhere a source's model exceeds `nsig` times the pixel noise.
+function _covariance_valid(model::AbstractMatrix, w::AbstractVector, nsig)
+    ny, nx = size(model)
+    src = falses(ny, nx)
+    @inbounds for i in eachindex(w)
+        w[i] > 0 && model[i] > nsig / sqrt(w[i]) && (src[i] = true)
+    end
+    valid = reshape(w .> 0, ny, nx)
+    @inbounds for x in 1:nx, y in 1:ny
+        src[y, x] || continue
+        for xx in max(1, x - 1):min(nx, x + 1), yy in max(1, y - 1):min(ny, y + 1)
+            valid[yy, xx] = false
+        end
+    end
+    return valid
+end
+
+# `inv(H)` through a column-equilibrated, ridged Cholesky (the same `1e-12 * tr`
+# ridge `_source_errors!` uses), or `nothing` when it fails.
+function _eq_inv(H::AbstractMatrix{FT}) where {FT}
+    s = sqrt.(diag(H))
+    all(v -> isfinite(v) && v > 0, s) || return nothing
+    Hn = H ./ (s .* s')
+    tr = sum(diag(Hn))
+    for k in axes(Hn, 1)
+        Hn[k, k] += max(FT(1.0e-12), eps(FT)) * tr
+    end
+    F = cholesky!(Symmetric(Hn); check = false)
+    issuccess(F) || return nothing
+    return inv(F) ./ (s .* s')
+end
+
+"""
+    _background_covariance_step!(model, fitter, fit, psf, plan, o, errs; move_positions = true)
+        -> (; theta, errs, bkg)
+
+The finalize step for `background_covariance = true`: per-source errors and one
+Gauss-Newton step that account for correlated background structure, then a
+re-render of `model` at the new parameters.
+
+1. **Σ_B.**  The residual `data - model` is masked wherever a source's model
+   exceeds half the pixel noise (dilated by one pixel), and
+   [`Background._background_covariance`](@ref) fits the parametric background
+   covariance `Σ_B(Δ) = a A_psf(Δ) + b exp(-|Δ|²/2ℓ²)` per `bkg_rms_box_size` mesh
+   cell, at lags up to `±2Rs`, over a window of half-width
+   `max(1.5 · bkg_rms_box_size, 5 · Rs)`.  `A_psf` is the PSF autocorrelation
+   ([`PSF._psf_acf`](@ref)), cropped at `fit_rad`.
+2. **Per source**, over its full `fit_rad` stamp, in whitened form
+   (`J̃ = sqrt(w) ∂m/∂θ` from `_finalize_derivatives!`, `r̃ = sqrt(w) (data - model)`):
+   `Σ̃ = I + W^{1/2} Σ_B W^{1/2}` with `Σ_B` kept only for pixel pairs both within
+   the Σ core of half-width `Rs = clamp(ceil(0.75 FWHM), 3, fit_rad)` about the
+   anchor.  That block is positive semidefinite, and it makes `Σ̃`
+   block diagonal, so only the core needs a dense Cholesky.  The source's free
+   parameters and a pedestal over the whole stamp are solved for with neighbors
+   held fixed:
+   - errors: the fitter's `errs` (neighbor-marginalized, under `W`) plus the
+     increment `(J̃ₐ'Σ̃⁻¹J̃ₐ)⁻¹ - (J̃'J̃)⁻¹` on the diagonal, where `J̃ₐ` adds the
+     pedestal column and the second term has no pedestal (unless the fitter's
+     own errors already marginalize one).  The increment is positive
+     semidefinite, since `Σ ⪰ N` and a marginalized pedestal only adds variance.
+   - step: `δ = (J̃ₐ'Σ̃⁻¹J̃ₐ)⁻¹ J̃ₐ'Σ̃⁻¹ r̃`, computed for every source from the
+     same residual; position steps are capped at `max_step`, and dropped when
+     `move_positions` is `false`.  The pedestal is reported as `bkg`.
+3. `model` is re-rendered at the new parameters.
+
+A source whose system is not positive definite keeps its parameters and errors,
+with `bkg = 0` and `bkg_err = NaN`.
+"""
+function _background_covariance_step!(model::AbstractMatrix{FT}, fitter, fit, psf, plan::FitPlan, o, errs;
+                                      move_positions::Bool = true) where {FT}
+    ny, nx = size(model)
+    n, p, q = length(fit.catalog), plan.p, plan.p + 1
+    geom = fit.geom
+    S2 = geom.S2
+    w = fit.w
+    resid = fit.data .- vec(model)
+
+    Rs = _sigma_core_radius(o.psf_fwhm, o.R_fit)
+    L = 2Rs
+    box = o.bkg_rms_box_size
+    prep = PSF._psf_acf(ConstructionBase.setproperties(psf, plan.fixed), L, o.R_fit)
+    bc = Background._background_covariance(reshape(resid, ny, nx), _covariance_valid(model, w, FT(0.5)),
+        reshape(w, ny, nx), box, L, (y, x) -> PSF._psf_acf_at(prep, y, x);
+        half_width = max(1.5 * box, 5 * Rs))
+
+    core = [abs(geom.dy_off[mi]) <= Rs && abs(geom.dx_off[mi]) <= Rs for mi in 1:S2]
+    ncmax = count(core)
+    ped0 = _errors_include_pedestal(fitter)
+    q0 = ped0 ? q : p
+    Jt = Matrix{FT}(undef, S2, p)
+    Xc = Matrix{FT}(undef, ncmax, q)
+    rc = Vector{FT}(undef, ncmax)
+    sw_c = Vector{FT}(undef, ncmax)
+    dy_c = Vector{Int}(undef, ncmax)
+    dx_c = Vector{Int}(undef, ncmax)
+    M = Matrix{FT}(undef, ncmax, ncmax)
+    H = Matrix{FT}(undef, q, q)
+    H0 = Matrix{FT}(undef, q0, q0)
+    g = Vector{FT}(undef, q)
+    xrow = Vector{FT}(undef, q)
+    step_cols = move_positions ? (1:q) : [k for k in 1:q if k == q || plan.grad_col[k] == 3]
+
+    # Every source in a mesh cell shares that cell's table.
+    lag_cache = Dict{Int, Matrix{FT}}()
+    theta = copy(fit.theta)
+    y_err, x_err, flux_err = copy(errs.y_err), copy(errs.x_err), copy(errs.flux_err)
+    bkg = zeros(FT, n)
+    bkg_err = fill(FT(NaN), n)
+    for j in 1:n
+        _finalize_derivatives!(Jt, fitter, fit, psf, plan, j)
+        fill!(H, zero(FT)); fill!(H0, zero(FT)); fill!(g, zero(FT))
+        nc = 0
+        @inbounds for mi in 1:S2
+            fi = geom.pixels[mi, j]
+            fi == 0 && continue
+            sw = sqrt(w[fi])
+            for k in 1:p
+                xrow[k] = Jt[mi, k]
+            end
+            xrow[q] = sw
+            r = sw * resid[fi]
+            for c in 1:q0, b in 1:q0
+                H0[b, c] += xrow[b] * xrow[c]
+            end
+            if core[mi]
+                nc += 1
+                for k in 1:q
+                    Xc[nc, k] = xrow[k]
+                end
+                rc[nc], sw_c[nc], dy_c[nc], dx_c[nc] = r, sw, geom.dy_off[mi], geom.dx_off[mi]
+            else
+                for c in 1:q
+                    g[c] += xrow[c] * r
+                    for b in 1:q
+                        H[b, c] += xrow[b] * xrow[c]
+                    end
+                end
+            end
+        end
+        if nc > 0
+            ay, ax = geom.anchor_y[j], geom.anchor_x[j]
+            T = get!(() -> Background._sigma_b_lags(bc, ay, ax), lag_cache, Background._cell_id(bc, ay, ax))
+            @inbounds for c in 1:nc, b in 1:nc
+                M[b, c] = sw_c[b] * sw_c[c] * T[dy_c[b] - dy_c[c] + L + 1, dx_c[b] - dx_c[c] + L + 1] + (b == c)
+            end
+            F = cholesky!(Symmetric(view(M, 1:nc, 1:nc), :L); check = false)
+            issuccess(F) || continue
+            Zc = view(Xc, 1:nc, :)
+            zr = view(rc, 1:nc)
+            ldiv!(F.L, Zc)
+            ldiv!(F.L, zr)
+            mul!(H, Zc', Zc, one(FT), one(FT))
+            mul!(g, Zc', zr, one(FT), one(FT))
+        end
+        C = _eq_inv(H)
+        C0 = _eq_inv(H0)
+        (C === nothing || C0 === nothing) && continue
+        base = (j - 1) * p
+        for k in 1:p
+            gc = plan.grad_col[k]
+            e = gc == 1 ? y_err : gc == 2 ? x_err : flux_err
+            e[j] = sqrt(max(zero(FT), e[j]^2 + C[k, k] - C0[k, k]))
+        end
+        δ = if move_positions
+            C * g
+        else
+            Cs = _eq_inv(H[step_cols, step_cols])
+            Cs === nothing && continue
+            d = zeros(FT, q)
+            d[step_cols] .= Cs * g[step_cols]
+            d
+        end
+        if move_positions && plan.k_y !== nothing && plan.k_x !== nothing
+            st = hypot(δ[plan.k_y], δ[plan.k_x])
+            st > o.max_step && (δ[plan.k_y] *= o.max_step / st; δ[plan.k_x] *= o.max_step / st)
+        end
+        for k in 1:p
+            theta[base + k] += δ[k]
+        end
+        bkg[j] = δ[q]
+        bkg_err[j] = sqrt(max(zero(FT), C[q, q]))
+    end
+
+    _render_model!(vec(model), psf, plan.free_names_val, plan.fixed, theta, p, fit.model_R,
+        geom.anchor_y, geom.anchor_x, ny, nx, trues(n), fit.render_buf, fit.render_scratch)
+    return (; theta, errs = (; y_err, x_err, flux_err, bkg_err), bkg)
+end
 
 # Sub-view of a stamp rendered over `(yr_u, xr_u)` covering the inner box
 # `(yr, xr)`, which must be contained in it.  Both boxes come from
@@ -2215,7 +2426,7 @@ function _finalize_source(ctx, m, j::Int, ay::Int, ax::Int, R_sub::Int, signific
 end
 
 """
-    finalize_multipass(fitter, image, psf, fit, bkg, plan, o, model, cov_est,
+    finalize_multipass(fitter, image, psf, fit, bkg, plan, o, model,
                        spread_model_fwhm, n_failed, failure_msgs) -> MultiPassPhotResult
 
 Turn the converged fit into the returned photometry: per-source errors from the
@@ -2228,13 +2439,19 @@ the only part of the run that scales with the catalog rather than with the
 image; keeping it here leaves the pass loop readable in one screen.
 """
 function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bkg, plan::FitPlan, o,
-                            model, cov_est, spread_model_fwhm, n_failed, failure_msgs)
+                            model, spread_model_fwhm, n_failed, failure_msgs)
     catalog = fit.catalog
     FT = eltype(catalog.y)
     ny, nx = size(image)
     n_src = length(catalog)
     p = plan.p
-    errs = source_errors(fitter, fit, psf, plan, cov_est)
+    errs = source_errors(fitter, fit, psf, plan)
+    theta, bkg_src = fit.theta, catalog.bkg
+    if o.background_covariance
+        lpi = _background_covariance_step!(model, fitter, fit, psf, plan, o, errs;
+            move_positions = !o.freeze_positions_final)
+        theta, errs, bkg_src = lpi.theta, lpi.errs, lpi.bkg
+    end
 
     # --- per-source diagnostics and morphology ---
     image_bs = reshape(fit.data, ny, nx)
@@ -2300,9 +2517,10 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
              sharp_hw, morph_window, p = n_free_per_source(fitter, plan), diag)
     rows = map(1:n_src) do j
         m = PSF.model_from_vector(psf, plan.free_names_val,
-                                  view(fit.theta, (j - 1) * p + 1:j * p), plan.fixed)
-        # A per-source pedestal is zero unless the fitter fits one locally.
-        iszero(catalog.bkg[j]) || (m = ConstructionBase.setproperties(m, (; bkg = catalog.bkg[j])))
+                                  view(theta, (j - 1) * p + 1:j * p), plan.fixed)
+        # A per-source pedestal is zero unless the fitter or the background covariance
+        # step fits one locally.
+        iszero(bkg_src[j]) || (m = ConstructionBase.setproperties(m, (; bkg = bkg_src[j])))
         _finalize_source(ctx, m, j, fit.geom.anchor_y[j], fit.geom.anchor_x[j],
                          fit.model_R[j], FT(catalog.flux_snr[j]))
     end
@@ -2325,9 +2543,17 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
         isfinite(d) || (residual[i] = d - model[i])
     end
 
+    y, x, flux = copy(catalog.y), copy(catalog.x), copy(catalog.flux)
+    if theta !== fit.theta
+        for j in eachindex(y), k in 1:p
+            v = theta[(j - 1) * p + k]
+            gc = plan.grad_col[k]
+            gc == 1 ? (y[j] = v) : gc == 2 ? (x[j] = v) : (flux[j] = v)
+        end
+    end
     return MultiPassPhotResult(
-        copy(catalog.y), copy(catalog.x), errs.y_err, errs.x_err, copy(catalog.flux), errs.flux_err,
-        copy(catalog.bkg), errs.bkg_err, diag.chisq, diag.qfit,
+        y, x, errs.y_err, errs.x_err, flux, errs.flux_err,
+        copy(bkg_src), errs.bkg_err, diag.chisq, diag.qfit,
         diag.qfit_expected, diag.qfit_z, diag.crowding, diag.spread_model,
         diag.spread_model_err, n_failed, failure_msgs, residual, morphology)
 end
