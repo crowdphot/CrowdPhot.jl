@@ -1324,9 +1324,13 @@ const _MULTIPASS_DOC_PIPELINE = """
 - `bkg_box_size::Integer = 20`: mesh size for the background *level* once the
   model is good enough to trust a fine mesh.
 - `bkg_box_size_coarse::Integer = 8 * bkg_box_size`: mesh size for the level
-  during the first `bkg_coarse_passes` passes, when unsubtracted starlight would
-  otherwise be absorbed into a fine mesh and over-subtracted.
-- `bkg_coarse_passes::Integer = 2`: number of leading passes using the coarse mesh.
+  during the first `bkg_coarse_passes` passes, meant to keep unsubtracted starlight
+  from being absorbed into a fine mesh and over-subtracted.
+- `bkg_coarse_passes::Integer = 0`: number of leading passes using the coarse mesh.
+  Off by default: a coarse mesh cannot follow background structure on scales below
+  its box, so faint stars there are fitted against the wrong level, pruned on flux
+  significance, and then blocked from re-detection for the rest of the run by the
+  discard log (see `min_separation`).
 - `bkg_rms_box_size::Integer = bkg_box_size`: mesh size for the RMS map.  No special
   per-pass scheduling as the RMS map wants a fine mesh throughout, since its job is to track
   small-scale confusion noise, and over-subtraction is not a failure mode for it.
@@ -1385,17 +1389,18 @@ const _MULTIPASS_DOC_PIPELINE = """
   by default.
 
   !!! note
-      The first `bkg_coarse_passes` passes detect on a deliberately coarse
-      background, so the image `matched_filter` sees there is *not* well
+      With `bkg_coarse_passes > 0` the first passes detect on a deliberately
+      coarse background, so the image `matched_filter` sees there is *not* well
       subtracted and the zero-sum kernel is doing real work.  On the simulated
-      field in `test/photometry/psf_photometry_simultaneous_multipass.jl`,
-      `false` raised the spurious rate from 1% to 57%, every one of them seeded
-      on a coarse pass.  The zero-sum kernel also has a crowding-correlated cost
-      of its own (it subtracts neighboring starlight as if it were background:
-      on an HST/ACS field the plain-to-zero-sum significance ratio measured 1.88
-      within 12 px of bright stars against 1.16 far from them), so `false` is
-      worth trying on a field whose background is genuinely flat, ideally with
-      `bkg_coarse_passes = 0`.
+      field in `test/photometry/psf_photometry_simultaneous_multipass.jl` with
+      two coarse passes, `false` raised the spurious rate from 3% to 60% (median
+      over 20 seeds), every one of them seeded on a coarse pass; with the
+      default `bkg_coarse_passes = 0` it is 5% against 2% for `true`.  The
+      zero-sum kernel also has a crowding-correlated cost of its own (it
+      subtracts neighboring starlight as if it were background: on an HST/ACS
+      field the plain-to-zero-sum significance ratio measured 1.88 within 12 px
+      of bright stars against 1.16 far from them), so `false` is worth trying on
+      a field whose background is genuinely flat.
 - `min_separation::Real = 1.5`: a new peak is rejected when it falls within this
   distance (pixels) of a source already in the catalog, or of a position
   discarded on an earlier pass.
@@ -1558,15 +1563,15 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   After the terminal pass, the covariance of the residual background is fitted per
   `bkg_rms_box_size` mesh cell as a PSF-shaped (confusion-like) term plus a smooth
   term.  Each source then gets one Gauss-Newton step, against the final residual
-  with its neighbors held fixed, of its free parameters plus a local pedestal over
-  its `fit_rad` stamp, weighted by `N + Σ_B`, where `N` is the pixel noise from
-  `inv_var` and `Σ_B` is that covariance restricted to the PSF core
-  (`clamp(ceil(0.75 FWHM), 3, fit_rad)` pixels from the anchor).  Its errors
-  are the usual neighbor-marginalized errors plus the variance this adds; the
-  pedestal and its error are reported as `bkg` and `bkg_err`, and the returned
-  model and residual are re-rendered at the new parameters.  The residual still
-  shows the background structure: the pedestal is marginalized per source, not
-  rendered.  Costs roughly 15 µs per source for a PSF FWHM up to ~4 pixels (a 7x7
+  with its neighbors held fixed, of its free parameters over its `fit_rad` stamp,
+  weighted by `N + Σ_B`, where `N` is the pixel noise from `inv_var` and `Σ_B` is
+  that covariance restricted to the PSF core (`clamp(ceil(0.75 FWHM), 3, fit_rad)`
+  pixels from the anchor).  The smooth term also lets each source's fit absorb a
+  local offset of the background level under its core.  Its errors are the usual
+  neighbor-marginalized errors plus the variance this adds, and the returned model
+  and residual are re-rendered at the new parameters.  The residual still shows
+  the background structure: it is marginalized per source, not rendered.  Costs
+  roughly 15 µs per source for a PSF FWHM up to ~4 pixels (a 7x7
   core), growing steeply with larger PSFs (~150 µs at FWHM 7), plus ~20 ns per
   image pixel for the covariance estimate.
 - `model_rad::Union{Symbol, Real} = :auto`: half-width of the box each source's
@@ -1749,7 +1754,7 @@ function _fit_all_stars_multipass(
         # --- background ---
         bkg_box_size::Integer = 20,
         bkg_box_size_coarse::Integer = 8 * bkg_box_size,
-        bkg_coarse_passes::Integer = 2,
+        bkg_coarse_passes::Integer = 0,
         bkg_rms_box_size::Integer = bkg_box_size,
         bkg_estimator = SExtractorBackground(),
         bkg_rms_estimator = MADStdRMS(),
@@ -2191,25 +2196,33 @@ re-render of `model` at the new parameters.
    the Σ core of half-width `Rs = clamp(ceil(0.75 FWHM), 3, fit_rad)` about the
    anchor.  That block is positive semidefinite, and it makes `Σ̃`
    block diagonal, so only the core needs a dense Cholesky.  The source's free
-   parameters and a pedestal over the whole stamp are solved for with neighbors
-   held fixed:
+   parameters are solved for with neighbors held fixed, plus a pedestal over the
+   whole stamp only when the fitter fits one itself (`_errors_include_pedestal`):
    - errors: the fitter's `errs` (neighbor-marginalized, under `W`) plus the
-     increment `(J̃ₐ'Σ̃⁻¹J̃ₐ)⁻¹ - (J̃'J̃)⁻¹` on the diagonal, where `J̃ₐ` adds the
-     pedestal column and the second term has no pedestal (unless the fitter's
-     own errors already marginalize one).  The increment is positive
-     semidefinite, since `Σ ⪰ N` and a marginalized pedestal only adds variance.
-   - step: `δ = (J̃ₐ'Σ̃⁻¹J̃ₐ)⁻¹ J̃ₐ'Σ̃⁻¹ r̃`, computed for every source from the
+     increment `(J̃'Σ̃⁻¹J̃)⁻¹ - (J̃'J̃)⁻¹` on the diagonal, positive semidefinite
+     since `Σ ⪰ N`.
+   - step: `δ = (J̃'Σ̃⁻¹J̃)⁻¹ J̃'Σ̃⁻¹ r̃`, computed for every source from the
      same residual; position steps are capped at `max_step`, and dropped when
-     `move_positions` is `false`.  The pedestal is reported as `bkg`.
+     `move_positions` is `false`.  A fitted pedestal is reported as `bkg`.
 3. `model` is re-rendered at the new parameters.
 
-A source whose system is not positive definite keeps its parameters and errors,
-with `bkg = 0` and `bkg_err = NaN`.
+No explicit pedestal is added: where the smooth term's `ℓ` is long compared with
+the core, `Σ_B` is close to `b 1 1'` there, which marginalizes a core-wide
+offset with prior variance `b`, so the local level is corrected where the
+background is structured and left alone on a flat sky.  A free pedestal would
+also absorb the wing light of an imperfect PSF model as background.
+
+A source whose system is not positive definite keeps its parameters, errors and
+`bkg`.
 """
 function _background_covariance_step!(model::AbstractMatrix{FT}, fitter, fit, psf, plan::FitPlan, o, errs;
                                       move_positions::Bool = true) where {FT}
     ny, nx = size(model)
-    n, p, q = length(fit.catalog), plan.p, plan.p + 1
+    # The step solves for exactly the fitter's own parameters: a pedestal column only
+    # when the fitter fits one, so both terms of the error increment cover the same set.
+    ped = _errors_include_pedestal(fitter)
+    n, p = length(fit.catalog), plan.p
+    q = p + ped
     geom = fit.geom
     S2 = geom.S2
     w = fit.w
@@ -2225,8 +2238,6 @@ function _background_covariance_step!(model::AbstractMatrix{FT}, fitter, fit, ps
 
     core = [abs(geom.dy_off[mi]) <= Rs && abs(geom.dx_off[mi]) <= Rs for mi in 1:S2]
     ncmax = count(core)
-    ped0 = _errors_include_pedestal(fitter)
-    q0 = ped0 ? q : p
     Jt = Matrix{FT}(undef, S2, p)
     Xc = Matrix{FT}(undef, ncmax, q)
     rc = Vector{FT}(undef, ncmax)
@@ -2235,17 +2246,16 @@ function _background_covariance_step!(model::AbstractMatrix{FT}, fitter, fit, ps
     dx_c = Vector{Int}(undef, ncmax)
     M = Matrix{FT}(undef, ncmax, ncmax)
     H = Matrix{FT}(undef, q, q)
-    H0 = Matrix{FT}(undef, q0, q0)
+    H0 = Matrix{FT}(undef, q, q)
     g = Vector{FT}(undef, q)
     xrow = Vector{FT}(undef, q)
-    step_cols = move_positions ? (1:q) : [k for k in 1:q if k == q || plan.grad_col[k] == 3]
+    step_cols = move_positions ? (1:q) : [k for k in 1:q if k > p || plan.grad_col[k] == 3]
 
     # Every source in a mesh cell shares that cell's table.
     lag_cache = Dict{Int, Matrix{FT}}()
     theta = copy(fit.theta)
     y_err, x_err, flux_err = copy(errs.y_err), copy(errs.x_err), copy(errs.flux_err)
-    bkg = zeros(FT, n)
-    bkg_err = fill(FT(NaN), n)
+    bkg, bkg_err = copy(fit.catalog.bkg), copy(errs.bkg_err)
     for j in 1:n
         _finalize_derivatives!(Jt, fitter, fit, psf, plan, j)
         fill!(H, zero(FT)); fill!(H0, zero(FT)); fill!(g, zero(FT))
@@ -2257,9 +2267,9 @@ function _background_covariance_step!(model::AbstractMatrix{FT}, fitter, fit, ps
             for k in 1:p
                 xrow[k] = Jt[mi, k]
             end
-            xrow[q] = sw
+            ped && (xrow[q] = sw)
             r = sw * resid[fi]
-            for c in 1:q0, b in 1:q0
+            for c in 1:q, b in 1:q
                 H0[b, c] += xrow[b] * xrow[c]
             end
             if core[mi]
@@ -2317,8 +2327,11 @@ function _background_covariance_step!(model::AbstractMatrix{FT}, fitter, fit, ps
         for k in 1:p
             theta[base + k] += δ[k]
         end
-        bkg[j] = δ[q]
-        bkg_err[j] = sqrt(max(zero(FT), C[q, q]))
+        # `model` is pedestal-free, so the step's pedestal is the whole pedestal.
+        if ped
+            bkg[j] = δ[q]
+            bkg_err[j] = sqrt(max(zero(FT), C[q, q]))
+        end
     end
 
     _render_model!(vec(model), psf, plan.free_names_val, plan.fixed, theta, p, fit.model_R,
@@ -2518,8 +2531,7 @@ function finalize_multipass(fitter::AbstractMultipassFitter, image, psf, fit, bk
     rows = map(1:n_src) do j
         m = PSF.model_from_vector(psf, plan.free_names_val,
                                   view(theta, (j - 1) * p + 1:j * p), plan.fixed)
-        # A per-source pedestal is zero unless the fitter or the background covariance
-        # step fits one locally.
+        # A per-source pedestal is zero unless the fitter fits one locally.
         iszero(bkg_src[j]) || (m = ConstructionBase.setproperties(m, (; bkg = bkg_src[j])))
         _finalize_source(ctx, m, j, fit.geom.anchor_y[j], fit.geom.anchor_x[j],
                          fit.model_R[j], FT(catalog.flux_snr[j]))
