@@ -20,8 +20,8 @@ const TEST_PSF = CircularGaussianPSF(0.0, 0.0, PSF_FWHM, 1.0, 0.0)
 const TEST_FIXED = (; fwhm = PSF_FWHM)
 
 # Smooth, spatially varying background: a gradient plus a broad bump.  A constant
-# background exercises none of the coarse -> fine schedule or the RMS adaptivity
-# that motivated the design.
+# background exercises neither the RMS adaptivity nor, with `bkg_coarse_passes > 0`,
+# the coarse -> fine schedule.
 function varying_background(ny, nx; level = 50.0)
     yy = (1:ny) .* ones(nx)'
     xx = ones(ny) .* (1:nx)'
@@ -1241,7 +1241,7 @@ end
     # account for the bulk of it rather than a sliver.
     @test total_traced(timed) <= wall
     @test total_traced(timed) >= 0.5 * wall
-    @test hist[1].bkg_coarse                       # bkg_coarse_passes defaults to 2
+    @test !hist[1].bkg_coarse                      # bkg_coarse_passes defaults to 0
     # The final non-finite/non-positive-flux gate runs after the last pass, so the
     # returned catalog can be smaller than the last report's count but never larger.
     @test hist[end].n_catalog >= length(res.phot.y)
@@ -1553,13 +1553,14 @@ zwidth(z) = (quantile(z, 0.84) - quantile(z, 0.16)) / 2
         a, b = r0.phot, r1.phot
         @test length(a.flux) == length(b.flux)
         @test all(iszero, a.bkg) && all(iszero, a.bkg_err)
-        @test all(isfinite, b.flux_err) && all(isfinite, b.bkg) && all(isfinite, b.bkg_err)
+        @test all(isfinite, b.flux_err)
+        # The fitter fits no pedestal, so neither does the step.
+        @test all(iszero, b.bkg) && all(iszero, b.bkg_err)
         # The increment is positive semidefinite: no error shrinks.
         @test all(b.flux_err .>= a.flux_err .* (1 - 1.0e-8))
         @test all(b.y_err .>= a.y_err .* (1 - 1.0e-8)) && all(b.x_err .>= a.x_err .* (1 - 1.0e-8))
-        # On a flat sky the only added variance is the pedestal's: a few percent for a
-        # 7x7 stamp's worth of wings on a 3 px FWHM PSF, and far from the structured case.
-        @test 1 < median(b.flux_err ./ a.flux_err) < 1.3
+        # On a flat sky Σ_B is near zero, so the errors barely change.
+        @test median(b.flux_err ./ a.flux_err) < 1.05
         # The residual and model are re-rendered at the returned parameters.
         @test b.residual != a.residual
         @test zwidth(matched_z(b, src)) ≈ 1 atol = 0.15

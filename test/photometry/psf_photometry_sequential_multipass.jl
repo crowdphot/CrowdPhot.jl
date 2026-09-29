@@ -398,14 +398,15 @@ end
     kw = (; max_iter = 2, min_iter = 1, SMALL_BKG...)
     @testset "flat sky" begin
         img, src, iv = structured()
-        # No in-loop pedestal: the finalize step adds one, and only variance.
+        # No in-loop pedestal, so the step fits none; on a flat sky Σ_B is near zero
+        # and the errors barely change.
         a = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = TEST_FIXED, kw...).phot
         b = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = TEST_FIXED, kw...,
             background_covariance = true).phot
-        @test all(iszero, a.bkg)
-        @test all(isfinite, b.flux_err) && all(isfinite, b.bkg_err)
+        @test all(iszero, a.bkg) && all(iszero, b.bkg) && all(iszero, b.bkg_err)
+        @test all(isfinite, b.flux_err)
         @test all(b.flux_err .>= a.flux_err .* (1 - 1.0e-8))
-        @test 1 < median(b.flux_err ./ a.flux_err) < 1.3
+        @test median(b.flux_err ./ a.flux_err) < 1.05
         # With the in-loop pedestal the fitter's errors already marginalize one over the
         # same stamp, so on a flat sky the step changes almost nothing, and its pedestal
         # agrees with the in-loop one.
