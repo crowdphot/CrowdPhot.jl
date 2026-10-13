@@ -143,6 +143,28 @@ using Test
     end
 end
 
+@testset "convert ImagePSF-node GriddedPSFModel to a concrete node type" begin
+    # Converting to `typeof(model)` of a Float32 model passes the concrete node type
+    # `ImagePSF{Float32, Matrix{Float32}}`, which used to fall through to the generic
+    # keyword-constructor `convert` and throw a MethodError.
+    data = [exp(-((i - 8)^2 + (j - 8)^2) / 8) for i in 1:15, j in 1:15]
+    gy, gx = [0.0, 0.0, 10.0, 10.0], [0.0, 10.0, 0.0, 10.0]
+    m64 = GriddedPSFModel([ImagePSF(data .* k; oversampling = 2) for k in 1:4], gy, gx; y = 4.0, x = 6.0, flux = 3.0)
+    m32 = GriddedPSFModel([ImagePSF(Float32.(data); oversampling = 2) for _ in 1:4], Float32.(gy), Float32.(gx))
+    c = convert(typeof(m32), m64)
+    @test c isa typeof(m32)
+    @test c.psfs[3].data == Float32.(m64.psfs[3].data)
+    @test c.psfs[2].origin == map(Float32, m64.psfs[2].origin)
+    @test (c.y, c.x, c.flux) == (4.0f0, 6.0f0, 3.0f0)
+    @test evaluate(c, 5, 5) ≈ evaluate(m64, 5, 5) rtol = 1.0e-6
+    @test convert(typeof(m64), m64) === m64
+    # Direct ImagePSF conversions: concrete and UnionAll targets, and identity.
+    n = m64.psfs[1]
+    @test convert(ImagePSF{Float32, Matrix{Float32}}, n) isa ImagePSF{Float32, Matrix{Float32}}
+    @test convert(ImagePSF{Float32}, n) isa ImagePSF{Float32, Matrix{Float32}}
+    @test convert(typeof(n), n) === n
+end
+
 @testset "GriddedPSFModel evaluate (bilinear node blending)" begin
     # Four distinct-shape unit-flux Gaussian nodes on a 2x2 grid; distinct
     # FWHM per node makes it easy to tell which node(s) contributed.
