@@ -156,11 +156,14 @@ function ConstructionBase.setproperties(model::ImagePSF{T, S}, patch::NamedTuple
     )
 end
 
-function Base.convert(to::Type{ImagePSF{T}}, from::ImagePSF) where {T}
+# Accepts the concrete `ImagePSF{T, A}` as well as `ImagePSF{T}`: `convert(::GriddedPSFModel)`
+# passes the node type it was asked for, which is concrete when taken from `typeof(model)`.
+function Base.convert(to::Type{I}, from::ImagePSF) where {T, I <: ImagePSF{T}}
+    from isa I && return from
     dataT = T.(from.data)
+    isconcretetype(I) && (dataT = convert(fieldtype(I, :data), dataT))
     return ImagePSF{T, typeof(dataT)}(dataT, T(from.x), T(from.y), T(from.flux), T(from.bkg), map(x -> T(x), from.origin), from.oversampling, T(from.fill_value))
 end
-Base.convert(::Type{ImagePSF{S}}, from::ImagePSF{S}) where {S} = from
 
 theta(model::ImagePSF{T}) where {T} = zero(T)
 
