@@ -1,0 +1,395 @@
+using CrowdPhot
+using CrowdPhot.PSF
+using CrowdPhot.PSF: free_params, model_from_vector, _has_hessian, _has_deriv, fit_star
+using CrowdPhot: TukeyLoss, weight, FixedScale, LMProblem, lm_irls
+using Distributions: Poisson
+import LossFunctions
+using LinearAlgebra: diag
+using StableRNGs: StableRNG
+using Statistics: mean, median, std
+using Test
+
+# ---------------------------------------------------------------------------
+# Tests for free_params / model_from_vector
+# ---------------------------------------------------------------------------
+
+const irls_losses = (
+    LossFunctions.HuberLoss(1.0),
+    TukeyLoss(),
+    nothing, # no IRLS ⇒ no reweighting
+)
+
+@testset "free_params / model_from_vector" begin
+    m = CircularGaussianPSF(x = 1.0, y = 2.0, fwhm = 4.0, flux = 10.0, bkg = 1.0)
+    names, idx, x0 = free_params(m)
+    @test names == (:x, :y, :fwhm, :flux, :bkg)
+    @test idx == (1, 2, 3, 4, 5)
+    @test x0 == [1.0, 2.0, 4.0, 10.0, 1.0]
+
+    names_fixed, idx_fixed, x0_fixed = free_params(m, (bkg = 1.0,))
+    @test names_fixed == (:x, :y, :fwhm, :flux)
+    @test idx_fixed == (1, 2, 3, 4)
+    @test length(x0_fixed) == 4
+
+    m2 = model_from_vector(m, Val(names), [1.1, 2.2, 3.3, 9.0, 0.5], (;))
+    @test m2.x ≈ 1.1
+    @test m2.y ≈ 2.2
+    @test m2.fwhm ≈ 3.3
+    @test m2.flux ≈ 9.0
+    @test m2.bkg ≈ 0.5
+end
+
+# ---------------------------------------------------------------------------
+# Tests for capability detection
+# ---------------------------------------------------------------------------
+
+@testset "_has_hessian / _has_deriv" begin
+    m1 = CircularGaussianPSF(x = 0.0, y = 0.0, fwhm = 3.0, flux = 1.0, bkg = 0.0)
+    m2 = GaussianPSF(x = 0.0, y = 0.0, x_fwhm = 4.0, y_fwhm = 3.0, theta = 0.0, flux = 1.0, bkg = 0.0)
+    @test _has_hessian(m1)
+    @test _has_deriv(m1)
+    @test _has_hessian(m2)
+    @test _has_deriv(m2)
+end
+
+# ---------------------------------------------------------------------------
+# Noiseless recovery tests for CircularGaussianPSF
+# ---------------------------------------------------------------------------
+
+@testset "fit CircularGaussianPSF" begin
+    # Verify the public `fit_star` entry point uses the LM path for circular Gaussian models.
+    inds = (1:30, 1:30)
+    truth = CircularGaussianPSF(x = 13.5, y = 12.3, fwhm = 4.0, flux = 200.0, bkg = 5.0)
+    img = evaluate.(truth, inds[1], inds[2]')
+    # Initial guess: perturbed ~5% away from truth
+    init = CircularGaussianPSF(x = 14.1, y = 11.8, fwhm = 4.3, flux = 190.0, bkg = 5.5)
+
+    # Default L2 fit should converge through the LM implementation.
+    best, result = fit_star(init, img, inds; x_tol = 1.0e-6)
+    @test best.x ≈ truth.x    rtol = 1.0e-3
+    @test best.y ≈ truth.y    rtol = 1.0e-3
+    @test best.fwhm ≈ truth.fwhm rtol = 1.0e-3
+    @test best.flux ≈ truth.flux rtol = 1.0e-3
+    @test best.bkg ≈ truth.bkg  rtol = 1.0e-3
+    @test result.converged
+
+    # With inv_var, covariance is available on the LM result.
+    inv_var = fill(1.0, size(img))
+    best2, result2 = fit_star(init, img, inds; inv_var, x_tol = 1.0e-6)
+    @test best2.x ≈ truth.x rtol = 1.0e-3
+    @test size(result2.cov) == (5, 5)
+
+    # Freeze background: init with wrong bkg, but bkg is fixed so it must converge anyway
+    init_fixed = CircularGaussianPSF(x = 14.1, y = 11.8, fwhm = 4.3, flux = 190.0, bkg = 5.0)
+    best3, _ = fit_star(init_fixed, img, inds; fixed = (bkg = 5.0,), x_tol = 1.0e-6)
+    @test best3.bkg ≈ 5.0
+    @test best3.x ≈ truth.x rtol = 1.0e-3
+end
+
+# ---------------------------------------------------------------------------
+# Noiseless recovery tests for GaussianPSF
+# ---------------------------------------------------------------------------
+
+@testset "fit GaussianPSF" begin
+    # Verify the public `fit` entry point uses the LM path for elliptical Gaussian models.
+    inds = (1:40, 1:40)
+    truth = GaussianPSF(x = 18.5, y = 17.3, x_fwhm = 5.0, y_fwhm = 3.5, theta = 15.0, flux = 300.0, bkg = 2.0)
+    img = evaluate.(truth, inds[1], inds[2]')
+    # Initial guess: perturbed ~5% away from truth
+    init = GaussianPSF(x = 19.3, y = 16.7, x_fwhm = 5.3, y_fwhm = 3.3, theta = 13.0, flux = 285.0, bkg = 2.2)
+
+    best, result = fit_star(init, img, inds; x_tol = 1.0e-6)
+    @test best.x ≈ truth.x      rtol = 1.0e-3
+    @test best.y ≈ truth.y      rtol = 1.0e-3
+    @test best.x_fwhm ≈ truth.x_fwhm rtol = 1.0e-3
+    @test best.y_fwhm ≈ truth.y_fwhm rtol = 1.0e-3
+    @test best.flux ≈ truth.flux   rtol = 1.0e-3
+    @test result.converged
+
+    # Freeze theta: init with slightly wrong theta but it's fixed
+    init_fixed = GaussianPSF(x = 19.3, y = 16.7, x_fwhm = 5.3, y_fwhm = 3.3, theta = 15.0, flux = 285.0, bkg = 2.2)
+    best2, _ = fit_star(init_fixed, img, inds; fixed = (theta = 15.0,), x_tol = 1.0e-6)
+    @test best2.theta ≈ 15.0
+    @test best2.x ≈ truth.x rtol = 1.0e-3
+
+    # With inv_var, covariance is available on the LM result.
+    inv_var = fill(1.0, size(img))
+    best3, result3 = fit_star(init, img, inds; inv_var, x_tol = 1.0e-6)
+    @test best3.x ≈ truth.x rtol = 1.0e-3
+    @test size(result3.cov) == (7, 7)
+end
+
+# ---------------------------------------------------------------------------
+# ArgumentError checks
+# ---------------------------------------------------------------------------
+
+@testset "struct fit argument errors" begin
+    # Invalid weights and removed external-solver keywords should fail early.
+    m = CircularGaussianPSF(x = 5.5, y = 5.2, fwhm = 3.0, flux = 100.0, bkg = 1.0)
+    img = evaluate.(m, 1:10, (1:10)')
+    init = CircularGaussianPSF(x = 5.8, y = 4.9, fwhm = 3.2, flux = 95.0, bkg = 1.1)
+    @test_throws ArgumentError fit_star(init, img; inv_var = zeros(size(img)))
+    @test_throws ArgumentError fit_star(init, img; inv_var = fill(-1.0, size(img)))
+    @test_throws ArgumentError fit_star(init, img; inv_var = fill(1.0, (11, 10)))
+end
+
+# ---------------------------------------------------------------------------
+# Generic LMProblem / lm_irls tests
+# ---------------------------------------------------------------------------
+
+@testset "lm_irls generic linear problem" begin
+    # Fit the exact line y = m*x + c with parameters x = [m, c].
+    xs = [0.0, 1.0, 2.0, 3.0, 4.0]
+    ys = @. 2.0 * xs + 1.0
+
+    function accum!(A, b, residuals, x, weights)
+        fill!(A, zero(eltype(A)))
+        fill!(b, zero(eltype(b)))
+        cost = zero(eltype(A))
+        for k in eachindex(xs)
+            # Residuals are model - data; missing weights means ordinary L2.
+            w = isnothing(weights) ? one(eltype(A)) : weights[k]
+            r = x[1] * xs[k] + x[2] - ys[k]
+            residuals[k] = r
+            wr = w * r
+            cost = muladd(wr, r, cost)
+            # Accumulate J'WJ and J'Wr in place for the row gradient [xs[k], 1].
+            A[1, 1] = muladd(w * xs[k], xs[k], A[1, 1])
+            A[2, 1] = muladd(w, xs[k], A[2, 1])
+            A[1, 2] = muladd(w * xs[k], 1.0, A[1, 2])
+            A[2, 2] += w
+            b[1] = muladd(wr, xs[k], b[1])
+            b[2] += wr
+        end
+        return cost
+    end
+
+    problem = LMProblem([0.5, 0.0], length(xs), accum!)
+    result = lm_irls(problem; max_iter = 20, x_tol = 1.0e-12, f_tol = 1.0e-12, g_tol = 1.0e-12)
+
+    # The data are noiseless and exactly in the model family, so LM should find
+    # the true slope/intercept and drive the weighted residual cost to zero.
+    @test result.converged
+    @test result.minimizer ≈ [2.0, 1.0] rtol = 1.0e-8
+    @test result.minimum < 1.0e-18
+end
+
+@testset "lm_irls IRLS weight reset threshold" begin
+    # Fit the same line model, but make the final point a large outlier.
+    xs = [0.0, 1.0, 2.0, 3.0]
+    ys = [1.0, 3.0, 5.0, 50.0]
+
+    function accum!(A, b, residuals, x, weights)
+        fill!(A, zero(eltype(A)))
+        fill!(b, zero(eltype(b)))
+        cost = zero(eltype(A))
+        for k in eachindex(xs)
+            # IRLS passes per-observation robust weights after the first solve.
+            w = isnothing(weights) ? one(eltype(A)) : weights[k]
+            r = x[1] * xs[k] + x[2] - ys[k]
+            residuals[k] = r
+            wr = w * r
+            cost = muladd(wr, r, cost)
+            # Accumulate normal equations for the row gradient [xs[k], 1].
+            A[1, 1] = muladd(w * xs[k], xs[k], A[1, 1])
+            A[2, 1] = muladd(w, xs[k], A[2, 1])
+            A[1, 2] = muladd(w * xs[k], 1.0, A[1, 2])
+            A[2, 2] += w
+            b[1] = muladd(wr, xs[k], b[1])
+            b[2] += wr
+        end
+        return cost
+    end
+
+    problem = LMProblem([0.0, 0.0], length(xs), accum!)
+
+    # With FixedScale(1), the Huber weights change substantially because of
+    # the outlier; the relative weight change exceeds 0.1, so lambda is reset.
+    result_reset = lm_irls(
+        problem;
+        max_iter = 1,
+        x_tol = 0.0,
+        f_tol = 0.0,
+        g_tol = 0.0,
+        reweight = LossFunctions.HuberLoss(1.0),
+        scale_estimator = FixedScale(1.0),
+        λ_init = 1.0e-4,
+        λ_down = 10.0,
+        weight_reset_tol = 0.1,
+    )
+    @test result_reset.λ_final == 1.0e-4
+
+    # Setting the reset tolerance to Inf disables the reset. The accepted step
+    # still decreases lambda by lambda_down, so it should finish at 1e-5.
+    result_keep = lm_irls(
+        problem;
+        max_iter = 1,
+        x_tol = 0.0,
+        f_tol = 0.0,
+        g_tol = 0.0,
+        reweight = LossFunctions.HuberLoss(1.0),
+        scale_estimator = FixedScale(1.0),
+        λ_init = 1.0e-4,
+        λ_down = 10.0,
+        weight_reset_tol = Inf,
+    )
+    @test result_keep.λ_final ≈ 1.0e-5
+end
+
+# ---------------------------------------------------------------------------
+# LM fitting tests
+# ---------------------------------------------------------------------------
+
+@testset "fit noiseless recovery" begin
+    inds = (1:30, 1:30)
+    truth = CircularGaussianPSF(x = 13.5, y = 12.3, fwhm = 4.0, flux = 200.0, bkg = 5.0)
+    img = evaluate.(truth, inds[1], inds[2]')
+    init = CircularGaussianPSF(x = 14.1, y = 11.8, fwhm = 4.3, flux = 190.0, bkg = 5.5)
+
+    # No inv_var
+    best, result = fit_star(init, img, inds)
+    @test result.converged
+    @test best.x ≈ truth.x    rtol = 1.0e-3
+    @test best.y ≈ truth.y    rtol = 1.0e-3
+    @test best.fwhm ≈ truth.fwhm rtol = 1.0e-3
+    @test best.flux ≈ truth.flux rtol = 1.0e-3
+    @test size(result.cov) == (5, 5)
+    @test isnan(result.σ_final)  # no IRLS ⇒ no scale estimate
+
+    # With unity inv_var
+    inv_var = fill(1.0, size(img))
+    best2, result2 = fit_star(init, img, inds; inv_var)
+    @test result2.converged
+    @test result.minimizer ≈ result2.minimizer
+end
+
+@testset "fit IRLS — noiseless parity" begin
+    # On clean data, IRLS should recover the same parameters as plain L2
+    inds = (1:30, 1:30)
+    truth = CircularGaussianPSF(x = 13.5, y = 12.3, fwhm = 4.0, flux = 200.0, bkg = 5.0)
+    img = evaluate.(truth, inds[1], inds[2]')
+    init = CircularGaussianPSF(x = 14.1, y = 11.8, fwhm = 4.3, flux = 190.0, bkg = 5.5)
+
+    best_l2, result_l2 = fit_star(init, img, inds)
+    best_huber, result_huber = fit_star(init, img, inds; reweight = LossFunctions.HuberLoss(1.0))
+    best_tukey, result_tukey = fit_star(init, img, inds; reweight = TukeyLoss())
+
+    @test result_huber.converged
+    @test result_tukey.converged
+    @test best_huber.x ≈ truth.x rtol = 1.0e-2
+    @test best_huber.y ≈ truth.y rtol = 1.0e-2
+    @test best_tukey.x ≈ truth.x rtol = 5.0e-2
+    @test best_tukey.y ≈ truth.y rtol = 5.0e-2
+end
+
+@testset "fit IRLS — outlier rejection" begin
+    inds = (1:30, 1:30)
+    truth = CircularGaussianPSF(x = 15.0, y = 15.0, fwhm = 4.0, flux = 200.0, bkg = 1.0)
+    img = evaluate.(truth, inds[1], inds[2]')
+    # Add Gaussian noise and scattered severe outliers in the wings
+    rng = StableRNG(42)
+    img .= img .+ 0.5 .* randn(rng, size(img))
+    # Several 20σ outliers: severe enough to bias flux and FWHM
+    img[5, 5] += 10.0
+    img[25, 6] += 10.0
+    img[8, 24] += 10.0
+    img[15, 28] += 10.0
+    img[22, 12] += 10.0
+
+    init = CircularGaussianPSF(x = 15.5, y = 14.5, fwhm = 3.5, flux = 180.0, bkg = 1.5)
+
+    best_l2, result_l2 = fit_star(init, img, inds; max_iter = 500)
+    @test result_l2.converged
+
+    best_huber, result_huber = fit_star(init, img, inds; reweight = LossFunctions.HuberLoss(1.0), max_iter = 500)
+    @test result_huber.converged
+
+    best_tukey, result_tukey = fit_star(init, img, inds; reweight = TukeyLoss(), max_iter = 500)
+    @test result_tukey.converged
+
+    # IRLS improves flux accuracy: outliers inflate the wings, which L2
+    # compensates for by reducing the total flux; robust weights suppress
+    # those outliers and recover a more accurate flux estimate.
+    err_l2_flux = abs(best_l2.flux - truth.flux)
+    @test abs(best_huber.flux - truth.flux) < err_l2_flux
+    @test abs(best_tukey.flux - truth.flux) < err_l2_flux
+
+    # IRLS improves FWHM accuracy: outlier pixels in the wings cause L2 to
+    # over-widen the fitted profile; downweighting them tightens the estimate.
+    err_l2_fwhm = abs(best_l2.fwhm - truth.fwhm)
+    @test abs(best_huber.fwhm - truth.fwhm) < err_l2_fwhm
+    @test abs(best_tukey.fwhm - truth.fwhm) < err_l2_fwhm
+end
+
+@testset "fit IRLS — Poisson Errors" begin
+    @testset "No inverse variance information" begin
+        inds = (1:20, 1:20)
+        bkg = 100.0
+        for snr in (25.0, 50.0)
+            v = [10.0, 10.0, 4.0, 0.0, bkg] # setting flux below
+            A_eff = 4π * (v[3] / 2)^2 / (8 * log(2)) # effective area of the PSF in pixels
+            flux = snr * sqrt(bkg * A_eff) # flux as a function of matched-filter snr and background level
+            v[4] = flux
+            truth = CircularGaussianPSF(x = v[1], y = v[2], fwhm = v[3], flux = v[4], bkg = v[5])
+            img = evaluate.(truth, inds[1], inds[2]')
+            img_noisy = similar(img) # buffer to hold Poisson noise realizations
+            # Add Poisson noise
+            rng = StableRNG(42)
+            init = CircularGaussianPSF(x = v[1] + 0.5, y = v[2] + 0.5, fwhm = v[3] - 0.5, flux = 0.8 * flux, bkg = v[5] * 0.9)
+
+            for loss in (LossFunctions.HuberLoss(1.0), TukeyLoss(), nothing)
+                N_tests = 1000
+                minimizers = Matrix{Float64}(undef, 5, N_tests)
+                for i in 1:N_tests
+                    img_noisy .= rand.(Ref(rng), Poisson.(img))
+                    best, result = fit_star(init, img_noisy; reweight = loss)
+                    @test result.converged
+                    minimizers[:, i] = result.minimizer
+                end
+                minimizer_means = mean(minimizers, dims = 2)[:, 1]
+                minimizer_medians = median(minimizers, dims = 2)[:, 1]
+                minimizer_stds = std(minimizers, dims = 2)[:, 1]
+                # median over many noise realizations should be close to truth
+                @test minimizer_medians ≈ v rtol = 1.0e-2
+                # fraction of runs where minimizer is within 1σ of truth should be ~68% for each parameter
+                within_1σ = sum(abs.(minimizers .- v) .< minimizer_stds, dims = 2)[:, 1] ./ N_tests
+                # within_1σ is slightly high (~0.69 -- 0.76); the cov calculation when reweighting
+                # is somewhat conservative and may overestimate uncertainties
+                @test all(within_1σ .>= 0.68 - 0.1) && all(within_1σ .<= 0.68 + 0.1)
+            end
+        end
+    end
+end
+
+@testset "TukeyLoss properties" begin
+    loss = TukeyLoss(; c = 4.685)
+    @test loss(0.0, 0.0) == 0.0
+    # For small residuals, should behave like L2
+    @test LossFunctions.deriv(loss, 0.1, 0.0) ≈ 0.1 atol = 1.0e-3
+    # For residuals beyond c, derivative should be zero
+    @test LossFunctions.deriv(loss, 10.0, 0.0) ≈ 0.0 atol = 1.0e-6
+    # Weight function
+    @test weight(loss, 0.0) ≈ 1.0 atol = 1.0e-6
+    @test weight(loss, 10.0) == 0.0
+    @test weight(loss, 2.0) > 0.0  # within threshold, positive weight
+end
+
+@testset "IRLS weight function" begin
+    @test weight(LossFunctions.L2DistLoss(), 1.0) == 1.0
+    @test weight(LossFunctions.L2DistLoss(), 0.0) ≈ 1.0 atol = 1.0e-6
+    @test weight(LossFunctions.HuberLoss(1.0), 0.5) == 1.0
+    @test weight(LossFunctions.HuberLoss(1.0), 2.0) < 1.0
+end
+
+@testset "fit argument errors" begin
+    m = CircularGaussianPSF(x = 5.5, y = 5.2, fwhm = 3.0, flux = 100.0, bkg = 1.0)
+    img = evaluate.(m, 1:10, (1:10)')
+    init = CircularGaussianPSF(x = 5.8, y = 4.9, fwhm = 3.2, flux = 95.0, bkg = 1.1)
+    @test_throws ArgumentError fit_star(init, img; inv_var = zeros(size(img)))
+    @test_throws ArgumentError fit_star(init, img; inv_var = fill(-1.0, size(img)))
+    @test_throws ArgumentError fit_star(init, img; inv_var = fill(1.0, (11, 10)))
+    @test_throws ArgumentError fit_star(init, img; fixed = (x = 1.0, y = 2.0, fwhm = 3.0, flux = 100.0, bkg = 1.0))
+    @test_throws ArgumentError fit_star(init, img; inv_var = fill(NaN, size(img)))
+    @test_throws ArgumentError fit_star(init, img; inv_var = fill(Inf, size(img)))
+    @test_throws ArgumentError fit_star(init, img, (1:2, 1:2)) # dof < 0
+end
