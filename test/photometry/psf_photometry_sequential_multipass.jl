@@ -120,8 +120,7 @@ end
     simfit = fit_pass(SimultaneousFitter{Float64}(:lsqr, 1, 10, 1e-4, 8, 1e-3, 10.0, 10.0, 1e-12, 1e12, 8),
         data, w, geom, catalog, TEST_PSF, plan, o, 1e-3; ny, nx)
     @test simfit.stats.n_accepted == 1
-    up = CrowdPhot._touched_pixels(geom.pixels, length(data))
-    @test simfit.stats.cost_end ≈ CrowdPhot._cost!(vec(simfit.model), data, w, up) rtol = 1e-10
+    @test simfit.stats.cost_end ≈ CrowdPhot._cost!(vec(simfit.model), data, w, geom.union_pix) rtol = 1e-10
 end
 
 @testset "separable circular Gaussian kernels" begin
@@ -168,9 +167,10 @@ end
         @test v1 ≈ v2 rtol = 1e-12
     end
 
-    # The simultaneous separable stamp fill matches generic `evaluate_fg`, masking included.
-    for prf in (CircularGaussianPRF(0.0, 0.0, 2.7, 1.0, 0.0), CircularGaussianPSF(0.0, 0.0, 2.7, 1.0, 0.0))
-        fx = (; fwhm = 2.7, bkg = 0.0)
+    # The simultaneous separable stamp fill matches generic `evaluate_fg`, masking included,
+    # with all of (y, x, flux) free and with `x` fixed (free parameters (y, flux)).
+    for prf in (CircularGaussianPRF(0.0, 0.0, 2.7, 1.0, 0.0), CircularGaussianPSF(0.0, 0.0, 2.7, 1.0, 0.0)),
+            fx in ((; fwhm = 2.7, bkg = 0.0), (; fwhm = 2.7, bkg = 0.0, x = 20.0))
         plan = FitPlan(prf, fx)
         R, ny, nx = 4, 40, 40
         cat = Catalog{Float64}([12.3, 20.7], [15.4, 24.1], [900.0, 400.0], fill(NaN, 2), [1, 1])
