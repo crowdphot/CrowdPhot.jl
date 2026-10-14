@@ -2131,10 +2131,17 @@ end
 # Background covariance (`background_covariance = true`)
 # ------------------------------------------------------------------------------
 
+# The PSF's scale for the background covariance: about 0.75 FWHM, and at least 3 pixels.
+_sigma_psf_radius(psf_fwhm) = isfinite(psf_fwhm) && psf_fwhm > 0 ? max(3, ceil(Int, 0.75 * psf_fwhm)) : 3
+
 # Half-width of the Σ core, where the background covariance enters each source's
 # solve: about 1.5 FWHM across and at least 7x7, capped at the fit box.
-_sigma_core_radius(psf_fwhm, R_fit::Int) =
-    min(R_fit, isfinite(psf_fwhm) && psf_fwhm > 0 ? max(3, ceil(Int, 0.75 * psf_fwhm)) : 3)
+_sigma_core_radius(psf_fwhm, R_fit::Int) = min(R_fit, _sigma_psf_radius(psf_fwhm))
+
+# Lag range, per axis, over which Σ_B's parameters are fitted: twice the PSF radius, so
+# the PSF-shaped term can be told from the smooth one.  It does not depend on the core or
+# `fit_rad`, which only set how far the tables built from the fit must reach.
+_sigma_b_fit_lags(psf_fwhm) = 2 * _sigma_psf_radius(psf_fwhm)
 
 # Pixels the background covariance is measured on: positive weight, and at least one
 # pixel away from anywhere a source's model exceeds `nsig` times the pixel noise.
@@ -2181,9 +2188,11 @@ re-render of `model` at the new parameters.
    exceeds half the pixel noise (dilated by one pixel), and
    [`Background._background_covariance`](@ref) fits the parametric background
    covariance `Σ_B(Δ) = a A_psf(Δ) + b exp(-|Δ|²/2ℓ²)` per `bkg_rms_box_size` mesh
-   cell, at lags up to `±2Rs`, over a window of half-width
-   `max(1.5 · bkg_rms_box_size, 5 · Rs)`.  `A_psf` is the PSF autocorrelation
-   ([`PSF._psf_acf`](@ref)), cropped at `fit_rad`.
+   cell, at lags up to `±Lf = 2 max(3, ceil(0.75 FWHM))`, over a window of half-width
+   `max(1.5 · bkg_rms_box_size, 2.5 Lf)`, with `ℓ` from the grid `2Lf × {1/3, …, 16/3}`.
+   The fit depends on the PSF only, not on the core or `fit_rad`; each cell's `Σ_B`
+   table is then built out to the `±2Rs` the core needs.  `A_psf` is the PSF
+   autocorrelation ([`PSF._psf_acf`](@ref)), cropped at `max(fit_rad, Lf / 2)`.
 2. **Per source**, over its full `fit_rad` stamp, in whitened form
    (`J̃ = sqrt(w) ∂m/∂θ` from `_finalize_derivatives!`, `r̃ = sqrt(w) (data - model)`):
    `Σ̃ = I + W^{1/2} Σ_B W^{1/2}` with `Σ_B` kept only for pixel pairs both within
@@ -2223,12 +2232,15 @@ function _background_covariance_step!(model::AbstractMatrix{FT}, fitter, fit, ps
     resid = fit.data .- vec(model)
 
     Rs = _sigma_core_radius(o.psf_fwhm, o.R_fit)
-    L = 2Rs
+    L = 2Rs   # the largest offset between two core pixels
+    Lf = _sigma_b_fit_lags(o.psf_fwhm)
     box = o.bkg_rms_box_size
-    prep = PSF._psf_acf(ConstructionBase.setproperties(psf, plan.fixed), L, o.R_fit)
+    # One autocorrelation table serves both the fit and the core's tables, so it reaches the
+    # longer of the two lag ranges, and the profile is never cropped short of the fitted lags.
+    prep = PSF._psf_acf(ConstructionBase.setproperties(psf, plan.fixed), max(L, Lf), max(o.R_fit, cld(Lf, 2)))
     bc = Background._background_covariance(reshape(resid, ny, nx), _covariance_valid(model, w, FT(0.5)),
-        reshape(w, ny, nx), box, L, (y, x) -> PSF._psf_acf_at(prep, y, x);
-        half_width = max(1.5 * box, 5 * Rs))
+        reshape(w, ny, nx), box, Lf, (y, x) -> PSF._psf_acf_at(prep, y, x);
+        half_width = max(1.5 * box, 2.5 * Lf))
 
     core = [abs(geom.dy_off[mi]) <= Rs && abs(geom.dx_off[mi]) <= Rs for mi in 1:S2]
     ncmax = count(core)
@@ -2283,7 +2295,7 @@ function _background_covariance_step!(model::AbstractMatrix{FT}, fitter, fit, ps
         end
         if nc > 0
             ay, ax = geom.anchor_y[j], geom.anchor_x[j]
-            T = get!(() -> Background._sigma_b_lags(bc, ay, ax), lag_cache, Background._cell_id(bc, ay, ax))
+            T = get!(() -> Background._sigma_b_lags(bc, ay, ax, L), lag_cache, Background._cell_id(bc, ay, ax))
             @inbounds for c in 1:nc, b in 1:nc
                 M[b, c] = sw_c[b] * sw_c[c] * T[dy_c[b] - dy_c[c] + L + 1, dx_c[b] - dx_c[c] + L + 1] + (b == c)
             end

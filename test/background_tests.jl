@@ -508,6 +508,17 @@ end
     @test T[L + 1, L + 1] ≈ bc.a[ci, cj] + bc.b[ci, cj]
     @test T ≈ reverse(T)
 
+    # The fitted lag range and the tables' reach are separate: a longer autocorrelation
+    # table leaves the fit unchanged and lets `_sigma_b_lags` build longer tables.
+    Lt = 10
+    acf_long(y, x) = [exp(-(dy^2 + dx^2) / (4σp^2)) for dy in -Lt:Lt, dx in -Lt:Lt]
+    bl = BG._background_covariance(img, trues(n, n), iv, 20, L, acf_long)
+    @test bl.a == bc.a && bl.b == bc.b && bl.ell == bc.ell
+    Tl = BG._sigma_b_lags(bl, 205, 105, Lt)
+    @test size(Tl) == (2Lt + 1, 2Lt + 1)
+    @test Tl[(Lt - L + 1):(Lt + L + 1), (Lt - L + 1):(Lt + L + 1)] ≈ T
+    @test_throws "need a square table of odd size at least" BG._sigma_b_lags(bc, 205, 105, L + 1)
+
     # Masked pixels are ignored: masking half the image leaves the estimate in the other half.
     valid = trues(n, n); valid[:, 1:200] .= false
     bm = BG._background_covariance(img, valid, iv, 20, L, acf)
