@@ -63,20 +63,27 @@ function flux_for_snr(
         read_noise::Real = 0,
         gain::Real = 1
     )
-    # Validate inputs before solving the SNR-flux quadratic.
     snr ≥ 0 || throw(ArgumentError("`snr` must be non-negative"))
+    bv, g = _snr_noise(model, background, read_noise, gain)
+    return _flux_for_snr(float(snr), bv, g)
+end
+
+# The SNR noise model shared by `flux_for_snr`, `snr_for_flux` and `simulate_sources`.
+# `bv` is the background variance over the PSF, `effective_area(model) * σb2`; everything that
+# does not depend on the source is in it, so callers with a fixed PSF compute it once.
+function _snr_noise(model::AbstractPSFModel, background::Real, read_noise::Real, gain::Real)
     gain > 0 || throw(ArgumentError("`gain` must be positive"))
     background ≥ 0 || throw(ArgumentError("`background` must be non-negative"))
     read_noise ≥ 0 || throw(ArgumentError("`read_noise` must be non-negative"))
-    snr, background, read_noise, gain = float.((snr, background, read_noise, gain))
-
-    # Combine the background/read-noise variance and effective PSF area.
+    background, read_noise, gain = float.((background, read_noise, gain))
     σb2 = background / gain + read_noise^2
-    background_variance = effective_area(model) * σb2
+    return effective_area(model) * σb2, gain
+end
 
-    # Include source shot noise by taking the positive root of the quadratic.
+# Positive root of snr² (F/g + bv) = F², i.e. the flux including source shot noise.
+@inline function _flux_for_snr(snr, bv, gain)
     source_noise_term = snr^2 / gain
-    return (source_noise_term + sqrt(source_noise_term^2 + 4 * snr^2 * background_variance)) / 2
+    return (source_noise_term + sqrt(source_noise_term^2 + 4 * snr^2 * bv)) / 2
 end
 
 @doc raw"""
@@ -106,34 +113,11 @@ function snr_for_flux(
         read_noise::Real = 0,
         gain::Real = 1
     )
-    # Validate inputs before solving the SNR-flux quadratic.
     flux ≥ 0 || throw(ArgumentError("`flux` must be non-negative"))
-    gain > 0 || throw(ArgumentError("`gain` must be positive"))
-    background ≥ 0 || throw(ArgumentError("`background` must be non-negative"))
-    read_noise ≥ 0 || throw(ArgumentError("`read_noise` must be non-negative"))
-    flux, background, read_noise, gain = float.((flux, background, read_noise, gain))
-
-    # Combine the background/read-noise variance and effective PSF area.
-    σb2 = background / gain + read_noise^2
-    background_variance = effective_area(model) * σb2
-
+    bv, g = _snr_noise(model, background, read_noise, gain)
+    flux = float(flux)
     # Include source shot noise in the SNR calculation.
-    return flux / sqrt(flux / gain + background_variance)
-end
-
-function _flux_from_snr_spec(rng, model, snr, background, read_noise, gain)
-    # Collapse matrix backgrounds to a representative scalar for source draws.
-    bg = background isa AbstractMatrix ? median(background) : background
-    if snr isa Number
-        return flux_for_snr(model, snr; background = bg, read_noise, gain)
-    elseif snr isa Tuple || snr isa AbstractVector
-        # Allow source-to-source SNR variation over a uniform range.
-        length(snr) == 2 || throw(ArgumentError("`snr` range must have two values"))
-        sampled = snr[1] + rand(rng) * (snr[2] - snr[1])
-        return flux_for_snr(model, sampled; background = bg, read_noise, gain)
-    else
-        throw(ArgumentError("`snr` must be a scalar or two-value range"))
-    end
+    return flux / sqrt(flux / g + bv)
 end
 
 ### Source placement utilities with grid-based acceleration for large `min_separation` ###
@@ -242,6 +226,23 @@ function simulate_sources(
     minsep2 = minsep^2
     use_grid = !iszero(minsep)
     inv_cell_size = inv(minsep)
+    # SNR branch: only the SNR draw varies per source, so the PSF's effective area, the
+    # representative background (a matrix's median) and the noise model are evaluated once.
+    bv = g = snr_lo = snr_span = 0.0
+    if !isnothing(snr)
+        isnothing(psf) && throw(ArgumentError("`psf` is required when generating fluxes from `snr`"))
+        if snr isa Number
+            snr_lo = float(snr)
+        elseif snr isa Tuple || snr isa AbstractVector
+            # Allow source-to-source SNR variation over a uniform range.
+            length(snr) == 2 || throw(ArgumentError("`snr` range must have two values"))
+            snr_lo, snr_span = float(snr[1]), float(snr[2]) - float(snr[1])
+        else
+            throw(ArgumentError("`snr` must be a scalar or two-value range"))
+        end
+        snr_lo ≥ 0 && snr_lo + snr_span ≥ 0 || throw(ArgumentError("`snr` must be non-negative"))
+        bv, g = _snr_noise(psf, background isa AbstractMatrix ? median(background) : background, read_noise, gain)
+    end
     xs = Vector{Float64}(undef, n_sources)
     ys = Vector{Float64}(undef, n_sources)
     fs = Vector{Float64}(undef, n_sources)
@@ -261,8 +262,7 @@ function simulate_sources(
         f = if isnothing(snr)
             _sample_flux(rng, flux, flux_distribution, flux_power)
         else
-            isnothing(psf) && throw(ArgumentError("`psf` is required when generating fluxes from `snr`"))
-            _flux_from_snr_spec(rng, psf, snr, background, read_noise, gain)
+            _flux_for_snr(snr isa Number ? snr_lo : snr_lo + rand(rng) * snr_span, bv, g)
         end
         n_generated += 1
         xs[n_generated] = x

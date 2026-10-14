@@ -451,9 +451,9 @@ end
           effective_area(m) rtol = 1e-3
 
     # It must ignore `flux` (cancels from the ratio) and `bkg` (does not, so the
-    # model method has to zero it before rendering).  Checked on a
+    # model method has to zero it before evaluating).  Checked on a
     # `GriddedPSFModel`, which has no analytic method and so exercises the
-    # fallback itself.
+    # generic (lattice-evaluation) method itself.
     nodes(fw) = [CircularGaussianPRF(; y = gy, x = gx, fwhm = fw, flux = 1.0, bkg = 0.0)
                  for (gy, gx) in ((0.0, 0.0), (0.0, 10.0), (10.0, 0.0), (10.0, 10.0))]
     g = GriddedPSFModel(nodes(3.0), [0.0, 0.0, 10.0, 10.0], [0.0, 10.0, 0.0, 10.0];
@@ -462,7 +462,7 @@ end
     @test effective_area(g) ≈ effective_area(ConstructionBase.setproperties(g, (; bkg = 50.0))) rtol = 1e-12
     # Above the nominal 3.0 because the nodes are PRFs: the profile is
     # pixel-integrated and so broader than the underlying Gaussian.  The
-    # render-based fallback and the analytic PRF method now agree on this.
+    # generic method and the analytic PRF method agree on this.
     @test effective_fwhm(g) ≈ 3.0 rtol = 0.10
     @test effective_fwhm(g) > 3.0
     @test effective_area(g) ≈
@@ -482,6 +482,22 @@ end
     @test lo ≈ 2.0 rtol = 0.10       # pixel integration broadens the narrow node most
     @test hi ≈ 6.0 rtol = 0.10
     @test hi > lo
+
+    # Undersampled PRF nodes: the generic method averages over subpixel phase, so it
+    # matches the analytic (phase-averaged) PRF value and does not depend on the
+    # model's subpixel position.  A single `render` at a half-pixel position
+    # measured a pixel-corner star instead (FWHM 1.80 vs 1.30 at a pixel center
+    # for a Roman F062 ePSF).
+    gu = GriddedPSFModel(nodes(1.3), [0.0, 0.0, 10.0, 10.0], [0.0, 10.0, 0.0, 10.0];
+                         y = 5.0, x = 5.0, flux = 1.0, bkg = 0.0)
+    ea_u = effective_area(CircularGaussianPRF(; y = 0.0, x = 0.0, fwhm = 1.3, flux = 1.0, bkg = 0.0))
+    for (y, x) in ((5.0, 5.0), (5.5, 5.5), (5.25, 4.7))
+        @test effective_area(ConstructionBase.setproperties(gu, (; y, x))) ≈ ea_u rtol = 1e-4
+    end
+    # What the render-based fallback used to return at a half-pixel position: 8% high here
+    # (5.29 vs 4.91); the Roman ePSF, with IPC and a sharper core, differs far more.
+    @test effective_area(render(ConstructionBase.setproperties(gu, (; y = 5.5, x = 5.5)))) >
+          1.05 * effective_area(gu)
 
     # PRF effective area is the pixel-integrated one, so it exceeds the PSF's,
     # by more the worse the sampling.  Checked against a direct render, which is

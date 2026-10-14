@@ -118,6 +118,26 @@ end
     @test_throws ArgumentError _as_oversampling((2, 3, 4))
 end
 
+@testset "ImagePSF effective_area" begin
+    # A pixel-integrated Gaussian (PRF) tabulated at 4x: the discrete ratio (Σd)²/(os²Σd²)
+    # must match the analytic phase-averaged PRF value and must not depend on the data's
+    # normalization (CRDS stamps loaded with `normalize = false` do not sum to os²).
+    prf = CircularGaussianPRF(; y = 0.0, x = 0.0, fwhm = 1.5, flux = 1.0, bkg = 0.0)
+    os = 4; n = 121; c = (n + 1) ÷ 2
+    data = [evaluate(prf, (i - c) / os, (j - c) / os) for i in 1:n, j in 1:n]
+    m = ImagePSF(data; oversampling = os)
+    ea = CrowdPhot.PSF.effective_area(m)
+    @test ea ≈ CrowdPhot.PSF.effective_area(prf) rtol = 1e-4
+    @test CrowdPhot.PSF.effective_area(ImagePSF(0.97 .* data; oversampling = os)) ≈ ea rtol = 1e-12
+    @test CrowdPhot.PSF.effective_area(ImagePSF(data; oversampling = os, normalize = true)) ≈ ea rtol = 1e-12
+    # A GriddedPSFModel of ImagePSF nodes goes through the generic lattice method and agrees
+    # with its node at any subpixel position.
+    for (y, x) in ((3.0, 7.0), (3.5, 7.5), (3.3, 6.8))
+        g = CrowdPhot.PSF.GriddedPSFModel([m], [0.0], [0.0]; y, x)
+        @test CrowdPhot.PSF.effective_area(g) ≈ ea rtol = 1e-3
+    end
+end
+
 @testset "ImagePSF LM fit_star -- single star" begin
     # Fit only ImagePSF's source parameters to ensure it works with LM/IRLS.
     grid_model = CircularGaussianPRF(x = 8, y = 8, fwhm = 2.4, flux = 1, bkg = 0)

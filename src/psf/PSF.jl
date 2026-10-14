@@ -173,9 +173,30 @@ the maximum likelihood estimate of the flux is
 
 where `D_i` is the observed data, `B_i` is the background, and `P_i` is the PSF
 value at pixel `i`. The variance of the flux measurement is `var(\hat{F}) = σ² * effective_area(P)`.
+
+For a pixel-integrated model (a PRF), the integrals run over the continuous source position, so
+the result is the pixel sum `(ΣP_i)²/ΣP_i²` averaged over subpixel phases: it does not depend on
+where the model sits relative to the pixel grid.  The generic method evaluates the model on a
+lattice of spacing `1/oversample` around its centroid, over its [`extent`](@ref), and takes the
+discrete form of that ratio.  (Summing a single [`render`](@ref) instead measures one phase, which
+for an undersampled PRF varies by tens of percent with the subpixel position.)
 """
-function effective_area(model::AbstractPSFModel)
-    return effective_area(render(ConstructionBase.setproperties(model, (; bkg = zero(eltype(model))))))
+function effective_area(model::AbstractPSFModel{T}; oversample::Integer = 4) where {T}
+    m = ConstructionBase.setproperties(model, (; bkg = zero(T)))
+    (ylo, yhi), (xlo, xhi) = extent(m)
+    y0, x0 = centroid(m)
+    # Anchored at the centroid, the lattice offsets (and hence the result) do not depend on the
+    # model's subpixel position.
+    ar = floor(Int, (ylo - y0) * oversample):ceil(Int, (yhi - y0) * oversample)
+    br = floor(Int, (xlo - x0) * oversample):ceil(Int, (xhi - x0) * oversample)
+    h = one(T) / T(oversample)
+    s = s2 = zero(promote_type(Float64, T))
+    for b in br, a in ar
+        v = evaluate(m, y0 + a * h, x0 + b * h)
+        s += v
+        s2 += v * v
+    end
+    return T(s^2 / (oversample^2 * s2))
 end
 
 """
