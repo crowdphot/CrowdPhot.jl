@@ -424,5 +424,21 @@ end
             background_covariance = true).phot
         @test zs(a, src) > 1.5
         @test abs(zs(b, src) - 1) < 0.2
+        c = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = TEST_FIXED, kw...,
+            background_covariance = true, background_covariance_rad = 3).phot
+        @test c.flux == b.flux && c.flux_err == b.flux_err
+        # A core smaller than the PSF leaves out part of Σ_B: errors still grow, but only
+        # part of the way to calibrated.
+        d = fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = TEST_FIXED, kw...,
+            background_covariance = true, background_covariance_rad = 2).phot
+        @test all(d.flux_err .>= a.flux_err .* (1 - 1.0e-8))
+        @test zs(b, src) < zs(d, src) < zs(a, src)
+        e = fit_all_stars_multipass(img, TEST_PSF, src, 5; inv_var = iv, fixed = TEST_FIXED, kw...,
+            background_covariance = true).phot
+        @test all(isfinite, e.flux_err)
+        @test abs(zs(e, src) - 1) < 0.2
+        for rad in (4, 0)
+            @test_throws "background_covariance_rad must be positive and at most fit_rad" fit_all_stars_multipass(img, TEST_PSF, src, 3; inv_var = iv, fixed = TEST_FIXED, kw..., background_covariance = true, background_covariance_rad = rad)
+        end
     end
 end

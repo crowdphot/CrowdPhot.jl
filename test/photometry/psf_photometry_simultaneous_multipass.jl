@@ -1578,6 +1578,22 @@ zwidth(z) = (quantile(z, 0.84) - quantile(z, 0.16)) / 2
         @test zwidth(z0) > 1.5
         @test abs(zwidth(z1) - 1) < 0.15
         @test abs(zwidth(z1) - 1) < abs(zwidth(z0) - 1)
+        # The core defaults to the fit stamp; `background_covariance_rad` rounds up like `fit_rad`.
+        r3 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw..., background_covariance = true, background_covariance_rad = 2.5)
+        @test r3.phot.flux == r1.phot.flux && r3.phot.flux_err == r1.phot.flux_err
+        # A core smaller than the PSF leaves out part of Σ_B: errors still grow, but only
+        # part of the way to calibrated.
+        r2 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw..., background_covariance = true, background_covariance_rad = 2)
+        z2 = matched_z(r2.phot, src)
+        @test all(r2.phot.flux_err .>= r0.phot.flux_err .* (1 - 1.0e-8))
+        @test zwidth(z1) < zwidth(z2) < zwidth(z0)
+        # A larger fit box with its full stamp as the core.
+        r5 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 5; inv_var = iv, kw..., background_covariance = true)
+        @test all(isfinite, r5.phot.flux_err)
+        @test abs(zwidth(matched_z(r5.phot, src)) - 1) < 0.2
+        for rad in (4, 0)
+            @test_throws "background_covariance_rad must be positive and at most fit_rad" fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw..., background_covariance = true, background_covariance_rad = rad)
+        end
     end
     @testset "frozen positions" begin
         img, src, iv = structured_field(; amp = 20.0, nsrc = 200)
