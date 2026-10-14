@@ -150,6 +150,22 @@ function _jacobian_operator(stamp::StampDerivatives{FT}, live, sbuf, npix::Int, 
     return LinearOperators.LinearOperator(FT, npix, n, false, false, fwd, adj, adj)
 end
 
+# Column equilibration of star `a`, while its stamp is still in cache: `colnorm` holds the
+# sums of squares on entry and their square roots, floored at `eps(FT)`, on exit, and
+# `values ./= colnorm`.
+function _equilibrate_star!(stamp::StampDerivatives{FT}, a) where {FT}
+    @inbounds for k in 1:stamp.p
+        cn = sqrt(stamp.colnorm[k, a])
+        cn = ifelse(cn < eps(FT), eps(FT), cn)
+        stamp.colnorm[k, a] = cn
+        invcn = inv(cn)
+        for mi in 1:stamp.S2
+            stamp.values[k, mi, a] *= invcn
+        end
+    end
+    return stamp
+end
+
 function _fill_stamps_generic!(
         stamp::StampDerivatives{FT}, model_template, free_names_val, fixed,
         θ, w, grad_col, dy_off, dx_off, anchor_y, anchor_x,
@@ -163,8 +179,8 @@ function _fill_stamps_generic!(
     # `_render_model!`.
     # No blanket `fill!(stamp.colnorm, ...)`: a frozen star's column must stay
     # bitwise untouched between freeze and the end of the fit (reset only the
-    # live columns being recomputed below), or the eps(FT) floor two lines
-    # down turns a stale zero into a ~4.5e15 rescale applied again every
+    # live columns being recomputed below), or the eps(FT) floor in
+    # `_equilibrate_star!` turns a stale zero into a ~4.5e15 rescale applied again every
     # iteration, overflowing stamp.values to Inf within a couple of outer
     # iterations and leaking NaN into a still-live star's operator column.
     @inbounds for a in 0:(n_active - 1)
@@ -202,19 +218,7 @@ function _fill_stamps_generic!(
                 stamp.colnorm[k, a + 1] += raw * raw
             end
         end
-    end
-    # Column equilibration: values ./= colnorm, floor colnorm at eps(T).
-    @inbounds for a in 1:n_active
-        live[a] || continue
-        for k in 1:p
-            cn = sqrt(stamp.colnorm[k, a])
-            cn = ifelse(cn < eps(FT), eps(FT), cn)
-            stamp.colnorm[k, a] = cn
-            invcn = inv(cn)
-            for mi in 1:S2
-                stamp.values[k, mi, a] *= invcn
-            end
-        end
+        _equilibrate_star!(stamp, a + 1)
     end
     return stamp
 end
@@ -351,19 +355,7 @@ function _fill_stamps!(
                 stamp.colnorm[k, a + 1] += raw * raw
             end
         end
-    end
-    # Column equilibration: values ./= colnorm, floor colnorm at eps(T).
-    @inbounds for a in 1:n_active
-        live[a] || continue
-        for k in 1:p
-            cn = sqrt(stamp.colnorm[k, a])
-            cn = ifelse(cn < eps(FT), eps(FT), cn)
-            stamp.colnorm[k, a] = cn
-            invcn = inv(cn)
-            for mi in 1:S2
-                stamp.values[k, mi, a] *= invcn
-            end
-        end
+        _equilibrate_star!(stamp, a + 1)
     end
     return stamp
 end
@@ -434,19 +426,7 @@ function _fill_stamps!(
                 stamp.colnorm[k, a + 1] += raw * raw
             end
         end
-    end
-    # Column equilibration: values ./= colnorm, floor colnorm at eps(T).
-    @inbounds for a in 1:n_active
-        live[a] || continue
-        for k in 1:p
-            cn = sqrt(stamp.colnorm[k, a])
-            cn = ifelse(cn < eps(FT), eps(FT), cn)
-            stamp.colnorm[k, a] = cn
-            invcn = inv(cn)
-            for mi in 1:S2
-                stamp.values[k, mi, a] *= invcn
-            end
-        end
+        _equilibrate_star!(stamp, a + 1)
     end
     return stamp
 end
@@ -962,7 +942,7 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
 
     stamp = StampDerivatives{FT, Int32}(Array{FT, 3}(undef, p, S2, n), geom.pixels,
                                         Matrix{FT}(undef, p, n), npix, p, S2)
-    union_pix = _touched_pixels(geom.pixels, npix)
+    union_pix = geom.union_pix
     dof = max(length(union_pix) - n_par, 1)
     live = trues(n)
     sbuf = Vector{FT}(undef, S2)

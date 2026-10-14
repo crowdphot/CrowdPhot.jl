@@ -856,6 +856,8 @@ end
     @test g.dy_off[mid] == 0 && g.dx_off[mid] == 0
     @test g.pixels[mid, 1] == 20 + (20 - 1) * ny
     @test all(>(0), g.pixels)
+    # Every pixel any stamp covers, once, sorted.
+    @test g.union_pix == sort(unique(vec(g.pixels)))
 
     # A source off the image edge keeps only its on-image pixels.
     edge = Catalog{Float64}([1.0], [1.0], [1.0], [5.0], [1])

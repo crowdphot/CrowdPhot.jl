@@ -317,18 +317,6 @@ function _model_radii(psf, model_rad, nsigma, R_fit::Int, R_cap::Int,
     return out
 end
 
-# Sorted, unique flat indices of every image pixel covered by at least one
-# stamp -- the support over which the cost and residual are evaluated.  A
-# length-`npix` mask (not a growing vector + sort) keeps this linear in the
-# stamp count and cheap in memory even at whole-frame sizes.
-function _touched_pixels(pixels, npix::Int)
-    mask = falses(npix)
-    @inbounds for fi in pixels
-        fi != 0 && (mask[fi] = true)
-    end
-    return findall(mask)
-end
-
 """
     _render_model!(model_img, model_template, free_names_val, fixed, θ, p,
                    model_R, anchor_y, anchor_x, ny, nx, live, render_buf, render_scratch)
@@ -1017,8 +1005,10 @@ end
 """
     stamp_geometry(catalog, w, R, ny, nx; min_pixels = 1) -> NamedTuple
 
-The fixed `(2R + 1)^2` stamp footprint, each source's rounded anchor, and the
-flat image index of every stamp pixel (`0` for off-image or zero-weight).
+The fixed `(2R + 1)^2` stamp footprint, each source's rounded anchor, the
+flat image index of every stamp pixel (`0` for off-image or zero-weight), and
+`union_pix`, the sorted flat indices of every pixel in at least one stamp -- the
+support over which the fitters evaluate the cost and residual.
 
 `ok[j]` is `false` for a source with non-finite parameters or fewer than
 `min_pixels` usable pixels.  The caller drops those and calls this again rather than compacting the
@@ -1028,7 +1018,7 @@ columns disagreeing with the catalog they were built from.
 
 # Returns
 
-`anchor_y`, `anchor_x`, `dy_off`, `dx_off`, `pixels` (`S2 x n`), `S2`, `ok`.
+`anchor_y`, `anchor_x`, `dy_off`, `dx_off`, `pixels` (`S2 x n`), `union_pix`, `S2`, `ok`.
 """
 function stamp_geometry(catalog::Catalog, w::AbstractVector, R::Int, ny::Int, nx::Int;
                         min_pixels::Integer = 1)
@@ -1048,6 +1038,9 @@ function stamp_geometry(catalog::Catalog, w::AbstractVector, R::Int, ny::Int, nx
     anchor_y = Vector{Int}(undef, n)
     anchor_x = Vector{Int}(undef, n)
     ok = trues(n)
+    # A length-`npix` mask (not a growing vector + sort) keeps `union_pix` linear in
+    # the stamp count and cheap in memory even at whole-frame sizes.
+    touched = falses(ny * nx)
     @inbounds for j in 1:n
         yj, xj, fj = catalog.y[j], catalog.x[j], catalog.flux[j]
         if !(isfinite(yj) && isfinite(xj) && isfinite(fj))
@@ -1068,13 +1061,14 @@ function stamp_geometry(catalog::Catalog, w::AbstractVector, R::Int, ny::Int, nx
                 fi = gy + (gx - 1) * ny
                 if w[fi] > 0
                     pixels[mi, j] = fi
+                    touched[fi] = true
                     n_pix += 1
                 end
             end
         end
         ok[j] = n_pix >= min_pixels
     end
-    return (; anchor_y, anchor_x, dy_off, dx_off, pixels, S2, ok)
+    return (; anchor_y, anchor_x, dy_off, dx_off, pixels, union_pix = findall(touched), S2, ok)
 end
 
 # ==============================================================================

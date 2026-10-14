@@ -193,7 +193,7 @@ function fit_pass(fitter::SequentialFitter, data::Vector{FT}, w::Vector{FT}, geo
     model = zeros(FT, npix)
     _render_model!(model, psf, plan.free_names_val, plan.fixed, theta, plan.p, model_R,
         geom.anchor_y, geom.anchor_x, ny, nx, trues(n), render_buf, render_scratch)
-    union_pix = _touched_pixels(geom.pixels, npix)
+    union_pix = geom.union_pix
     cost_start = _cost!(model, data, w, union_pix)
     resid = data .- model
     resid_mat = reshape(resid, ny, nx)
