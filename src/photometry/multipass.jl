@@ -1565,9 +1565,8 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   neighbor-marginalized errors plus the variance this adds, and the returned model
   and residual are re-rendered at the new parameters.  The residual still shows
   the background structure: it is marginalized per source, not rendered.  Costs
-  roughly 15 µs per source for a 7x7 core (`background_covariance_rad = 3`),
-  growing about as `(2 background_covariance_rad + 1)^6` (~150 µs at 6), plus
-  ~20 ns per image pixel for the covariance estimate.
+  roughly 10 µs per source at `background_covariance_rad = 3`, 45 µs at 5 and
+  165 µs at 7, plus ~20 ns per image pixel for the covariance estimate.
 - `background_covariance_rad::Real = fit_rad`: half-width of the core over which
   `background_covariance` keeps `Σ_B`, rounded up like `fit_rad` and at most
   `fit_rad`.  The default solves the step under the full `N + Σ_B` over the
@@ -1718,6 +1717,11 @@ diagnostics and morphology -- and talks to a fitter only through these methods:
   diagnostics' degrees of freedom.
 - `min_stamp_pixels(fitter, plan)`: usable stamp pixels a source needs to stay
   in the catalog.
+- `_finalize_derivatives!(Jt, fitter, fit, psf, plan, j)`: for `background_covariance`,
+  fills `Jt` (`S2 x p`) with source `j`'s weighted derivatives `sqrt(w) ∂m/∂θ` over
+  its stamp at `fit.theta`.  Called after `source_errors`, which a fitter may rely on.
+- `_errors_include_pedestal(fitter)`: whether `source_errors` marginalizes a
+  per-source pedestal; the background-covariance step then solves for one too.
 
 `fit_pass` returns a `NamedTuple` with at least:
 

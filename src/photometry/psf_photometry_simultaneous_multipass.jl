@@ -911,10 +911,10 @@ linearization with no accepted trial ends the pass.
 
 # Returns
 
-The fields [`AbstractMultipassFitter`](@ref) requires, plus `stamp`, `cost`,
-`dof` and `fill_scratch` for [`source_errors`](@ref).  `stats` holds `n_lin`,
-`n_trials` (damping trials), `n_accepted` (accepted trials), `cost_start`,
-`cost_end`, `lambda_start` and `lambda_end`.
+The fields [`AbstractMultipassFitter`](@ref) requires, plus `stamp` and
+`fill_scratch` for [`source_errors`](@ref).  `stats` holds `n_lin`, `n_trials`
+(damping trials), `n_accepted` (accepted trials), `cost_start`, `cost_end`,
+`lambda_start` and `lambda_end`.
 
 `stats.fit_timing` breaks the pass's wall time into `setup` (allocation and the
 Krylov workspace), `stamps`, `render` and `solve` (the Krylov solve and the step it
@@ -943,7 +943,6 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
     stamp = StampDerivatives{FT, Int32}(Array{FT, 3}(undef, p, S2, n), geom.pixels,
                                         Matrix{FT}(undef, p, n), npix, p, S2)
     union_pix = geom.union_pix
-    dof = max(length(union_pix) - n_par, 1)
     live = trues(n)
     sbuf = Vector{FT}(undef, S2)
 
@@ -1057,7 +1056,7 @@ function fit_pass(fitter::SimultaneousFitter, data::Vector{FT}, w::Vector{FT}, g
     #     t_stamps += time() - t0
     # end
 
-    fit = (; theta, model = reshape(model, ny, nx), cost, dof, stamp, model_R, geom, data, w,
+    fit = (; theta, model = reshape(model, ny, nx), stamp, model_R, geom, data, w,
              render_buf, render_scratch, fill_scratch)
     stats = (; n_lin, n_trials, n_accepted, cost_start, cost_end = cost, lambda_start,
                lambda_end = lambda,
