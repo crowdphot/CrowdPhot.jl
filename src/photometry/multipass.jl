@@ -1559,15 +1559,20 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   term.  Each source then gets one Gauss-Newton step, against the final residual
   with its neighbors held fixed, of its free parameters over its `fit_rad` stamp,
   weighted by `N + Σ_B`, where `N` is the pixel noise from `inv_var` and `Σ_B` is
-  that covariance restricted to the PSF core (`clamp(ceil(0.75 FWHM), 3, fit_rad)`
-  pixels from the anchor).  The smooth term also lets each source's fit absorb a
+  that covariance restricted to the core within `background_covariance_rad` pixels
+  of the anchor.  The smooth term also lets each source's fit absorb a
   local offset of the background level under its core.  Its errors are the usual
   neighbor-marginalized errors plus the variance this adds, and the returned model
   and residual are re-rendered at the new parameters.  The residual still shows
   the background structure: it is marginalized per source, not rendered.  Costs
-  roughly 15 µs per source for a PSF FWHM up to ~4 pixels (a 7x7
-  core), growing steeply with larger PSFs (~150 µs at FWHM 7), plus ~20 ns per
-  image pixel for the covariance estimate.
+  roughly 15 µs per source for a 7x7 core (`background_covariance_rad = 3`),
+  growing about as `(2 background_covariance_rad + 1)^6` (~150 µs at 6), plus
+  ~20 ns per image pixel for the covariance estimate.
+- `background_covariance_rad::Real = fit_rad`: half-width of the core over which
+  `background_covariance` keeps `Σ_B`, rounded up like `fit_rad` and at most
+  `fit_rad`.  The default solves the step under the full `N + Σ_B` over the
+  `fit_rad` stamp.  Smaller values are cheaper, but leave out the background
+  covariance outside the core, which matters for PSFs with extended wings.
 - `model_rad::Union{Symbol, Real} = :auto`: half-width of the box each source's
   model is rendered/subtracted over -- distinct from the `fit_rad` fitting box
   (DAOPHOT's PSF radius vs fitting radius).  `fit_rad` can safely be kept small
@@ -1783,6 +1788,7 @@ function _fit_all_stars_multipass(
         few_sources::Integer = 100,
         freeze_positions_final::Bool = false,
         background_covariance::Bool = false,
+        background_covariance_rad::Real = fit_rad,
         show_trace::Bool = false,
     ) where {T}
 
@@ -1883,6 +1889,8 @@ function _fit_all_stars_multipass(
     end
 
     R_fit = round(Int, round(fit_rad, RoundUp))
+    R_cov = round(Int, round(background_covariance_rad, RoundUp))
+    0 < R_cov <= R_fit || throw(ArgumentError("background_covariance_rad must be positive and at most fit_rad"))
     o = (;
         # background
         bkg_box_size = Int(bkg_box_size), bkg_box_size_coarse = Int(bkg_box_size_coarse),
@@ -1899,7 +1907,7 @@ function _fit_all_stars_multipass(
         # fit
         R_fit, R_cap = ceil(Int, model_rad === :auto ? model_rad_max : max(float(model_rad), float(fit_rad))),
         model_rad, model_rad_nsigma = FT(model_rad_nsigma), max_step = FT(max_step),
-        freeze_positions_final, background_covariance,
+        freeze_positions_final, background_covariance, R_cov,
     )
 
     min_pix = min_stamp_pixels(fitter, plan)
@@ -2134,10 +2142,6 @@ end
 # The PSF's scale for the background covariance: about 0.75 FWHM, and at least 3 pixels.
 _sigma_psf_radius(psf_fwhm) = isfinite(psf_fwhm) && psf_fwhm > 0 ? max(3, ceil(Int, 0.75 * psf_fwhm)) : 3
 
-# Half-width of the Σ core, where the background covariance enters each source's
-# solve: about 1.5 FWHM across and at least 7x7, capped at the fit box.
-_sigma_core_radius(psf_fwhm, R_fit::Int) = min(R_fit, _sigma_psf_radius(psf_fwhm))
-
 # Lag range, per axis, over which Σ_B's parameters are fitted: twice the PSF radius, so
 # the PSF-shaped term can be told from the smooth one.  It does not depend on the core or
 # `fit_rad`, which only set how far the tables built from the fit must reach.
@@ -2196,11 +2200,11 @@ re-render of `model` at the new parameters.
 2. **Per source**, over its full `fit_rad` stamp, in whitened form
    (`J̃ = sqrt(w) ∂m/∂θ` from `_finalize_derivatives!`, `r̃ = sqrt(w) (data - model)`):
    `Σ̃ = I + W^{1/2} Σ_B W^{1/2}` with `Σ_B` kept only for pixel pairs both within
-   the Σ core of half-width `Rs = clamp(ceil(0.75 FWHM), 3, fit_rad)` about the
-   anchor.  That block is positive semidefinite, and it makes `Σ̃`
-   block diagonal, so only the core needs a dense Cholesky.  The source's free
-   parameters are solved for with neighbors held fixed, plus a pedestal over the
-   whole stamp only when the fitter fits one itself (`_errors_include_pedestal`):
+   the Σ core of half-width `Rs = background_covariance_rad` about the anchor
+   (the whole stamp at the default `Rs = fit_rad`).  That block is positive
+   semidefinite, and it makes `Σ̃` block diagonal, so only the core needs a dense
+   Cholesky.  The source's free parameters are solved for with neighbors held
+   fixed, plus a pedestal over the whole stamp only when the fitter fits one itself (`_errors_include_pedestal`):
    - errors: the fitter's `errs` (neighbor-marginalized, under `W`) plus the
      increment `(J̃'Σ̃⁻¹J̃)⁻¹ - (J̃'J̃)⁻¹` on the diagonal, positive semidefinite
      since `Σ ⪰ N`.
@@ -2231,7 +2235,7 @@ function _background_covariance_step!(model::AbstractMatrix{FT}, fitter, fit, ps
     w = fit.w
     resid = fit.data .- vec(model)
 
-    Rs = _sigma_core_radius(o.psf_fwhm, o.R_fit)
+    Rs = o.R_cov
     L = 2Rs   # the largest offset between two core pixels
     Lf = _sigma_b_fit_lags(o.psf_fwhm)
     box = o.bkg_rms_box_size
