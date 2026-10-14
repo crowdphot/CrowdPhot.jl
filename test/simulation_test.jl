@@ -1,7 +1,7 @@
 using CrowdPhot
 using CrowdPhot.PSF
 using Distributions: Poisson
-using Statistics: mean
+using Statistics: mean, median
 using StableRNGs: StableRNG
 using Test
 
@@ -136,6 +136,19 @@ end
             snr_f = CrowdPhot.snr_for_flux(psf, f; background, read_noise, gain)
             @test 10.0 ≤ snr_f ≤ 30.0
         end
+
+        # A matrix background stands for its median: same sources as the scalar median.
+        bgm = 10 .+ rand(StableRNG(3), 40, 45)
+        kw = (; snr = (10.0, 30.0), psf, read_noise, gain, min_separation = 4, border = 5)
+        a = simulate_sources((40, 45), 6; kw..., background = bgm, rng = StableRNG(13))
+        b = simulate_sources((40, 45), 6; kw..., background = median(bgm), rng = StableRNG(13))
+        @test a.flux == b.flux && a.x == b.x && a.y == b.y
+
+        # The SNR spec is validated once, before any source is drawn.
+        @test_throws "`psf` is required" simulate_sources((40, 45), 6; snr = 10.0)
+        @test_throws "`snr` must be non-negative" simulate_sources((40, 45), 6; snr = (-5.0, 10.0), psf)
+        @test_throws "`snr` range must have two values" simulate_sources((40, 45), 6; snr = (1.0, 2.0, 3.0), psf)
+        @test_throws "`snr` must be a scalar or two-value range" simulate_sources((40, 45), 6; snr = "10", psf)
     end
 
     noisy = copy(image)

@@ -180,9 +180,11 @@ end
 extent(model::ImagePSF, _) = extent(model) # ignore extra argument (fwhm_factor) if provided.
 
 function effective_area(model::ImagePSF{T}) where {T}
-    # Approximate effective area from the normalized discrete ePSF samples.
+    # The samples sit on a 1/oversampling lattice, so ∫P ≈ Σd/os² and ∫P² ≈ Σd²/os²; the ratio
+    # does not assume the data are normalized (CRDS stamps loaded with `normalize = false` sum to
+    # ~0.99 os², which biased the former `os²/Σd²` high by ~2%).
     denom = sum(abs2, model.data)
-    return denom == zero(T) ? T(Inf) : T(model.oversampling[1] * model.oversampling[2]) / denom
+    return denom == zero(T) ? T(Inf) : T(sum(model.data)^2 / (model.oversampling[1] * model.oversampling[2] * denom))
 end
 
 @inline function _cubic4(f1, f2, f3, f4, t)
