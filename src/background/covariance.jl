@@ -20,9 +20,11 @@ are variances in the residual's units squared.
 - `box`: mesh cell size in pixels; cell `(i, j)` covers rows
   `(i - 1) * box + 1 : i * box` and the same for columns.
 - `ny`, `nx`: the image size.
-- `L`: largest lag, per axis, that tables cover.
+- `L`: the lag range, per axis, the parameters were fitted over.  It does not limit
+  the tables [`_sigma_b_lags`](@ref) builds.
 - `a`, `b`, `ell`: the per-cell parameters.
-- `acf`: `acf(y, x)` returns the PSF autocorrelation table at lags `-L:L`.
+- `acf`: `acf(y, x)` returns the PSF autocorrelation table at lags `-La:La` per axis,
+  indexed from its center, for some `La >= L`; tables of `Σ_B` can reach lag `La`.
 """
 struct BackgroundCovariance{T, F}
     box::Int
@@ -51,8 +53,13 @@ light, zero-weight pixels and non-finite values.  The window mean is subtracted,
 and the mean pixel noise variance `1 / inv_var` over the valid pixels is taken off
 the zero lag, so what remains is the background's excess covariance.  `(a, b, ℓ)`
 are then a nonnegative least-squares fit of the parametric form to it over all
-lags, `ℓ` chosen from the grid `ells` by residual.  A cell whose window has no
-valid pixel pair at some lag gets `a = b = 0` (no correction).
+lags, `ℓ` chosen from the grid `ells` (pixels; by default `2L × {1/3, …, 16/3}`) by
+residual.  A cell whose window has no valid pixel pair at some lag gets `a = b = 0`
+(no correction).
+
+`L` is only the range of lags fitted.  `acf(y, x)` must return a table at least
+`2L + 1` wide, and may return a larger one, which [`_sigma_b_lags`](@ref) can then
+use for longer lags than were fitted.
 
 Each pixel pair is counted once per window that covers it: the per-lag sums are
 accumulated per cell once and then summed over each window, so the cost is one
@@ -125,8 +132,9 @@ function _background_covariance(resid::AbstractMatrix, valid::AbstractMatrix{Boo
         ok || continue
         C[l0] -= nbar
         At = acf(_cell_center(ci, box, ny), _cell_center(cj, box, nx))
+        c = _acf_center(At, L)
         for (l, (dy, dx)) in enumerate(lags)
-            Ap[l] = At[dy + L + 1, dx + L + 1]
+            Ap[l] = At[c + dy, c + dx]
         end
         best = (Inf, 0.0, 0.0, Float64(first(ells)))
         for (il, K) in enumerate(Kl)
@@ -165,6 +173,14 @@ function _nnls2(suu, suv, svv, suy, svy, syy)
     return best
 end
 
+# Center index of a square autocorrelation table, which must reach lag `L`.
+function _acf_center(At::AbstractMatrix, L::Integer)
+    n = size(At, 1)
+    size(At, 2) == n && isodd(n) && n >= 2L + 1 ||
+        throw(DimensionMismatch("PSF autocorrelation table is $(size(At)); need a square table of odd size at least $(2L + 1)"))
+    return n ÷ 2 + 1
+end
+
 # Linear index of the mesh cell holding pixel `(y, x)`, clamped to the mesh.
 function _cell_id(bc::BackgroundCovariance, y::Integer, x::Integer)
     ncy, ncx = size(bc.a)
@@ -174,22 +190,23 @@ function _cell_id(bc::BackgroundCovariance, y::Integer, x::Integer)
 end
 
 """
-    _sigma_b_lags(bc::BackgroundCovariance, y, x) -> Matrix
+    _sigma_b_lags(bc::BackgroundCovariance, y, x, L = bc.L) -> Matrix
 
 The `(2L+1, 2L+1)` table of `Σ_B(Δ)` for the mesh cell containing pixel `(y, x)`,
 indexed `[dy + L + 1, dx + L + 1]`.  Every source in a cell uses that cell's fit
-and the PSF autocorrelation at the cell center.  Returns a new matrix.
+and the PSF autocorrelation at the cell center.  `L` may exceed the fitted lag range
+`bc.L` up to the reach of `bc.acf`'s tables.  Returns a new matrix.
 """
-function _sigma_b_lags(bc::BackgroundCovariance{T}, y::Integer, x::Integer) where {T}
+function _sigma_b_lags(bc::BackgroundCovariance{T}, y::Integer, x::Integer, L::Integer = bc.L) where {T}
     ci, cj = Tuple(CartesianIndices(bc.a)[_cell_id(bc, y, x)])
     a, b, ℓ = bc.a[ci, cj], bc.b[ci, cj], bc.ell[ci, cj]
-    L = bc.L
     out = zeros(T, 2L + 1, 2L + 1)
     (iszero(a) && iszero(b)) && return out
     At = iszero(a) ? nothing : bc.acf(_cell_center(ci, bc.box, bc.ny), _cell_center(cj, bc.box, bc.nx))
+    c = At === nothing ? 0 : _acf_center(At, L)
     @inbounds for dx in -L:L, dy in -L:L
         v = iszero(b) ? zero(T) : b * exp(-(dy^2 + dx^2) / (2ℓ^2))
-        At === nothing || (v += a * At[dy + L + 1, dx + L + 1])
+        At === nothing || (v += a * At[c + dy, c + dx])
         out[dy + L + 1, dx + L + 1] = v
     end
     return out
