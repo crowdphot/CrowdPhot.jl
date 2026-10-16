@@ -252,6 +252,38 @@ end
         @test all(v -> isapprox(v, 100.0; atol = 1.0), b.background)
     end
 
+    @testset "sigma=nothing keeps boxes with masked, non-finite or off-image pixels" begin
+        # A different constant per box, so a box wrongly discarded and filled from its
+        # neighbors shows up in its mesh value (a uniform image would hide it).
+        level(i, j, bs) = 10.0 * (cld(i, bs) + 3 * cld(j, bs))
+        img = [level(i, j, 16) for i in 1:48, j in 1:48]
+        expected = [10.0 * (mi + 3mj) for mi in 1:3, mj in 1:3]
+        mask = falses(48, 48); mask[5, 6] = true               # one masked pixel in a corner box
+        b = Background2D(img, 16; mask, sigma = nothing, filter_size = 1)
+        @test b.mesh_background == expected
+        nanimg = copy(img); nanimg[5, 40] = NaN                   # one non-finite pixel in a corner box
+        b = @test_logs (:warn,) Background2D(nanimg, 16; sigma = nothing, filter_size = 1)
+        @test b.mesh_background == expected
+        # 40 x 40 with box 16: the last row and column of boxes are padded off the image
+        b = Background2D(img[1:40, 1:40], 16; sigma = nothing, filter_size = 1)
+        @test b.mesh_background == expected
+        # exclude_percentile counts only the usable pixels
+        # (a corner box, whose neighbor fill cannot reproduce its own value)
+        heavy = falses(48, 48); heavy[1:16, 1:15] .= true         # 16 of 256 pixels left in box (1, 1)
+        @test Background2D(img, 16; mask = heavy, sigma = nothing, filter_size = 1, exclude_percentile = 5.0).mesh_background[1, 1] == expected[1, 1]
+        @test Background2D(img, 16; mask = heavy, sigma = nothing, filter_size = 1, exclude_percentile = 10.0).mesh_background[1, 1] != expected[1, 1]
+    end
+
+    @testset "sigma=nothing matches clipping that removes nothing" begin
+        rng = StableRNG(17)
+        img = 100 .+ randn(rng, 64, 64)
+        mask = rand(rng, 64, 64) .< 0.01
+        a = Background2D(img, 16; mask, sigma = nothing)
+        b = Background2D(img, 16; mask, sigma = Inf)
+        @test a.mesh_background ≈ b.mesh_background
+        @test a.mesh_background_rms ≈ b.mesh_background_rms
+    end
+
     @testset "all boxes excluded throws" begin
         img  = fill(0.0, 16, 16)
         mask = trues(16, 16)     # mask everything
@@ -281,6 +313,21 @@ end
         b    = Background2D(ramp, 8; sigma = nothing, filter_size = 1)
         # The interpolated background should track the true ramp to within ±5.
         @test maximum(abs.(b.background .- ramp)) < 5.0
+    end
+
+    @testset "a cutout aligned to the box grid reproduces the full background away from its edges" begin
+        # Mesh values sit at box centers, so beyond the filter and interpolation reach (3 boxes)
+        # the cutout's background equals the full image's, whatever the cutout's size.
+        rng = StableRNG(17)
+        img = [200 + 30 * sin(i / 37) * cos(j / 23) for i in 1:300, j in 1:280] .+ 5 .* randn(rng, 300, 280)
+        full = Background2D(img, 20)
+        for (r, c) in ((61:240, 41:200), (1:160, 101:280), (121:300, 1:280))
+            cut = Background2D(img[r, c], 20)
+            ri = (first(r) == 1 ? 1 : 61):(length(r) - (last(r) == 300 ? 0 : 60))
+            ci = (first(c) == 1 ? 1 : 61):(length(c) - (last(c) == 280 ? 0 : 60))
+            @test cut.background[ri, ci] ≈ full.background[r[ri], c[ci]] rtol = 1e-12
+            @test cut.background_rms[ri, ci] ≈ full.background_rms[r[ri], c[ci]] rtol = 1e-12
+        end
     end
 
     @testset "realistic image: background close to truth" begin
@@ -409,13 +456,12 @@ end
         @test all(x -> x ≈ 42.0, zoomed)
     end
 
-    @testset "corners of the mesh are preserved at output corners" begin
+    @testset "mesh values sit at their box centers; the outer half-box is constant" begin
+        # 5 x 5 px boxes: box (i, j) is centered on pixel (5i - 2, 5j - 2)
         mesh = randn(StableRNG(5), 6, 8)
-        result = _bicubic_zoom(mesh, 60, 80)
-        @test result[1, 1] ≈ mesh[1, 1]
-        @test result[end, 1] ≈ mesh[end, 1]
-        @test result[1, end] ≈ mesh[1, end]
-        @test result[end, end] ≈ mesh[end, end]
+        result = _bicubic_zoom(mesh, 30, 40)
+        @test all(result[5i - 2, 5j - 2] ≈ mesh[i, j] for i in 1:6, j in 1:8)
+        @test all(result[1:3, 1:3] .≈ mesh[1, 1]) && all(result[28:30, 38:40] .≈ mesh[end, end])
     end
 
     @testset "interpolation is contained within the convex hull" begin
@@ -431,13 +477,10 @@ end
         @test maximum(result) ≤ hi + 0.1 * (hi - lo)
     end
 
-    @testset "no-op zoom (H=M, W=N) preserves pixel centers" begin
-        # When the output size equals the mesh size, interior pixels (away from
-        # the clamped boundary) should approximately reproduce the mesh.
+    @testset "no-op zoom (H=M, W=N) reproduces the mesh" begin
+        # 1 x 1 px boxes: every pixel is a box center
         mesh = randn(StableRNG(7), 10, 12)
-        result = _bicubic_zoom(mesh, 10, 12)
-        # Interior 6×8 region (avoid boundary clamping effects).
-        @test result[3:8, 3:10] ≈ mesh[3:8, 3:10] rtol = 1e-6
+        @test _bicubic_zoom(mesh, 10, 12) ≈ mesh
     end
 end
 

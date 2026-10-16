@@ -151,7 +151,10 @@ The algorithm proceeds in four stages:
 3. **Filter** the resulting low-resolution mesh with a 2-D median filter of
    width `filter_size` to reduce sensitivity to individual contaminated boxes.
 4. **Upsample** the smoothed mesh back to the full image resolution using a
-   bicubic Catmull-Rom interpolator.
+   bicubic Catmull-Rom interpolator, with each mesh value at the center of its
+   box (constant over the outer half-box). The result at a pixel depends only
+   on boxes within three of its own, so a cutout aligned to the box grid
+   reproduces the full image's background away from its edges.
 
 ```julia
 using CrowdPhot.Background
