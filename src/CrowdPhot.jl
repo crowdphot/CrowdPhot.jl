@@ -41,6 +41,7 @@ include("photometry/psf_photometry_diagnostics.jl")
 include("photometry/multipass.jl")
 include("photometry/psf_photometry_simultaneous_multipass.jl")
 include("photometry/psf_photometry_sequential_multipass.jl")
+include("jointfit/Joint.jl")
 # Observatory-specific code is grouped by observatory to keep
 # specialized code organized within their respective observatory submodules.
 include("observatories/roman/Roman.jl")
