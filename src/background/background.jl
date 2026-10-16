@@ -476,11 +476,13 @@ end
 
 # Map output pixel k (1-indexed) in a dimension of length K_out to the
 # corresponding mesh coordinate (1-indexed) in a mesh of length K_mesh.
-@inline function _zoom_coord(T::Type, k::Int, K_out::Int, K_mesh::Int)
-    K_mesh == 1 && return one(T)
-    K_out == 1 && return one(T)
-    return one(T) + (k - 1) * (K_mesh - 1) / (K_out - 1)
-end
+# Box-centered: mesh value i sits at the center of box i of the K_out-pixel
+# extent split into K_mesh boxes.  A corner-aligned map (mesh end values at the
+# extent's end pixels) would make every node's pixel position depend on the
+# extent, so a cutout aligned to the box grid would not reproduce the full
+# image's background away from its edges.  Clamped to [1, K_mesh], so the outer
+# half-box is constant.
+@inline _zoom_coord(T::Type, k::Int, K_out::Int, K_mesh::Int) = clamp(T((k - 0.5) * K_mesh / K_out + 0.5), one(T), T(K_mesh))
 
 @inline _clamp_idx(i::Int, n::Int) = max(1, min(n, i))
 
@@ -488,7 +490,9 @@ end
     _bicubic_zoom(mesh, H, W, coord_H = H, coord_W = W)
 
 Upsample `mesh` (size `M × N`) to a `H × W` array using bicubic
-Catmull-Rom interpolation.  Corner samples are preserved exactly.
+Catmull-Rom interpolation, with each mesh value at the center of its box
+(`coord_H / M` by `coord_W / N` pixels); beyond the outermost box centers the
+mesh is clamped.
 
 `coord_H` and `coord_W` specify the coordinate extent used for scaling
 the mesh grid.  When `coord_H > H` (e.g., when the mesh covers a
@@ -819,12 +823,14 @@ function Background2D(
         cols = ((mj - 1) * bw + 1):(mj * bw)
         n_covered = _copy_box_data!(box, image, mask_work, covmask_work, rows, cols)
         n_covered == 0 && continue
+        # Both branches compact the usable values to the front of `box`: the estimators read
+        # its first `n_valid` entries, so a masked, non-finite or off-image NaN left in place
+        # would turn the whole box into NaN (silently replaced by its neighbors' fill).
         n_valid = if !isnothing(sigma)
-            # sigma_clip! compacts finite values internally.
             slo, shi = _to_pair(T, sigma)
             sigma_clip!(box, slo, shi; maxiters)
         else
-            count(isfinite, box)
+            _compact_finite!(box)
         end
         n_valid < min_valid && continue
         pair = _estimate_pair!(estimator, rms_estimator, box, n_valid)
