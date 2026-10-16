@@ -1,0 +1,25 @@
+name: Downgrade
+# Tests the [compat] lower bounds: julia-downgrade-compat resolves every direct dependency to
+# the oldest version its compat entry allows, and the tests run without re-resolving.  SciML's
+# reusable workflow skips the stdlibs and path-sourced packages ([sources] in test/Project.toml)
+# itself.
+on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'docs/**'
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+jobs:
+  downgrade:
+    name: Downgrade
+    uses: "SciML/.github/.github/workflows/downgrade.yml@v1"
+    with:
+      julia-version: "min"   # the `julia` compat floor, where the oldest versions must work
+      projects: ".,test"
