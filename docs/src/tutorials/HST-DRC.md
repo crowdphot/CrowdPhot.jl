@@ -603,7 +603,7 @@ warm = (; y = [s.centroid.y - (y1 - 1) for s in region_sources],
 # Multi-pass background -> detect -> fit
 mp = fit_all_stars_multipass(img_cut, psf, warm, 3;
     inv_var = inv_var[phot_y_range, phot_x_range], fixed = (; bkg = 0.0),
-    max_iter = 3, min_iter = 3,
+    max_iter = 3, min_growth = 0,
     # blend gating, to prevent bright-star fragmentation
     blend_threshold_initial = 10.0, blend_threshold = 5.0, blend_passes = 1)
 phot_result = mp.phot

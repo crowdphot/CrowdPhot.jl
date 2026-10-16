@@ -140,7 +140,7 @@ end
         img, _ = simulate_image((60, 60), gpsf, 6; background = 50.0f0,
                                 rng = Random.Xoshiro(1))
         res = fit_all_stars_simultaneous_multipass(Float32.(img), gpsf, 3.0f0;
-            max_iter = 2, min_iter = 1, show_trace = false)
+            max_iter = 2, show_trace = false)
         to_table(res)
     end
 end
