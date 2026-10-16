@@ -916,12 +916,10 @@ end
     img = fill(1.0, 40, 40)
     @test_throws "max_iter must be positive" fit_all_stars_simultaneous_multipass(
         img, TEST_PSF, 3.0; fixed = TEST_FIXED, max_iter = 0)
-    @test_throws "min_iter must be positive" fit_all_stars_simultaneous_multipass(
-        img, TEST_PSF, 3.0; fixed = TEST_FIXED, min_iter = 0)
     @test_throws "fit_rad must be positive" fit_all_stars_simultaneous_multipass(
         img, TEST_PSF, 0.0; fixed = TEST_FIXED)
-    @test_throws "few_sources must be non-negative" fit_all_stars_simultaneous_multipass(
-        img, TEST_PSF, 3.0; fixed = TEST_FIXED, few_sources = -1)
+    @test_throws "min_growth must be non-negative" fit_all_stars_simultaneous_multipass(
+        img, TEST_PSF, 3.0; fixed = TEST_FIXED, min_growth = -1)
     @test_throws "solver must be :lsqr or :lsmr" fit_all_stars_simultaneous_multipass(
         img, TEST_PSF, 3.0; fixed = TEST_FIXED, solver = :cg)
     @test_throws "error_neighbors must be between 0 and" fit_all_stars_simultaneous_multipass(
@@ -966,7 +964,7 @@ end
     img, src, _ = test_field(; ny = 80, nx = 80, n = 12)
     img = Float64.(img)
     img[40, 40] = NaN
-    kws = (; fixed = TEST_FIXED, max_iter = 1, min_iter = 1, bkg_box_size = 20,
+    kws = (; fixed = TEST_FIXED, max_iter = 1, bkg_box_size = 20,
              bkg_coarse_passes = 0)
 
     # No `inv_var`: the morphology weights (`detect_inv_var`) are positive at the
@@ -1006,14 +1004,14 @@ end
         @test sum(values(h.fit_timing)) <= h.t_fit
     end
 
-    # A blank field converges on pass 2 rather than burning the budget: pass 1
-    # detects nothing, 3k schedules the terminal pass, pass 2 exits converged.
+    # A blank field converges on pass 3 (the first the rule checks) rather than burning
+    # the budget: nothing is ever detected, and zero growth of an empty catalog stops.
     blank = fill(100.0, 100, 100)
     rb = fit_all_stars_simultaneous_multipass(blank, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 10, min_iter = 1)
+        max_iter = 10)
     @test rb.converged
-    @test length(rb.pass_history) == 2
-    @test rb.n_detection_passes == 1
+    @test length(rb.pass_history) == 4
+    @test rb.n_detection_passes == 3
     @test isempty(rb.phot.y)
     @test isempty(rb.phot.morphology)
     @test size(rb.phot.residual) == size(blank)
@@ -1024,18 +1022,20 @@ end
     @test all(h -> keys(h.fit_timing) == (:setup, :stamps, :render, :solve),
               rb.pass_history)
 
-    # `min_iter > max_iter` is legal: the early-convergence clause never fires.
+    # `min_growth = 0`: the early-convergence clause never fires.
     r2 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 2, min_iter = 10)
+        max_iter = 3, min_growth = 0)
     @test !r2.converged
-    @test r2.n_detection_passes == 2
-    @test length(r2.pass_history) == 3
+    @test r2.n_detection_passes == 3
+    @test length(r2.pass_history) == 4
 
-    # Early convergence on `few_sources`.
+    # Early convergence on `min_growth`, at the first pass the rule checks.
     r3 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 10, min_iter = 1, few_sources = 1000)
+        max_iter = 10, min_growth = 1)
     @test r3.converged
-    @test r3.n_detection_passes == 1
+    @test r3.n_detection_passes == 3
+    h = r3.pass_history[3]
+    @test h.n_new_surviving <= h.n_catalog
 end
 
 @testset "morphology is a column store" begin
@@ -1044,7 +1044,7 @@ end
     # nested block.  Rows still read as the `NamedTuple`s they always were.
     img, _, _ = test_field(; ny = 120, nx = 120, n = 25, seed = 4242)
     m = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 1, min_iter = 1).phot.morphology
+        max_iter = 1).phot.morphology
     @test m isa CrowdPhot.StructArray
     @test !isempty(m)
 
@@ -1068,14 +1068,14 @@ end
     # it falls back to an empty vector; `MultiPassPhotResult` must still hold it.
     blank = fill(100.0, 60, 60)
     mb = fit_all_stars_simultaneous_multipass(blank, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 1, min_iter = 1, detect_sigma = 1.0e6).phot.morphology
+        max_iter = 1, detect_sigma = 1.0e6).phot.morphology
     @test isempty(mb)
 end
 
 @testset "to_table" begin
     img, _, _ = test_field(; ny = 120, nx = 120, n = 25, seed = 4242)
     res = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 1, min_iter = 1)
+        max_iter = 1)
     t = to_table(res)
     m = res.phot.morphology
 
@@ -1121,12 +1121,12 @@ end
 
     # Both fitters share `finalize_multipass`, so one method covers them.
     @test to_table(fit_all_stars_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 1, min_iter = 1)) isa CrowdPhot.StructArray
+        max_iter = 1)) isa CrowdPhot.StructArray
 
     # No sources means no columns to read; that has to be said, not returned empty.
     blank = fill(100.0, 60, 60)
     rb = fit_all_stars_simultaneous_multipass(blank, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 1, min_iter = 1, detect_sigma = 1.0e6)
+        max_iter = 1, detect_sigma = 1.0e6)
     @test_throws "no sources" to_table(rb)
 
     @testset "extra columns" begin
@@ -1166,7 +1166,7 @@ end
 @testset "end-to-end recovery" begin
     img, src, _ = test_field(; n = 90, seed = 20240905)
     res = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 4, min_iter = 2)
+        max_iter = 4)
     ph = res.phot
 
     @test length(ph.y) == length(ph.morphology) == length(res.pass_number)
@@ -1201,7 +1201,7 @@ end
     # Determinism: two runs on identical input are bitwise identical.  This is
     # what the Morton tie-break exists for.
     res2 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 4, min_iter = 2)
+        max_iter = 4)
     @test res2.phot.y == ph.y
     @test res2.phot.x == ph.x
     @test res2.phot.flux == ph.flux
@@ -1212,7 +1212,7 @@ end
 @testset "pass history and tracing" begin
     img, _, _ = test_field(; n = 50, seed = 909)
     res = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 3, min_iter = 1)
+        max_iter = 3)
     hist = res.pass_history
     @test !isempty(hist)
     @test hist isa Vector{<:NamedTuple}
@@ -1238,7 +1238,7 @@ end
     total_traced(r) = r.t_setup + r.t_finalize +
         sum(p.t_background + p.t_detect + p.t_fit + p.t_prune + p.t_render for p in r.pass_history)
     wall = @elapsed timed = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0;
-        fixed = TEST_FIXED, max_iter = 3, min_iter = 1)
+        fixed = TEST_FIXED, max_iter = 3)
     # The timers partition the call, so their sum can never exceed it, and must
     # account for the bulk of it rather than a sliver.
     @test total_traced(timed) <= wall
@@ -1254,7 +1254,7 @@ end
     res_t = open(tracefile, "w") do io
         redirect_stdout(io) do
             fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-                max_iter = 3, min_iter = 1, show_trace = true)
+                max_iter = 3, show_trace = true)
         end
     end
     s = read(tracefile, String)
@@ -1279,7 +1279,7 @@ end
     # it reads the RMS-mesh weights, not these.  `model_rad` is pinned because
     # `:auto` sizes the model box from the noise level it reads out of `inv_var`,
     # which would otherwise change the geometry along with the scale.
-    scale_kw = (; fixed = TEST_FIXED, max_iter = 2, min_iter = 1, prune = false,
+    scale_kw = (; fixed = TEST_FIXED, max_iter = 2, prune = false,
                   model_rad = 6.0)
     r_hi = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; inv_var = iv, scale_kw...)
     r_lo = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; inv_var = iv ./ 100,
@@ -1294,7 +1294,7 @@ end
     iv_masked = copy(iv)
     iv_masked[:, 1:20] .= 0
     r_mask = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 2, min_iter = 1, inv_var = iv_masked)
+        max_iter = 2, inv_var = iv_masked)
     @test all(r_mask.phot.x .> 15)
 
     # Reference run for the two comparisons below.
@@ -1324,7 +1324,7 @@ end
 
     # `prune = false` keeps everything the fit produced.
     r_np = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; fixed = TEST_FIXED,
-        max_iter = 2, min_iter = 1, prune = false)
+        max_iter = 2, prune = false)
     @test all(r.n_pruned_snr == 0 && r.n_pruned_close == 0 for r in r_np.pass_history)
 end
 
@@ -1333,7 +1333,7 @@ end
     # decides it, and `nothing` means that pass is not gated.  Neither knob is a
     # master switch, so all four combinations must be expressible.
     img, _, _ = test_field(; ny = 200, nx = 200, n = 120, seed = 4242)
-    base = (; fixed = TEST_FIXED, max_iter = 5, min_iter = 5, few_sources = 0)
+    base = (; fixed = TEST_FIXED, max_iter = 5, min_growth = 0)
     rejected(r) = [p.n_blend_rejected for p in r.pass_history]
     go(; kws...) = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; base..., kws...)
 
@@ -1386,7 +1386,7 @@ end
         [0.0, 200.0, 0.0, 200.0]; y = 0.0, x = 0.0, flux = 1.0, bkg = 0.0)
     img, src, _ = test_field(; ny = 150, nx = 150, n = 40, seed = 555)
     kw = (; fixed = (; y_fwhm = PSF_FWHM, x_fwhm = PSF_FWHM, theta = 0.0),
-            max_iter = 2, min_iter = 1)
+            max_iter = 2)
     rg = fit_all_stars_simultaneous_multipass(img, gm, 4.0; kw...)
     rs = fit_all_stars_simultaneous_multipass(img, node(), 4.0; kw...)
 
@@ -1411,7 +1411,7 @@ end
     iv = fill(1 / 100.0, size(imgbs))
     warm = (; y = src.y .+ 0.6, x = src.x .+ 0.6, flux = src.flux)
     kws = (; fixed = TEST_FIXED, inv_var = iv, detect_sigma = 1e9, max_iter = 1,
-             min_iter = 1, prune = false, max_step = 0.25)
+             prune = false, max_step = 0.25)
     free = fit_all_stars_simultaneous_multipass(imgbs, TEST_PSF, warm, 4.0;
         freeze_positions_final = false, kws...)
     frozen = fit_all_stars_simultaneous_multipass(imgbs, TEST_PSF, warm, 4.0;
@@ -1450,7 +1450,7 @@ end
     iv = fill(1 / 100.0, size(img))
     res = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 4.0;
         fixed = TEST_FIXED, inv_var = iv, detect_sigma = 1e9, prune = false,
-        max_iter = 3, min_iter = 1, morph_half_width = 8)
+        max_iter = 3, morph_half_width = 8)
     ph = res.phot
     @test length(ph.morphology) == length(ph.y) == 4
 
@@ -1493,7 +1493,7 @@ end
     iv = fill(1 / 100.0, size(img))
     res = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 4.0;
         fixed = TEST_FIXED, inv_var = iv, detect_sigma = 1e9, prune = false,
-        max_iter = 1, min_iter = 1, morph_half_width = 1)
+        max_iter = 1, morph_half_width = 1)
     ph = res.phot
     @test length(ph.morphology) == 2
     # The off-frame source is the one whose box is empty; the in-frame one is
@@ -1547,7 +1547,7 @@ end
 zwidth(z) = (quantile(z, 0.84) - quantile(z, 0.16)) / 2
 
 @testset "background_covariance" begin
-    kw = (; fixed = TEST_FIXED, max_iter = 2, min_iter = 1)
+    kw = (; fixed = TEST_FIXED, max_iter = 1)
     @testset "flat sky" begin
         img, src, iv = structured_field(; amp = 0.0)
         r0 = fit_all_stars_simultaneous_multipass(img, TEST_PSF, src, 3; inv_var = iv, kw...)

@@ -281,6 +281,28 @@ function _model_radii(psf, model_rad, nsigma, R_fit::Int, R_cap::Int,
     n == 0 && return Int[]  # every source was dropped; `_w` below would be empty
     model_rad isa Real &&
         return fill(clamp(round(Int, round(model_rad, RoundUp)), R_fit, R_cap), n)
+    sb, thresh = _model_radius_table(psf, nsigma, R_cap, w, FT)
+    out = Vector{Int}(undef, n)
+    for j in 1:n
+        F = max(flux_init[j], zero(FT))
+        r = R_fit
+        while r < R_cap && F * sb[r] > thresh
+            r += 1
+        end
+        out[j] = r
+    end
+    return out
+end
+
+"""
+    _model_radius_table(psf, nsigma, R_cap, w, FT) -> (sb, thresh)
+
+The `:auto` rule of [`_model_radii`](@ref) as data: the unit PSF's annular-mean surface
+brightness `sb[r]` for `r in 1:R_cap` and the threshold `nsigma * sigma_bg`.  A source of flux
+`F` gets the smallest `r >= R_fit` with `F * sb[r] <= thresh` (or `R_cap`).  Shared with the
+joint fitter, which evaluates the rule in a kernel.
+"""
+function _model_radius_table(psf, nsigma, R_cap::Int, w::AbstractVector, ::Type{FT}) where {FT}
     # Quick, conservative background noise estimate from the inverse weight vector.
     # High w (inverse variance) = low noise so sigma_bg estimate will be low,
     # leading to a conservatively large model_rad estimate.
@@ -304,17 +326,7 @@ function _model_radii(psf, model_rad, nsigma, R_fit::Int, R_cap::Int,
         sb[r] = max((ee[r] - prev) / (FT(π) * (r^2 - (r - 1)^2)), zero(FT))
         prev = ee[r]
     end
-    thresh = FT(nsigma) * sigma_bg
-    out = Vector{Int}(undef, n)
-    for j in 1:n
-        F = max(flux_init[j], zero(FT))
-        r = R_fit
-        while r < R_cap && F * sb[r] > thresh
-            r += 1
-        end
-        out[j] = r
-    end
-    return out
+    return sb, FT(nsigma) * sigma_bg
 end
 
 """
@@ -1288,10 +1300,9 @@ end
 const _MULTIPASS_DOC_LOOP = """
 Each *pass* re-estimates the background from the current residual, detects new
 sources on that residual, merges them into the working catalog, re-fits the whole
-catalog, and prunes unreliable sources.  Passes repeat until a pass contributes
-`few_sources` or fewer surviving new sources (after `min_iter` passes) or
-`max_iter` is reached, followed by one terminal pass that re-fits without
-detecting or pruning.
+catalog, and prunes unreliable sources.  Passes repeat until a pass (from the third
+on) grows the catalog by less than the fraction `min_growth` or `max_iter` is
+reached, followed by one terminal pass that re-fits without detecting or pruning.
 """
 
 const _MULTIPASS_DOC_ARGUMENTS = """
@@ -1532,16 +1543,16 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   at most `max_iter` of them and then one additional terminal pass, so at most
   `max_iter + 1` passes in total.  `max_iter = 1` therefore means one detection
   pass with pruning, followed by the terminal pass.  Must be at least 1.
-- `min_iter::Integer = 4`: minimum number of detection passes before the
-  early-convergence test (`few_sources`) can fire.  It does not gate the
-  `max_iter` budget, so setting it above `max_iter` is legal and simply means the
-  run always uses its full budget rather than stopping early.
-- `few_sources::Integer = 100`: schedule the terminal pass when a pass
-  contributes this many or fewer *surviving* new sources (counted after dedup
-  and after that pass's pruning).  Matches crowdsource's
-  `fewstars`.  Detection has a long tail -- late passes keep turning up a handful
-  of marginal sources -- and every one of them costs a full re-fit of the entire
-  catalog, so stopping early is beneficial.
+- `min_growth::Real = 0.01`: from the third detection pass on, schedule the
+  terminal pass when a pass's *surviving* new sources (counted after dedup and
+  after that pass's pruning) are at most `min_growth` times the catalog.
+  Detection has a long tail -- late passes keep turning up a handful of marginal
+  sources -- and every one of them costs a full re-fit of the entire catalog, so
+  stopping early is beneficial.  The rule is relative so that the pass count does
+  not grow with the image's source count, as an absolute count (crowdsource's
+  `fewstars`) does: on simulated Roman images of 0.5k to 50k sources, growth
+  after passes 2, 3 and 4 was 10-25%, 1-5% and 0.1-1.2%, so the default stops
+  after 4 or 5 passes.  `min_growth = 0` always runs `max_iter` passes.
 - `freeze_positions_final::Bool = false`: hold `(y, x)` fixed on the terminal
   pass, fitting only fluxes (and local pedestals, where fit).  crowdsource does
   this (`tpsfderiv = False` when `titer == lastiter`); with a real LM optimizer it
@@ -1788,8 +1799,7 @@ function _fit_all_stars_multipass(
         model_rad_nsigma::Real = 1.0,
         max_step::Real = 1.0,
         max_iter::Integer = 10,
-        min_iter::Integer = 4,
-        few_sources::Integer = 100,
+        min_growth::Real = 0.01,
         freeze_positions_final::Bool = false,
         background_covariance::Bool = false,
         background_covariance_rad::Real = fit_rad,
@@ -1803,17 +1813,13 @@ function _fit_all_stars_multipass(
     # Validation
     # ------------------------------------------------------------------
     max_iter > 0 || throw(ArgumentError("max_iter must be positive"))
-    min_iter > 0 || throw(ArgumentError("min_iter must be positive"))
-    # No `min_iter <= max_iter` check: the two gate different clauses of the
-    # termination test, so `min_iter > max_iter` is well defined -- the
-    # early-convergence clause simply never fires.
+    min_growth >= 0 || throw(ArgumentError("min_growth must be non-negative"))
     (model_rad === :auto || (model_rad isa Real && model_rad > 0)) ||
         throw(ArgumentError("model_rad must be :auto or a positive real, got $(repr(model_rad))"))
     model_rad_max >= fit_rad || throw(ArgumentError("model_rad_max must be >= fit_rad"))
     model_rad_nsigma > 0 || throw(ArgumentError("model_rad_nsigma must be positive"))
     max_step >= 0 || throw(ArgumentError("max_step must be non-negative"))
     fit_rad > 0 || throw(ArgumentError("fit_rad must be positive"))
-    few_sources >= 0 || throw(ArgumentError("few_sources must be non-negative"))
     bkg_coarse_passes >= 0 || throw(ArgumentError("bkg_coarse_passes must be non-negative"))
     bkg_box_size > 0 || throw(ArgumentError("bkg_box_size must be positive"))
     bkg_box_size_coarse > 0 || throw(ArgumentError("bkg_box_size_coarse must be positive"))
@@ -2056,10 +2062,12 @@ function _fit_all_stars_multipass(
         # Schedule a terminal pass rather than exiting here, so the last fit sees
         # the final catalog.
         last_pass && break
-        if pass >= min_iter && n_new_surviving <= few_sources
+        # growth after passes 1 and 2 is always large, so the rule starts at pass 3; `<=`
+        # so a pass that adds nothing to an empty catalog stops too
+        if pass >= 3 && min_growth > 0 && n_new_surviving <= min_growth * length(catalog)
             last_pass = true
             converged = true
-            criterion = "n_new_surviving = $n_new_surviving <= few_sources = $few_sources"
+            criterion = "n_new_surviving = $n_new_surviving <= min_growth x catalog = $min_growth x $(length(catalog))"
         elseif pass == max_iter
             last_pass = true
             converged = false

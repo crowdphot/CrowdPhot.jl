@@ -202,7 +202,7 @@ end
 
 @testset "convergence precheck" begin
     img, src, iv = crowded_field(; n = 150, seed = 21)
-    kws = (; SMALL_BKG..., inv_var = iv, fixed = TEST_FIXED, max_iter = 4, min_iter = 4, sweeps_per_pass = 2)
+    kws = (; SMALL_BKG..., inv_var = iv, fixed = TEST_FIXED, max_iter = 4, min_growth = 0, sweeps_per_pass = 2)
     r0 = fit_all_stars_multipass(img, TEST_PSF, 4.0; kws..., skip_tol = 0.0)
     r1 = fit_all_stars_multipass(img, TEST_PSF, 4.0; kws...)
     @test all(h.n_skipped == 0 for h in r0.pass_history)
@@ -225,7 +225,7 @@ end
     CrowdPhot.PSF.add_star!(img, CircularGaussianPSF(y = 30.4, x = 29.7, fwhm = PSF_FWHM, flux = 5000.0, bkg = 0.0))
     iv = fill(1 / 20.0, size(img))
     catalog = (; y = [30.1], x = [30.0], flux = [3000.0])
-    kws = (; SMALL_BKG..., inv_var = iv, max_iter = 1, min_iter = 1)
+    kws = (; SMALL_BKG..., inv_var = iv, max_iter = 1)
     r = fit_all_stars_multipass(img, TEST_PSF, catalog, 8; kws..., fixed = TEST_FIXED)
     # The simultaneous reference starts at the truth: one linearization per pass
     # does not converge this far-off start, and the errors depend on the position.
@@ -261,7 +261,7 @@ end
     CrowdPhot.PSF.add_star!(img, CircularGaussianPSF(y = 40.2, x = 39.6, fwhm = PSF_FWHM, flux = 4000.0, bkg = 0.0))
     iv = fill(1 / 20.0, size(img))
     catalog = (; y = [40.0], x = [40.0], flux = [4000.0])
-    kws = (; bkg_box_size = 80, bkg_box_size_coarse = 80, inv_var = iv, max_iter = 1, min_iter = 1,
+    kws = (; bkg_box_size = 80, bkg_box_size_coarse = 80, inv_var = iv, max_iter = 1,
              detect_sigma = 1e6, prune = false)
     rp = fit_all_stars_multipass(img, TEST_PSF, catalog, 4; kws..., fixed = TEST_FIXED)
     rf = fit_all_stars_multipass(img, TEST_PSF, catalog, 4; kws..., fixed = (; fwhm = PSF_FWHM))
@@ -273,7 +273,7 @@ end
 
 @testset "crowded field: agreement with the simultaneous fitter" begin
     img, src, iv = crowded_field(; n = 150)
-    kws = (; SMALL_BKG..., inv_var = iv, fixed = TEST_FIXED, max_iter = 6, min_iter = 2, few_sources = 2)
+    kws = (; SMALL_BKG..., inv_var = iv, fixed = TEST_FIXED, max_iter = 6)
     rq = fit_all_stars_multipass(img, TEST_PSF, 4.0; kws...)
     rs = fit_all_stars_simultaneous_multipass(img, TEST_PSF, 4.0; kws...)
     @test abs(length(rq.phot.flux) - length(rs.phot.flux)) <= 0.05 * length(rs.phot.flux)
@@ -304,7 +304,7 @@ end
 
 @testset "sweeps and iterations reduce the cost" begin
     img, src, iv = crowded_field(; n = 150, seed = 5)
-    kws = (; SMALL_BKG..., inv_var = iv, fixed = TEST_FIXED, max_iter = 3, min_iter = 3)
+    kws = (; SMALL_BKG..., inv_var = iv, fixed = TEST_FIXED, max_iter = 3, min_growth = 0)
     r1 = fit_all_stars_multipass(img, TEST_PSF, 4.0; kws..., sweeps_per_pass = 1)
     r3 = fit_all_stars_multipass(img, TEST_PSF, 4.0; kws..., sweeps_per_pass = 3)
     @test all(h.n_lin == 3 for h in r3.pass_history)
@@ -318,7 +318,7 @@ end
 
 @testset "freeze_positions_final" begin
     img, src, iv = crowded_field(; n = 40, seed = 3)
-    kws = (; SMALL_BKG..., inv_var = iv, fixed = TEST_FIXED, max_iter = 2, min_iter = 2)
+    kws = (; SMALL_BKG..., inv_var = iv, fixed = TEST_FIXED, max_iter = 2)
     r = fit_all_stars_multipass(img, TEST_PSF, 4.0; kws..., freeze_positions_final = true)
     # The terminal pass moved nothing but fluxes, so no position step can cap.
     @test r.pass_history[end].n_capped == 0
@@ -329,7 +329,7 @@ end
     node = ImagePSF(render(TEST_PSF); y = 0.0, x = 0.0, flux = 1.0, bkg = 0.0, oversampling = 1, normalize = true)
     gpsf = GriddedPSFModel([node], [0.0], [0.0]; y = 0.0, x = 0.0, flux = 1.0, bkg = 0.0)
     img, src, iv = crowded_field(; n = 40, seed = 8)
-    kws = (; SMALL_BKG..., inv_var = iv, fixed = (; bkg = 0.0), max_iter = 3, min_iter = 2)
+    kws = (; SMALL_BKG..., inv_var = iv, fixed = (; bkg = 0.0), max_iter = 3)
     r = fit_all_stars_multipass(img, gpsf, 4.0; kws...)
     rs = fit_all_stars_simultaneous_multipass(img, gpsf, 4.0; kws...)
     @test length(r.phot.flux) > 0.8 * length(rs.phot.flux)
@@ -339,7 +339,7 @@ end
 @testset "spread_model" begin
     psf = TEST_PSF
     catalog = (; y = [30.4], x = [29.7], flux = [5000.0])
-    kws = (; SMALL_BKG..., fixed = TEST_FIXED, max_iter = 1, min_iter = 1)
+    kws = (; SMALL_BKG..., fixed = TEST_FIXED, max_iter = 1)
     function sm_for_width(wd; kw...)
         im = fill(20.0, (60, 60))
         CrowdPhot.PSF.add_star!(im, CircularGaussianPSF(y = 30.4, x = 29.7, fwhm = wd, flux = 5000.0, bkg = 0.0))
@@ -395,7 +395,7 @@ end
         q = sort(z)
         return (q[round(Int, 0.84 * length(q))] - q[round(Int, 0.16 * length(q))]) / 2
     end
-    kw = (; max_iter = 2, min_iter = 1, SMALL_BKG...)
+    kw = (; max_iter = 2, SMALL_BKG...)
     @testset "flat sky" begin
         img, src, iv = structured()
         # No in-loop pedestal, so the step fits none; on a flat sky Σ_B is near zero
