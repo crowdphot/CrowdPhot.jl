@@ -191,11 +191,13 @@ end
 end
 
 # Area of the parallelogram centered at (y, x) with edge vectors (ya, xa) and (yb, xb), clipped to
-# the rectangle [y0, y1] x [x0, x1].
+# the rectangle [y0, y1] x [x0, x1].  Computed relative to the center: at absolute pixel
+# coordinates the shoelace products (~4000²) leave no Float32 digits for areas of ~0.1.
 @inline function _overlap(y::T, x::T, ya::T, xa::T, yb::T, xb::T, y0::T, y1::T, x0::T, x1::T) where {T}
     h = T(0.5); z = zero(T)
-    py = (y - h * ya - h * yb, y + h * ya - h * yb, y + h * ya + h * yb, y - h * ya + h * yb, z, z, z, z)
-    px = (x - h * xa - h * xb, x + h * xa - h * xb, x + h * xa + h * xb, x - h * xa + h * xb, z, z, z, z)
+    y0 -= y; y1 -= y; x0 -= x; x1 -= x
+    py = (-h * ya - h * yb, h * ya - h * yb, h * ya + h * yb, -h * ya + h * yb, z, z, z, z)
+    px = (-h * xa - h * xb, h * xa - h * xb, h * xa + h * xb, -h * xa + h * xb, z, z, z, z)
     n = 4
     py, px, n = _clip_side(py, px, n, true, y0, one(T))
     py, px, n = _clip_side(py, px, n, true, y1, -one(T))

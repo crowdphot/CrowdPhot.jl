@@ -67,6 +67,16 @@ end
     R32 = coadd(ims, c.grid; quantities = (:data,), weight = :input, pixfrac = c.pixfrac, T = Float32)
     k = isfinite.(R.data.A)
     @test eltype(R32.data.A) == Float32 && maximum(abs.(R32.data.A[k] .- R.data.A[k])) < 1e-3 * maximum(abs, R.data.A[k])
+
+    # drop overlaps at full-detector pixel coordinates: in Float32 the area once vanished in the
+    # shoelace sum's cancellation there (a full-frame Roman coadd lost 8% of its pixels)
+    for (y, x) in (Float64.(Float32.((3.3, 7.7))), Float64.(Float32.((4000.3, 4087.7))))   # inputs both precisions hold exactly
+        e = Float64.(Float32.((0.5, 0.05, -0.04, 0.5)))                                  # (ya, xa, yb, xb)
+        ov(T, i, j) = CrowdPhot.Joint._overlap(T(y), T(x), T.(e)..., T(i - 0.5), T(i + 0.5), T(j - 0.5), T(j + 0.5))
+        pix = [(i, j) for i in (floor(Int, y) - 1):(floor(Int, y) + 2) for j in (floor(Int, x) - 1):(floor(Int, x) + 2)]
+        @test all(p -> isapprox(ov(Float32, p...), ov(Float64, p...); atol = 1e-5), pix)
+        @test sum(p -> ov(Float32, p...), pix) ≈ abs(e[1] * e[4] - e[3] * e[2]) rtol = 1e-5
+    end
 end
 
 @testset "coadd noise maps" begin
