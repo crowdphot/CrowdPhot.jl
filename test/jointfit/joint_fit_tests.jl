@@ -279,6 +279,17 @@ end
             @test σ[A, a] ≈ ref rtol = 1e-8
         end
     end
+    # a Float32 H (a GPU run's) is factored in Float64: a near-duplicate pair makes its blocks nearly
+    # singular, where a Float32 factorization gave errors off by up to ~1e4
+    sc32 = JointScene(s.imgs, s.frame; T = Float32)
+    rt32 = J.RadiusTable(sc32, s.psfs, [im.weight for im in s.imgs]; R_fit = 3, R_cap = 30)
+    θ = Float32.(hcat(s.θ, s.θ[:, 1] .+ [0.03, 0.02, 0, 0]))
+    h32 = J.HostH(J.linearize(sc32, θ, rt32, J.LinearizeWork(sc32); R_fit = 3))
+    h64 = J.HostH(Float64.(h32.Hd), Float64.(h32.Ho), Float64.(h32.D), Float64.(h32.hdiag), h32.ptr, h32.nbr, h32.cptr, h32.cslot, h32.row)
+    σ32 = J.marginal_errors(h32; k = 8); σ64 = J.marginal_errors(h64; k = 8)
+    k = isfinite.(σ64)
+    @test eltype(σ32) == Float64 && isfinite.(σ32) == k
+    @test σ32[k] ≈ σ64[k] rtol = 1e-10
 end
 
 @testset "CPU kernels do not allocate per pixel" begin

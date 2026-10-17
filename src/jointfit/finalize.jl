@@ -42,17 +42,20 @@ end
     marginal_errors(h::HostH; k = 8) -> Matrix (P x N)
 
 1σ errors of every parameter with the `k` most strongly coupled neighbors marginalized (NaN
-for parameters without data).
+for parameters without data).  The blocks are factored in at least Float64 whatever the
+element type of `h`: in Float32, nearly singular blocks of close blends gave errors off by up to
+~10⁴ (host-side work, so the precision costs nothing measurable).
 """
 function marginal_errors(h::HostH{T}; k::Integer = 8) where {T}
+    F = promote_type(T, Float64)
     P, N = size(h.D)
-    σ = fill(T(NaN), P, N)
+    σ = fill(F(NaN), P, N)
     Lmax = (k + 1) * P
     # per-task buffers; column k + 1 of `act` holds a's active parameters
     chunks = collect(Iterators.partition(1:N, max(1, cld(N, 8 * Threads.nthreads()))))
     Threads.@sync for ch in chunks
         Threads.@spawn begin
-            M = Matrix{T}(undef, Lmax, Lmax); V = Matrix{T}(undef, P, P)
+            M = Matrix{F}(undef, Lmax, Lmax); V = Matrix{F}(undef, P, P)
             nb = zeros(Int, k); sc = zeros(T, k)
             srcs = zeros(Int, k + 1); act = zeros(Int, P, k + 1); na = zeros(Int, k + 1); off = zeros(Int, k + 2)
             for a in ch
@@ -81,7 +84,7 @@ function marginal_errors(h::HostH{T}; k::Integer = 8) where {T}
                 for t in 1:m; act[t, nsrc] = act[t, k + 1]; end
                 off[1] = 0; for ib in 1:nsrc; off[ib + 1] = off[ib] + na[ib]; end
                 L = off[nsrc + 1]
-                fill!(view(M, 1:L, 1:L), zero(T))
+                fill!(view(M, 1:L, 1:L), zero(F))
                 for jb in 1:nsrc, ib in 1:jb
                     B = hblock(h, srcs[ib], srcs[jb])
                     B === nothing && continue
@@ -89,8 +92,8 @@ function marginal_errors(h::HostH{T}; k::Integer = 8) where {T}
                         M[off[ib] + r, off[jb] + c] = B[act[r, ib], act[c, jb]]
                     end
                 end
-                tr_ = zero(T); for i in 1:L; tr_ += M[i, i]; end
-                for i in 1:L; M[i, i] += T(1e-12) * tr_; end
+                tr_ = zero(F); for i in 1:L; tr_ += M[i, i]; end
+                for i in 1:L; M[i, i] += F(1e-12) * tr_; end
                 # a's covariance is (UᵀU)⁻¹ for U the last m x m block of the factor, so its
                 # diagonal is the row norms of U⁻¹
                 o = L - m
@@ -100,13 +103,13 @@ function marginal_errors(h::HostH{T}; k::Integer = 8) where {T}
                     _chol_upper!(M, m) || continue
                 end
                 for c in 1:m, r in m:-1:1              # V = U⁻¹ by back substitution
-                    t = r == c ? one(T) : zero(T)
+                    t = r == c ? one(F) : zero(F)
                     for i in (r + 1):m; t -= M[o + r, o + i] * V[i, c]; end
                     V[r, c] = t / M[o + r, o + r]
                 end
                 for t in 1:m
-                    s = zero(T); for j in 1:m; s += abs2(V[t, j]); end
-                    p = act[t, nsrc]; σ[p, a] = sqrt(max(s, zero(T))) / h.D[p, a]
+                    s = zero(F); for j in 1:m; s += abs2(V[t, j]); end
+                    p = act[t, nsrc]; σ[p, a] = sqrt(max(s, zero(F))) / h.D[p, a]
                 end
             end
         end
