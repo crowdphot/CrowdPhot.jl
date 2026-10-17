@@ -164,7 +164,7 @@ end
 """
 Per-image sums at continuous pixel position `(y, x)` of the flat image `[off + 1 : off + ny nx]`
 of `data`/`iv`, with bank `kb`: `(Ñ, D̃, Ṽ, α, β, γ, dof, ok)` (`dof`: Σ c_χ minus this
-image's level).  `g` is the image gain.
+image's level).  `g` is the image's `flux_scale`.
 
 With the level, the sums are about the aperture means p̄ = Σcwp/Σcw and ē = Σcwe/Σcw:
 Ñ = g Σ cw (p-p̄)(e-ē) is N - rG exactly, and the χ² quadratic is α = Σ wχ (e-ē)²,
@@ -281,7 +281,7 @@ The kernels pass `level` and `chi` as compile-time constants.
         ny = d.dims[1, e]; nx = d.dims[2, e]
         py = unsafe_trunc(Int32, round(y)); px = unsafe_trunc(Int32, round(x))
         ((1 <= py <= ny) & (1 <= px <= nx)) || continue
-        t1, t2, t3, t4, t5, t6, dd, good = image_terms(data, iv, d.dims[3, e], ny, nx, y, x, d.ip[IP_GAIN, e], bk, bank_index(bk, e, py, px), level, chi, μ)
+        t1, t2, t3, t4, t5, t6, dd, good = image_terms(data, iv, d.dims[3, e], ny, nx, y, x, d.ip[IP_SCALE, e], bk, bank_index(bk, e, py, px), level, chi, μ)
         good || continue
         acc += SVector(t1, t2, t3, t4, t5, t6)
         dof += dd; cnt += Int32(1)
@@ -347,21 +347,30 @@ function JointDetection(sc::JointScene{T}, psfs, offsets, det::JointDetector; we
     grid = oversample(sc.frame, det.K)
     banks = DeviceBanks(sc, psfs, offsets, det)
     hpad = maximum(Array(banks.h)) + 1           # an image reaches nodes within its aperture's half-width
+    tptr, timg, ntr = _tile_lists(sc.footprints, Array(sc.dev.band), grid, det.K, hpad, tile)
+    wf = T[get(weights, b, 1.0) for b in sc.bands]
+    return JointDetection(det, grid, banks, to_device(be, tptr), to_device(be, timg), to_device(be, wf), tile, ntr)
+end
+
+"""
+Per `tile x tile` node tile of `grid` (`K` times finer than the frame of `footprints`), the
+images whose footprint padded by `hpad` frame px reaches it, sorted by band (`node_statistic`
+folds each band as it leaves it): `(tptr, timg, ntr)`, tile `t`'s images being
+`timg[tptr[t]:tptr[t + 1] - 1]`, tiles numbered column-major with `ntr` per column.
+"""
+function _tile_lists(footprints, bands, grid::TanGrid, K, hpad, tile)
     ntr, ntc = cld(grid.ny, tile), cld(grid.nx, tile)
     lists = [Int32[] for _ in 1:(ntr * ntc)]
-    for (e, fp) in enumerate(sc.footprints)
-        # grid rows/cols of the footprint padded by the aperture (native px -> grid px)
-        r0 = floor(Int, det.K * (fp[1] - hpad - 0.5) + 0.5); r1 = ceil(Int, det.K * (fp[2] + hpad - 0.5) + 0.5)
-        c0 = floor(Int, det.K * (fp[3] - hpad - 0.5) + 0.5); c1 = ceil(Int, det.K * (fp[4] + hpad - 0.5) + 0.5)
+    for (e, fp) in enumerate(footprints)
+        # grid rows/cols of the padded footprint (frame px -> grid px)
+        r0 = floor(Int, K * (fp[1] - hpad - 0.5) + 0.5); r1 = ceil(Int, K * (fp[2] + hpad - 0.5) + 0.5)
+        c0 = floor(Int, K * (fp[3] - hpad - 0.5) + 0.5); c1 = ceil(Int, K * (fp[4] + hpad - 0.5) + 0.5)
         for tc in max(1, cld(c0, tile)):min(ntc, cld(c1, tile)), tr in max(1, cld(r0, tile)):min(ntr, cld(r1, tile))
             push!(lists[tr + (tc - 1) * ntr], e)
         end
     end
-    bands = Array(sc.dev.band)
-    foreach(l -> sort!(l; by = e -> bands[e]), lists)   # `node_statistic` folds each band as it leaves it
-    tptr = Int32.(cumsum([1; length.(lists)])); timg = reduce(vcat, lists; init = Int32[])
-    wf = T[get(weights, b, 1.0) for b in sc.bands]
-    return JointDetection(det, grid, banks, to_device(be, tptr), to_device(be, timg), to_device(be, wf), tile, ntr)
+    foreach(l -> sort!(l; by = e -> bands[e]), lists)
+    return Int32.(cumsum([1; length.(lists)])), reduce(vcat, lists; init = Int32[]), ntr
 end
 
 """

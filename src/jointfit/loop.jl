@@ -248,14 +248,27 @@ detection grid (`TanGrid`):
   `:snm` (`ν / √(χ²_red + 0.25)`, the statistic peaks are found on), `:chi2` (`χ²_red`), each
   computed on data - background, the same three with suffix `_residual` computed on the final
   residual (what a further detection pass would search), and `:nimg` (images with data at each
-  node).  `:chi2` needs `method = :dolphot`.
+  node).  `:chi2` needs `method = :dolphot`;
+- per-band coadds on `products.grid` ([`coadd`](@ref) of the images with the final background,
+  RMS and model, computed from the scene's own arrays), each a `NamedTuple` keyed by band:
+  `:coadd_data`, `:coadd_background`, `:coadd_model`, `:coadd_residual`, `:coadd_rms`,
+  `:coadd_weight`, `:coadd_nimg`, which `:coadd` requests together (one pass per band), and `:coadd_rms_aperture`,
+  the per-pixel noise for sums over large areas such as aperture photometry on the coadd, which
+  must be requested by name (it costs two more passes per band and an array of the band's input
+  pixels; see `coadd`).  `coadd_options` passes `pixfrac`, `units`, `weight`, `clip`,
+  `clip_grow`, `clip_mu` and `clip_min_images` to `coadd`.
 """
 function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGrid; backend = KA.CPU(), T::Type{<:AbstractFloat} = Float64,
-        options::JointLoopOptions = JointLoopOptions(), show_trace::Bool = false, products = ())
+        options::JointLoopOptions = JointLoopOptions(), show_trace::Bool = false, products = (), coadd_options::NamedTuple = (;))
     o = options
     o.accept in (:nu, :snm) || throw(ArgumentError("accept must be :nu or :snm"))
-    bad = setdiff(products, (_IMAGE_PRODUCTS..., _MAP_PRODUCTS...))
-    isempty(bad) || throw(ArgumentError("unknown products $(join(bad, ", ")); available: $(join((_IMAGE_PRODUCTS..., _MAP_PRODUCTS...), ", "))"))
+    products = Tuple(unique(Iterators.flatten(p === :coadd ? _COADD_DEFAULT : (p,) for p in products)))
+    avail = (_IMAGE_PRODUCTS..., _MAP_PRODUCTS..., _COADD_PRODUCTS...)
+    bad = setdiff(products, avail)
+    isempty(bad) || throw(ArgumentError("unknown products $(join(bad, ", ")); available: $(join(avail, ", ")), coadd"))
+    okc = (:pixfrac, :units, :weight, :clip, :clip_grow, :clip_mu, :clip_min_images)
+    badc = setdiff(keys(coadd_options), okc)
+    isempty(badc) || throw(ArgumentError("unsupported coadd_options $(join(badc, ", ")); accepted: $(join(okc, ", "))"))
     !uses_chi(o.detector) && any(in(products), (:chi2, :chi2_residual)) &&
         throw(ArgumentError("products :chi2 and :chi2_residual need a detector with a χ² (method = :dolphot), not method = $(repr(o.detector.method))"))
     t_setup = @elapsed begin
@@ -315,7 +328,7 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         end
     end
     t_final = @elapsed begin
-        cat, prods = _terminal_and_finalize(st, θh, born, λ, pass_run + 1, o, products)
+        cat, prods = _terminal_and_finalize(st, θh, born, λ, pass_run + 1, o, products, coadd_options)
     end
     return (; catalog = cat, bands = sc.bands, history, converged, products = prods, t_setup, t_final)
 end
@@ -326,7 +339,7 @@ const _IMAGE_PRODUCTS = (:background, :rms, :model, :residual)
 const _MAP_PRODUCTS = (:nu, :snm, :chi2, :nu_residual, :snm_residual, :chi2_residual, :nimg)
 
 "The requested `products` at the final catalog θh, plus the detection `grid`."
-function _products(st, θh, products)
+function _products(st, θh, products, coadd_options)
     sc = st.sc; be = sc.backend; T = eltype(sc); model = st.work.model
     isempty(products) && return (; grid = st.jd.grid)
     θd = to_device(be, T, θh)
@@ -349,12 +362,19 @@ function _products(st, θh, products)
         launch!(sub_kernel!, be, length(model), st.tmp, sc.data, st.bkg)
         maps!(st.tmp, Symbol(""))
     end
-    names = Tuple(p for p in (_IMAGE_PRODUCTS..., _MAP_PRODUCTS...) if p in products)
+    cq = Tuple(q for (q, p) in zip(_COADD_QUANTITIES, _COADD_PRODUCTS) if p in products)
+    if !isempty(cq)
+        # the scene's arrays and PolyMaps (frame -> image; the detection grid is K times finer)
+        inp = (; data = sc.data, weight = sc.weight, bkg = st.bkg, rms = st.rms, model)
+        C = _coadd(sc.dev, sc.footprints, sc.bands, st.jd.grid, st.jd.det.K, inp, cq; backend = be, T, coadd_options...)
+        for q in cq; vals[Symbol(:coadd_, q)] = C[q]; end
+    end
+    names = Tuple(p for p in (_IMAGE_PRODUCTS..., _MAP_PRODUCTS..., _COADD_PRODUCTS...) if p in products)
     return NamedTuple{(names..., :grid)}((map(p -> vals[p], names)..., st.jd.grid))
 end
 
 "The terminal pass (background, refit, no detection or pruning), finalize and the requested products."
-function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, products)
+function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, products, coadd_options)
     sc = st.sc; be = sc.backend; T = eltype(sc); f = o.fit
     _backgrounds!(st, to_device(be, T, θh), pass, o)
     if size(θh, 2) > 0
@@ -378,5 +398,5 @@ function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, pr
     cols = merge((; u = θh[1, :], v = θh[2, :], ra = first.(radec), dec = last.(radec), u_err = σ[1, :], v_err = σ[2, :]),
                  perband(:flux, permutedims(θh[3:end, :])), perband(:flux_err, permutedims(σ[3:end, :])), (; significance = joint),
                  perband(:significance, sb), (; nimg, pass_number = born))
-    return StructArray(cols), _products(st, θh, products)
+    return StructArray(cols), _products(st, θh, products, coadd_options)
 end

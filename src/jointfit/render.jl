@@ -54,7 +54,7 @@ end
     r = Int32(0)
     if ok & isfinite(y) & isfinite(x)
         a = unsafe_trunc(Int32, round(y)); b = unsafe_trunc(Int32, round(x))
-        F = max(d.ip[IP_GAIN, e] * θ[2 + d.band[e], s], zero(T))
+        F = max(d.ip[IP_SCALE, e] * θ[2 + d.band[e], s], zero(T))
         r = R_fit
         while r < R_cap && F * sb[r, e] > thresh[e]
             r += Int32(1)
@@ -78,7 +78,7 @@ end
 # Box operations
 # ------------------------------------------------------------------------------------------
 
-"Add each source's model at `θ` (flux = gain x band flux)."
+"Add each source's model at `θ` (flux = flux_scale x band flux)."
 struct RenderOp{TH, D}
     θ::TH
     d::D
@@ -90,7 +90,7 @@ Adapt.@adapt_structure RenderOp
 @inline function box_prepare(op::RenderOp, s, e)
     d = op.d
     _, y, x = source_pixel(d, e, op.θ[1, s], op.θ[2, s])
-    f = d.ip[IP_GAIN, e] * op.θ[2 + d.band[e], s]
+    f = d.ip[IP_SCALE, e] * op.θ[2 + d.band[e], s]
     return y, x, f, psf_context(d.psf, e, y, x)
 end
 
