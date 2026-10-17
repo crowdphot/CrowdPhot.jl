@@ -31,4 +31,5 @@ import CrowdPhot
 @safetestset "Multi-pass sequential photometry" include("photometry/psf_photometry_sequential_multipass.jl")
 @safetestset "Joint multi-image fitting" include("jointfit/joint_fit_tests.jl")
 @safetestset "Coaddition" include("jointfit/coadd_tests.jl")
+@safetestset "Joint tiling" include("jointfit/tiling_tests.jl")
 @safetestset "Doctests" include("doctests.jl")

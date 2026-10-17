@@ -24,7 +24,7 @@ using ..PSF: CircularGaussianPRF, ImagePSF, GriddedPSFModel
 using ..Background: MeanBackground, MedianBackground, SExtractorBackground, MMMBackground, StdRMS, MADStdRMS
 
 export TanGrid, world_to_grid, grid_to_world, oversample, fits_wcs, PolyMap, JointImage, JointScene
-export JointDetector, JointFitOptions, JointLoopOptions, fit_joint_multipass, coadd
+export JointDetector, JointFitOptions, JointLoopOptions, fit_joint_multipass, fit_joint_tiled, plan_tiles, coadd
 
 include("frame.jl")
 include("polymap.jl")
@@ -39,5 +39,6 @@ include("background.jl")
 include("finalize.jl")
 include("loop.jl")
 include("coadd.jl")
+include("tiling.jl")
 
 end # module Joint
