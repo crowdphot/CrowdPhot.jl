@@ -1,16 +1,20 @@
 """
-    JointImage(data, weight, psf, to_sky; band, gain = 1, psf_offset = (0, 0))
+    JointImage(data, weight, psf, to_sky; band, flux_scale = 1, psf_offset = (0, 0))
 
 One exposure (or detector cutout) of a joint fit, on the host.
 
 - `data`: the image (background is estimated and subtracted per pass).
-- `weight`: inverse variance; `0` masks a pixel.
+- `weight`: the full per-pixel inverse variance, which must include the sources' Poisson
+  variance as well as the background and detector noise (e.g. `1 / ERR²` from a pipeline error
+  array); `0` masks a pixel.  The fit's χ² and the coadd's outlier test rely on it.
 - `psf`: unit-flux PRF in this image's pixel frame (`CircularGaussianPRF`, `ImagePSF`, or
   `GriddedPSFModel` of `ImagePSF` nodes).
 - `to_sky(y, x) -> (ra, dec)`: degrees, for 1-based pixel centers; the only thing needed from
   the WCS (see [`PolyMap`](@ref)).
 - `band`: filter identifier; images sharing it share one flux per source.
-- `gain`: data units per unit of the band's common flux (exposure time, zero point, ...).
+- `flux_scale`: data units per unit of the band's common flux (exposure time, zero point, ...),
+  so a source's model in this image is `flux_scale` times its band flux; `1` when the images of a
+  band are already in common units.  Not a detector gain: no noise model uses it.
 - `psf_offset`: added to pixel positions for the PSF's spatial (node) lookup, for cutouts of a
   larger detector.
 """
@@ -20,18 +24,18 @@ struct JointImage{M <: AbstractMatrix, W <: AbstractMatrix, P, F}
     psf::P
     to_sky::F
     band::Symbol
-    gain::Float64
+    flux_scale::Float64
     psf_offset::NTuple{2, Float64}
 end
 
-function JointImage(data::AbstractMatrix, weight::AbstractMatrix, psf, to_sky; band, gain::Real = 1, psf_offset = (0, 0))
+function JointImage(data::AbstractMatrix, weight::AbstractMatrix, psf, to_sky; band, flux_scale::Real = 1, psf_offset = (0, 0))
     size(data) == size(weight) || throw(DimensionMismatch("`data` and `weight` sizes differ: $(size(data)) vs $(size(weight))"))
-    gain > 0 || throw(ArgumentError("`gain` must be positive"))
-    return JointImage(data, weight, psf, to_sky, Symbol(band), Float64(gain), Float64.(Tuple(psf_offset)))
+    flux_scale > 0 || throw(ArgumentError("`flux_scale` must be positive"))
+    return JointImage(data, weight, psf, to_sky, Symbol(band), Float64(flux_scale), Float64.(Tuple(psf_offset)))
 end
 
 # Rows of the per-image parameter matrix `ip`.
-const IP_U0, IP_V0, IP_INVS, IP_GAIN, IP_UMIN, IP_UMAX, IP_VMIN, IP_VMAX = 1:8
+const IP_U0, IP_V0, IP_INVS, IP_SCALE, IP_UMIN, IP_UMAX, IP_VMIN, IP_VMAX = 1:8
 const N_IP = 8
 
 """
@@ -40,7 +44,7 @@ GPU).  Images are concatenated column-major into flat vectors; image `e` occupie
 `off[e] + 1 : off[e] + ny[e] nx[e]`.
 """
 struct DeviceImages{M, MI, VI, PS}
-    ip::M        # (N_IP, E): u0, v0, 1/s, gain, fitted (u, v) bounding box
+    ip::M        # (N_IP, E): u0, v0, 1/s, flux_scale, fitted (u, v) bounding box
     cy::M        # (nmonomials, E) PolyMap coefficients
     cx::M
     dims::MI     # (3, E) Int32: ny, nx, flat offset
@@ -79,6 +83,32 @@ Base.eltype(::JointScene{T}) where {T} = T
 
 function JointScene(images::AbstractVector{<:JointImage}, frame::TanGrid; backend = KA.CPU(), T::Type{<:AbstractFloat} = Float64,
         degree::Integer = 5, max_degree::Integer = 9, margin::Real = 40, tol::Real = 1e-4)
+    g = _image_geometry(images, frame, backend, T; degree, max_degree, margin, tol)
+    psf = device_psf(backend, T, [im.psf for im in images], [im.psf_offset for im in images])
+    dev = DeviceImages(g.dev.ip, g.dev.cy, g.dev.cx, g.dev.dims, g.dev.band, g.dev.degree, psf)
+    return JointScene(backend, frame, g.bands, g.dims, g.offsets, g.maps, g.footprints, _flat(backend, T, im -> im.data, images),
+                      _flat(backend, T, im -> im.weight, images), dev)
+end
+
+# `f(x)` of every `x` concatenated into one flat array on `backend`, each copied straight into its
+# slice (no host staging copy; a conversion to `T` copies one image at a time)
+function _flat(backend, T, f, xs)
+    a = KA.allocate(backend, T, sum(x -> length(f(x)), xs; init = 0))
+    o = 0
+    for x in xs
+        v = f(x); n = length(v)
+        copyto!(a, o + 1, convert(Array{T}, vec(v)), 1, n)
+        o += n
+    end
+    return a
+end
+
+"""
+The images' geometry on `frame` as kernels need it, without PSFs (shared by `JointScene` and
+`coadd`): bands, dims, flat offsets, `PolyMap`s, frame footprints, and `dev`, a `DeviceImages`
+with `psf = nothing`.
+"""
+function _image_geometry(images, frame::TanGrid, backend, ::Type{T}; degree, max_degree, margin, tol) where {T}
     E = length(images)
     E > 0 || throw(ArgumentError("no images"))
     bands = unique(im.band for im in images)
@@ -91,27 +121,54 @@ function JointScene(images::AbstractVector{<:JointImage}, frame::TanGrid; backen
     end
     ip = Matrix{T}(undef, N_IP, E)
     for (e, m) in enumerate(maps)
-        ip[:, e] .= (m.u0, m.v0, 1 / m.s, images[e].gain, m.bbox...)
+        ip[:, e] .= (m.u0, m.v0, 1 / m.s, images[e].flux_scale, m.bbox...)
     end
     D = maximum(m.degree for m in maps)        # PolyMap may have escalated past `degree` for some images
     cy = reduce(hcat, [_lift_coefs(m.cy, m.degree, D) for m in maps]); cx = reduce(hcat, [_lift_coefs(m.cx, m.degree, D) for m in maps])
     dm = Int32[k == 3 ? offsets[e] : dims[e][k] for k in 1:3, e in 1:E]
     band = Int32[findfirst(==(im.band), bands) for im in images]
-    psf = device_psf(backend, T, [im.psf for im in images], [im.psf_offset for im in images])
     dev = DeviceImages(to_device(backend, T, ip), to_device(backend, T, cy), to_device(backend, T, cx), to_device(backend, dm),
-                       to_device(backend, band), Int32(D), psf)
-    # reduce(vcat, ::Vector) allocates once; over a generator it concatenates pairwise (quadratic in E)
-    flat(f) = to_device(backend, T, reduce(vcat, [vec(f(im)) for im in images]))
+                       to_device(backend, band), Int32(D), nothing)
     footprints = [_footprint(im.to_sky, d, frame) for (im, d) in zip(images, dims)]
-    return JointScene(backend, frame, bands, dims, offsets, maps, footprints, flat(im -> im.data), flat(im -> im.weight), dev)
+    return (; bands, dims, offsets, maps, footprints, dev)
 end
 
-# Frame bounding box of the pixel area [0.5, ny + 0.5] x [0.5, nx + 0.5], from its boundary.
-function _footprint(to_sky, (ny, nx), frame)
-    edge = [[(y, x) for y in range(0.5, ny + 0.5; length = 33) for x in (0.5, nx + 0.5)];
-            [(y, x) for x in range(0.5, nx + 0.5; length = 33) for y in (0.5, ny + 0.5)]]
-    uv = [world_to_grid(frame, to_sky(p...)...) for p in edge]
+# Points on the boundary of the pixel area [0.5, ny + 0.5] x [0.5, nx + 0.5].
+_edge_points((ny, nx)) = [[(y, x) for y in range(0.5, ny + 0.5; length = 33) for x in (0.5, nx + 0.5)];
+                          [(y, x) for x in range(0.5, nx + 0.5; length = 33) for y in (0.5, ny + 0.5)]]
+
+# Frame bounding box of the pixel area, from its boundary.
+function _footprint(to_sky, dims, frame)
+    uv = [world_to_grid(frame, to_sky(p...)...) for p in _edge_points(dims)]
     return (minimum(first, uv), maximum(first, uv), minimum(last, uv), maximum(last, uv))
+end
+
+"""
+    TanGrid(images; scale = nothing) -> TanGrid
+
+The north-up `TanGrid` just covering the pixel areas of `images` (`JointImage`s; `psf` may be
+`nothing`): tangent point at the mean direction of their boundaries, extent
+from those boundaries.  `scale` (arcsec per pixel) defaults to the median of the images' native
+scales at their centers; `oversample` refines the result.
+"""
+function TanGrid(images::AbstractVector{<:JointImage}; scale = nothing)
+    isempty(images) && throw(ArgumentError("no images"))
+    edge = [im.to_sky(p...) for im in images for p in _edge_points(size(im.data))]
+    m = reduce((a, b) -> a .+ b, ((cosd(d) * cosd(r), cosd(d) * sind(r), sind(d)) for (r, d) in edge))
+    ra0 = mod(atand(m[2], m[1]), 360); dec0 = atand(m[3], hypot(m[1], m[2]))
+    s = scale === nothing ? median(_native_scale(im) for im in images) : Float64(scale)
+    s > 0 || throw(ArgumentError("scale must be positive"))
+    uv = [world_to_grid(TanGrid(ra0, dec0, s, 1, 1, 0.0, 0.0), p...) for p in edge]
+    umin, umax = extrema(first, uv); vmin, vmax = extrema(last, uv)
+    return TanGrid(ra0, dec0, s, max(1, ceil(Int, umax - umin)), max(1, ceil(Int, vmax - vmin)), 0.5 - umin, 0.5 - vmin)
+end
+
+# Pixel scale (arcsec, square root of the pixel's area) at the image center.
+function _native_scale(im)
+    y, x = (size(im.data) .+ 1) ./ 2
+    g1 = TanGrid(im.to_sky(y, x)..., 1.0, 1, 1, 0.0, 0.0)   # arcsec offsets about the center
+    a = world_to_grid(g1, im.to_sky(y + 1, x)...); b = world_to_grid(g1, im.to_sky(y, x + 1)...)
+    return sqrt(abs(a[1] * b[2] - a[2] * b[1]))
 end
 
 "View of image `e` of a flat per-pixel vector `x` as a matrix."

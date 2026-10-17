@@ -23,8 +23,8 @@ function two_image_scene(; gridded = false, model_rad = :auto)
     psfs = gridded ?
         [GriddedPSFModel([gauss_node(f), gauss_node(f + 0.2), gauss_node(f + 0.1), gauss_node(f + 0.4)], [0.0, 0.0, 80.0, 80.0], [0.0, 80.0, 0.0, 80.0]) for f in (2.0, 2.6)] :
         [CircularGaussianPRF(y = 0, x = 0, fwhm = f, flux = 1, bkg = 0) for f in (2.0, 2.6)]
-    imgs = [JointImage(zeros(dims[1]), ones(dims[1]), psfs[1], affine_sky(frame, 0.0, [25.0, 28.0]); band = :A, gain = 1.0),
-            JointImage(zeros(dims[2]), ones(dims[2]), psfs[2], affine_sky(frame, 30.0, [30.0, 20.0]); band = :B, gain = 2.0, psf_offset = (5, -3))]
+    imgs = [JointImage(zeros(dims[1]), ones(dims[1]), psfs[1], affine_sky(frame, 0.0, [25.0, 28.0]); band = :A, flux_scale = 1.0),
+            JointImage(zeros(dims[2]), ones(dims[2]), psfs[2], affine_sky(frame, 30.0, [30.0, 20.0]); band = :B, flux_scale = 2.0, psf_offset = (5, -3))]
     sc = JointScene(imgs, frame)
     rng = StableRNG(5); N = 25
     θ = vcat(rand(rng, 2, N) .* 50 .+ 35, exp.(randn(rng, 2, N) .+ 6))
@@ -145,7 +145,7 @@ end
             for k in axes(s.θ, 2)
                 y, x, _ = s.sc.maps[e](s.θ[1, k], s.θ[2, k])
                 a, b = round(Int, y), round(Int, x)
-                f = s.imgs[e].gain * s.θ[2 + e, k]
+                f = s.imgs[e].flux_scale * s.θ[2 + e, k]
                 m = gridded ? CrowdPhot.ConstructionBase.setproperties(s.psfs[e], (; y = y + off[1], x = x + off[2], flux = f, bkg = 0.0)) :
                     CircularGaussianPRF(y = y, x = x, fwhm = s.psfs[e].fwhm, flux = f, bkg = 0)
                 for j in max(1, b - 6):min(s.sc.dims[e][2], b + 6), i in max(1, a - 6):min(s.sc.dims[e][1], a + 6)
@@ -355,7 +355,7 @@ end
     @test !J._same_content(gp(), gp(fwhm = 2.0 + 1e-12))
     # (psf, dims, psf_offset): images 1 and 2 share; 3-6 each differ from 1 in one input
     spec = [(A, (60, 64), (0, 0)), (deepcopy(A), (60, 64), (0, 0)), (A, (60, 64), (5, -3)), (A2, (60, 64), (0, 0)), (g(2.6), (60, 64), (0, 0)), (A, (64, 60), (0, 0))]
-    imgs = [JointImage(zeros(d), ones(d), p, affine_sky(frame, 0.0, [30.0, 30.0]); band = :A, gain = 1.0, psf_offset = o) for (p, d, o) in spec]
+    imgs = [JointImage(zeros(d), ones(d), p, affine_sky(frame, 0.0, [30.0, 30.0]); band = :A, flux_scale = 1.0, psf_offset = o) for (p, d, o) in spec]
     nr = 2; det = JointDetector(psf_regions = nr)
     bk = J.DeviceBanks(JointScene(imgs, frame), [im.psf for im in imgs], [im.psf_offset for im in imgs], det)
     @test length(bk.h) == 5 * nr^2
@@ -614,7 +614,7 @@ end
     J.render!(s.sc.data, s.sc, s.θ, J.footprint(s.sc, s.θ, s.rt))
     imgs = map(enumerate(s.imgs)) do (e, im)
         JointImage(J.image_view(s.sc, s.sc.data, e) .+ 30 .+ sqrt(30) .* randn(rng, s.sc.dims[e]), fill(1 / 30, s.sc.dims[e]), im.psf, im.to_sky;
-                   band = im.band, gain = im.gain, psf_offset = im.psf_offset)
+                   band = im.band, flux_scale = im.flux_scale, psf_offset = im.psf_offset)
     end
     a = fit_joint_multipass(imgs, s.frame; options = JointLoopOptions(device_background = true)).catalog
     b = fit_joint_multipass(imgs, s.frame; options = JointLoopOptions(device_background = false)).catalog
@@ -638,7 +638,7 @@ end
     J.render!(s.sc.data, s.sc, s.θ, J.footprint(s.sc, s.θ, s.rt))
     imgs = map(enumerate(s.imgs)) do (e, im)
         JointImage(J.image_view(s.sc, s.sc.data, e) .+ 30 .+ sqrt(30) .* randn(rng, s.sc.dims[e]), fill(1 / 30, s.sc.dims[e]), im.psf, im.to_sky;
-                   band = im.band, gain = im.gain, psf_offset = im.psf_offset)
+                   band = im.band, flux_scale = im.flux_scale, psf_offset = im.psf_offset)
     end
     names = (:background, :rms, :model, :residual, :nu, :snm, :chi2, :nu_residual, :snm_residual, :chi2_residual, :nimg)
     R = fit_joint_multipass(imgs, s.frame; products = reverse(names))
@@ -668,7 +668,24 @@ end
     o1 = JointLoopOptions(max_iter = 1)
     @test fit_joint_multipass(imgs, s.frame; options = o1).products == (; grid = p.grid)
     @test fit_joint_multipass(imgs, s.frame; options = o1, products = (:nimg,)).products.nimg == md.nimg
-    @test_throws "unknown products coadd" fit_joint_multipass(imgs, s.frame; products = (:coadd, :nu))
+    @test_throws "unknown products coadd_flux" fit_joint_multipass(imgs, s.frame; products = (:coadd_flux, :nu))
     mf = JointLoopOptions(detector = JointDetector(method = :matched_filter))
     @test_throws "products :chi2 and :chi2_residual need" fit_joint_multipass(imgs, s.frame; options = mf, products = (:chi2_residual,))
+    # :coadd requests every coadd product but :coadd_rms_aperture, which can be named: the coadd of
+    # the images with the final background, RMS and model, as `coadd` gives it (which fits its own
+    # PolyMaps on the grid rather than using the scene's, so agreement is to their fit tolerance)
+    Rc = fit_joint_multipass(imgs, s.frame; options = o1, products = (:coadd, :background, :rms, :model, :coadd_rms_aperture),
+                             coadd_options = (; pixfrac = 0.8))
+    pc = Rc.products
+    @test keys(pc) == (:background, :rms, :model, :coadd_data, :coadd_background, :coadd_model, :coadd_residual, :coadd_rms,
+                       :coadd_rms_aperture, :coadd_weight, :coadd_nimg, :grid)
+    @test !haskey(fit_joint_multipass(imgs, s.frame; options = o1, products = (:coadd,)).products, :coadd_rms_aperture)
+    @test keys(pc.coadd_data) == (:A, :B) && size(pc.coadd_data.A) == (pc.grid.ny, pc.grid.nx)
+    C = coadd(imgs, pc.grid; quantities = (:data, :residual, :rms_aperture, :nimg), background = pc.background, rms = pc.rms, model = pc.model,
+              pixfrac = 0.8)
+    for (a, b) in ((C.data.B, pc.coadd_data.B), (C.residual.A, pc.coadd_residual.A), (C.rms_aperture.A, pc.coadd_rms_aperture.A))
+        k = isfinite.(a) .& isfinite.(b)
+        @test count(xor.(isfinite.(a), isfinite.(b))) <= 2 && maximum(abs.(a[k] .- b[k])) < 1e-4 * maximum(abs, b[k])
+    end
+    @test_throws "unsupported coadd_options quantities" fit_joint_multipass(imgs, s.frame; products = (:coadd,), coadd_options = (; quantities = (:data,)))
 end

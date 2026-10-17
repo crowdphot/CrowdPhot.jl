@@ -53,3 +53,30 @@ The grid `K` times finer than `g` with the same tangent point and sky coverage: 
 """
 oversample(g::TanGrid, K::Integer) =
     TanGrid(g.ra0, g.dec0, g.scale / K, K * g.ny, K * g.nx, K * (g.cy - 0.5) + 0.5, K * (g.cx - 0.5) + 0.5)
+
+"""
+    fits_wcs(g::TanGrid) -> Vector{Tuple{String, Any, String}}
+
+FITS WCS keywords `(keyword, value, comment)` for a matrix on `g` written as is: Julia's first
+index is FITS axis 1, so axis 1 runs north and axis 2 west, and the `CD` matrix has zero
+diagonal.  Pass them to a FITS writer as the header (with FITSIO loaded, `FITSHeader(g)` builds
+one).  The projection is exactly `g`'s gnomonic one; the celestial frame is whatever `to_sky`
+returned (FITS assumes ICRS when `RADESYS` is absent).
+"""
+function fits_wcs(g::TanGrid)
+    s = g.scale / 3600
+    return Tuple{String, Any, String}[
+        ("WCSAXES", 2, "number of WCS axes"),
+        ("CTYPE1", "RA---TAN", "gnomonic projection"),
+        ("CTYPE2", "DEC--TAN", "gnomonic projection"),
+        ("CRVAL1", g.ra0, "[deg] RA of the tangent point"),
+        ("CRVAL2", g.dec0, "[deg] Dec of the tangent point"),
+        ("CRPIX1", g.cy, "axis-1 (row) pixel of the tangent point"),
+        ("CRPIX2", g.cx, "axis-2 (column) pixel of the tangent point"),
+        ("CD1_1", 0.0, "[deg/px] RA-like coordinate along axis 1"),
+        ("CD1_2", -s, "[deg/px] RA-like coordinate along axis 2 (east is -col)"),
+        ("CD2_1", s, "[deg/px] Dec-like coordinate along axis 1 (north is +row)"),
+        ("CD2_2", 0.0, "[deg/px] Dec-like coordinate along axis 2"),
+        ("CUNIT1", "deg", "units of CRVAL1 and CD1_j"),
+        ("CUNIT2", "deg", "units of CRVAL2 and CD2_j")]
+end

@@ -107,7 +107,7 @@ end
     k = k0 + t
     s = src[k]; e = img[k]
     _, y, x = source_pixel(d, e, θ[1, s], θ[2, s])
-    f = d.ip[IP_GAIN, e] * θ[2 + d.band[e], s]
+    f = d.ip[IP_SCALE, e] * θ[2 + d.band[e], s]
     pc = psf_context(d.psf, e, y, x)
     a = ay[s, e]; b = ax[s, e]
     c1 = c2 = c3 = zero(T)
@@ -151,7 +151,7 @@ end
 @inline function chain(d, θ, s, e)
     T = eltype(θ)
     _, _, _, yu, yv, xu, xv = source_pixel(d, e, θ[1, s], θ[2, s])
-    return SMatrix{3, 3, T}(yu, xu, zero(T), yv, xv, zero(T), zero(T), zero(T), d.ip[IP_GAIN, e])
+    return SMatrix{3, 3, T}(yu, xu, zero(T), yv, xv, zero(T), zero(T), zero(T), d.ip[IP_SCALE, e])
 end
 
 @inline cnvec(cn, t) = SVector(cn[1, t], cn[2, t], cn[3, t])
