@@ -3,7 +3,7 @@
 #
 #   per pass: render the model at θ -> per image, the package's `estimate_background_multipass`
 #   on raw - model (host) -> joint detection on all residuals (maps, peaks accepted on
-#   `accept >= detect_sigma`, wing gate) -> dedup against the catalog and the discard log at
+#   `accept >= detect_sigma`, wing gate) -> dedup against the catalog and the discard log (prunes after pass 1) at
 #   `min_separation` (frame px) -> seeds: refined peak position and per-band fluxes from
 #   `joint_point` -> `fit_pass` -> prune on the joint signed significance (Stouffer over bands of
 #   f_b sqrt(H_bb)) and close pairs.
@@ -19,6 +19,7 @@
 - `gate = 2.0`: wing-gate factor applied in every pass (`0` disables it)
 - `band_weights = Dict()`: detection weights per band (missing bands weigh 1)
 - `min_separation = 1.0`: new peaks within this of a catalog or discarded source are dropped
+  (discarded: pruned in a pass after the first, whose background still holds the stars' light)
 - `prune_snr_min = 3 detect_sigma / 5`, `prune_separation = 0.5`
 
   Both are tighter than the single-image defaults (1.5 and 1.0): a blend's second star can only
@@ -261,22 +262,10 @@ detection grid (`TanGrid`):
 function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGrid; backend = KA.CPU(), T::Type{<:AbstractFloat} = Float64,
         options::JointLoopOptions = JointLoopOptions(), show_trace::Bool = false, products = (), coadd_options::NamedTuple = (;))
     o = options
-    o.accept in (:nu, :snm) || throw(ArgumentError("accept must be :nu or :snm"))
-    products = Tuple(unique(Iterators.flatten(p === :coadd ? _COADD_DEFAULT : (p,) for p in products)))
-    avail = (_IMAGE_PRODUCTS..., _MAP_PRODUCTS..., _COADD_PRODUCTS...)
-    bad = setdiff(products, avail)
-    isempty(bad) || throw(ArgumentError("unknown products $(join(bad, ", ")); available: $(join(avail, ", ")), coadd"))
-    okc = (:pixfrac, :units, :weight, :clip, :clip_grow, :clip_mu, :clip_min_images)
-    badc = setdiff(keys(coadd_options), okc)
-    isempty(badc) || throw(ArgumentError("unsupported coadd_options $(join(badc, ", ")); accepted: $(join(okc, ", "))"))
-    !uses_chi(o.detector) && any(in(products), (:chi2, :chi2_residual)) &&
-        throw(ArgumentError("products :chi2 and :chi2_residual need a detector with a χ² (method = :dolphot), not method = $(repr(o.detector.method))"))
+    products = _check_run_args(o, products, coadd_options)
     t_setup = @elapsed begin
         sc = JointScene(images, frame; backend, T)
-        # the per-band catalog columns flux_b, flux_err_b collide only for bands b and err_b
-        for b in sc.bands
-            Symbol(:err_, b) in sc.bands && throw(ArgumentError("bands $b and err_$b give the same catalog column flux_err_$b"))
-        end
+        _check_bands(sc.bands)
         psfs = [im.psf for im in images]; offs = [im.psf_offset for im in images]
         f = o.fit
         rt = RadiusTable(sc, psfs, [im.weight for im in images]; model_rad = f.model_rad, nsigma = f.model_rad_nsigma, f.R_fit, f.R_cap)
@@ -314,7 +303,10 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         js = _flux_significance(θh, Array(r.lin.hdiag))
         js[Array(r.lin.nimg) .== 0] .= NaN
         keep, n_snr, n_close = _prune_keep(θh, js, o.prune_snr_min, o.prune_separation)
-        for s in findall(!, keep); push!(disc, (θh[1, s], θh[2, s])); end
+        # pass 1 fits against a background that still holds every star's light, so its prunes include
+        # real faint stars; logging them would block their re-detection for the rest of the run (on
+        # a crowded Roman tile, leaving them out kept 123 more true sources for 10 more spurious ones)
+        pass > 1 && for s in findall(!, keep); push!(disc, (θh[1, s], θh[2, s])); end
         θh = θh[:, keep]; born = born[keep]
         n_surv = count(==(pass), born)
         h = (; pass, dn.n_peaks, dn.n_gated, n_dup_cat = dn.nd_cat, n_dup_disc = dn.nd_disc, n_new, n_pruned_snr = n_snr,
@@ -330,7 +322,34 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
     t_final = @elapsed begin
         cat, prods = _terminal_and_finalize(st, θh, born, λ, pass_run + 1, o, products, coadd_options)
     end
+    # every result is on the host: return the device memory now, since a GPU array's is otherwise held
+    # until the GC finalizes it, which host memory pressure barely drives (a no-op on the CPU)
+    bk = st.jd.banks
+    foreach(KA.unsafe_free!, (sc.data, sc.weight, st.bkg, st.rms, st.tmp, st.bmask, st.det_data, st.det_iv, st.work.model, st.work.resid,
+                              st.work.mask, bk.P, bk.c, bk.cχ, bk.rng))
     return (; catalog = cat, bands = sc.bands, history, converged, products = prods, t_setup, t_final)
+end
+
+"Checks of `fit_joint_multipass`'s arguments that need no data; `products` with `:coadd` expanded."
+function _check_run_args(o::JointLoopOptions, products, coadd_options)
+    o.accept in (:nu, :snm) || throw(ArgumentError("accept must be :nu or :snm"))
+    products = Tuple(unique(Iterators.flatten(p === :coadd ? _COADD_DEFAULT : (p,) for p in products)))
+    avail = (_IMAGE_PRODUCTS..., _MAP_PRODUCTS..., _COADD_PRODUCTS...)
+    bad = setdiff(products, avail)
+    isempty(bad) || throw(ArgumentError("unknown products $(join(bad, ", ")); available: $(join(avail, ", ")), coadd"))
+    okc = (:pixfrac, :units, :weight, :clip, :clip_grow, :clip_mu, :clip_min_images)
+    badc = setdiff(keys(coadd_options), okc)
+    isempty(badc) || throw(ArgumentError("unsupported coadd_options $(join(badc, ", ")); accepted: $(join(okc, ", "))"))
+    !uses_chi(o.detector) && any(in(products), (:chi2, :chi2_residual)) &&
+        throw(ArgumentError("products :chi2 and :chi2_residual need a detector with a χ² (method = :dolphot), not method = $(repr(o.detector.method))"))
+    return products
+end
+
+# the per-band catalog columns flux_b, flux_err_b collide only for bands b and err_b
+function _check_bands(bands)
+    for b in bands
+        Symbol(:err_, b) in bands && throw(ArgumentError("bands $b and err_$b give the same catalog column flux_err_$b"))
+    end
 end
 
 # The `products` of `fit_joint_multipass`: per-image arrays on each image's pixel grid, and
