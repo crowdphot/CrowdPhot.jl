@@ -17,11 +17,11 @@ end
 gauss_node(fwhm; os = 4, n = 41) = (c = (n + 1) / 2;
     ImagePSF([evaluate(CircularGaussianPRF(y = c, x = c, fwhm = fwhm * os, flux = os^2, bkg = 0), i, j) for i in 1:n, j in 1:n]; oversampling = os))
 
-function two_image_scene(; gridded = false, model_rad = :auto)
+function two_image_scene(; gridded = false, model_rad = :auto, os = 4)
     frame = TanGrid(80.0, -69.0, 0.11, 120, 120)
     dims = ((70, 64), (60, 72))
     psfs = gridded ?
-        [GriddedPSFModel([gauss_node(f), gauss_node(f + 0.2), gauss_node(f + 0.1), gauss_node(f + 0.4)], [0.0, 0.0, 80.0, 80.0], [0.0, 80.0, 0.0, 80.0]) for f in (2.0, 2.6)] :
+        [GriddedPSFModel([gauss_node(f; os), gauss_node(f + 0.2; os), gauss_node(f + 0.1; os), gauss_node(f + 0.4; os)], [0.0, 0.0, 80.0, 80.0], [0.0, 80.0, 0.0, 80.0]) for f in (2.0, 2.6)] :
         [CircularGaussianPRF(y = 0, x = 0, fwhm = f, flux = 1, bkg = 0) for f in (2.0, 2.6)]
     imgs = [JointImage(zeros(dims[1]), ones(dims[1]), psfs[1], affine_sky(frame, 0.0, [25.0, 28.0]); band = :A, flux_scale = 1.0),
             JointImage(zeros(dims[2]), ones(dims[2]), psfs[2], affine_sky(frame, 30.0, [30.0, 20.0]); band = :B, flux_scale = 2.0, psf_offset = (5, -3))]
@@ -154,9 +154,10 @@ end
             end
             @test J.image_view(s.sc, model, e) ≈ ref rtol = 1e-8
         end
-        # the GPU's tile gather adds each pixel's sources in the CPU kernel's order: bitwise equal
+        # the GPU render adds each pixel's sources in the CPU's order: bitwise equal, except that the
+        # CPU's constant-weight filter for gridded PSFs rounds differently
         tiles = J.render_tiles!(zeros(length(s.sc.data)), J.RenderOp(s.θ, s.sc.dev), s.sc, fp)
-        @test tiles == model
+        @test gridded ? isapprox(tiles, model; rtol = 1e-12) : tiles == model
     end
     # a crowded field: tiles with more sources than one batch (TILE_G)
     s = two_image_scene(; gridded = true, model_rad = 8)
@@ -164,7 +165,25 @@ end
     fp = J.footprint(s.sc, θ, s.rt)
     @test J.tile_bins(s.sc, fp).nb > 1
     model = zeros(length(s.sc.data)); J.render!(model, s.sc, θ, fp)
-    @test J.render_tiles!(zeros(length(s.sc.data)), J.RenderOp(θ, s.sc.dev), s.sc, fp) == model
+    tiles = J.render_tiles!(zeros(length(s.sc.data)), J.RenderOp(θ, s.sc.dev), s.sc, fp)
+    @test tiles ≈ model rtol = 1e-12
+    # the stamp buffer filled band by band, one tile column per band: boxes cross every band edge
+    @test J.render_tiles!(zeros(length(s.sc.data)), J.RenderOp(θ, s.sc.dev), s.sc, fp; words = 1) == tiles
+    # sources over and beyond the whole frame: boxes clipped at the image edges or off the images
+    θe = vcat(rand(rng, 2, 400) .* 130 .- 5, exp.(randn(rng, 2, 400) .+ 4))
+    fpe = J.footprint(s.sc, θe, s.rt); me = zeros(length(s.sc.data)); J.render!(me, s.sc, θe, fpe)
+    te = J.render_tiles!(zeros(length(s.sc.data)), J.RenderOp(θe, s.sc.dev), s.sc, fpe)
+    @test te ≈ me rtol = 1e-12
+    @test J.render_tiles!(zeros(length(s.sc.data)), J.RenderOp(θe, s.sc.dev), s.sc, fpe; words = 1) == te
+    # the CPU's constant-weight filter at any integer oversampling, boxes within and beyond the nodes
+    # (41 nodes: 10 pixels at os = 4), against the per-pixel evaluation
+    for os in 1:5, model_rad in (3, 25)
+        s = two_image_scene(; gridded = true, model_rad, os)
+        fp = J.footprint(s.sc, θe, s.rt); m = zeros(length(s.sc.data)); J.render!(m, s.sc, θe, fp)
+        @test m ≈ J.render_tiles!(zeros(length(s.sc.data)), J.RenderOp(θe, s.sc.dev), s.sc, fp) rtol = 1e-12
+        # every row chunking (thread count) gives the same bits
+        @test all(n -> J.render_rows_cw!(zeros(length(s.sc.data)), J.RenderOp(θe, s.sc.dev), s.sc, fp, n) == m, (1, 7, 64))
+    end
 end
 
 # Dense equilibration-undone H from a Linearization (host arrays).

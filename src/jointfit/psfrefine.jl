@@ -91,12 +91,6 @@ function _check_refine_options(o::PSFRefineOptions)
     return o
 end
 
-# Catmull-Rom weights of the four stencil samples at fraction t (the `cubic_conv` interpolant).
-@inline function cr_weights(t)
-    t2 = t * t; t3 = t2 * t
-    return ((-t3 + 2t2 - t) / 2, (3t3 - 5t2 + 2) / 2, (-3t3 + 4t2 + t) / 2, (t3 - t2) / 2)
-end
-
 # ------------------------------------------------------------------------------------------
 # Run-level setup: groups, windows, prior blocks, gauge basis
 # ------------------------------------------------------------------------------------------

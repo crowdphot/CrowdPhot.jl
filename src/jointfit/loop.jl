@@ -227,8 +227,10 @@ end
 # Rough peak memory (bytes) of a pass with N sources and np pairs: the per-pixel arrays at a constant per
 # image pixel (the measured Roman-field peak at 2000 px images less its source rows, so live arrays plus
 # uncollected garbage: 87 B on the CPU in Float64, 56 B on Metal; Float32 on the CPU is overestimated),
-# plus H (own and pair blocks) and its finalize host copy exactly.
-_memory_estimate(sc::JointScene, N, np) = (is_cpu(sc.backend) ? 87 : 56) * length(sc.data) + 2 * nparams(sc)^2 * sizeof(eltype(sc)) * (N + np)
+# plus H (own and pair blocks) and its finalize host copy exactly, plus on GPUs the render's stamp
+# buffer and pair buckets, live during the fit's trial renders (the run's peak).
+_memory_estimate(sc::JointScene, N, np) = (is_cpu(sc.backend) ? 87 : 56) * length(sc.data) + 2 * nparams(sc)^2 * sizeof(eltype(sc)) * (N + np) +
+                                          (is_cpu(sc.backend) ? 0 : sizeof(eltype(sc)) * RENDER_WORDS + 4 * N * (nimages(sc) + 1))
 
 """
     fit_joint_multipass(images, frame; backend = KernelAbstractions.CPU(), T = Float64,
