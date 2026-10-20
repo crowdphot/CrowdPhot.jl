@@ -319,8 +319,9 @@ end
     end
 end
 
-# Inclusive scan in x's element type: `cumsum` widens Int32 to Int64 on every backend.
-_scan(x) = cumsum!(similar(x), x)
+# Inclusive scan in x's element type, out of place (`cumsum` widens Int32 to Int64; Metal's
+# `cumsum!` compiles anew for every array length).
+_scan(x) = scan!(copy(x))
 
 # Counts written into x[2:end]; returns starts from 1: [1, 1 + x[2], 1 + x[2] + x[3], ...].
 _scan_from_one(x) = (fill!(view(x, 1:1), one(eltype(x))); _scan(x))

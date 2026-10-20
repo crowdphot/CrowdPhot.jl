@@ -1,11 +1,15 @@
 # Per-source box operations over every image (model render, fit-pixel mask) and the cost.
 #
-# Two launch geometries share the per-pixel math (`box_prepare`, `box_pixel!`):
+# Launch geometries share the per-pixel math (`box_prepare`, `psf_value`):
 #   CPU: one work item per (row chunk, image).  Every source's box is clipped to the chunk's
 #        rows, so no two work items write the same pixel and no atomics are needed (float
 #        atomics are CAS loops on the CPU backend).
-#   GPU: one workgroup per (source, image); its items stride over the box pixels and add
-#        with atomics.
+#   GPU render: one workgroup per 16 x 16 pixel tile that has sources, one item per pixel, over
+#        the tile's sources in ascending order (`render_tiles!`).  Each pixel adds its sources in
+#        the CPU kernel's order, so the model is deterministic and bitwise equal to the CPU's
+#        (float atomics would add in a run-dependent order).
+#   GPU mask: one workgroup per (source, image); its items stride over the box pixels (every
+#        write stores `true`).
 
 """
 Per-(source, image) placement held fixed within a linearization, as the single-image fitter
@@ -94,14 +98,10 @@ Adapt.@adapt_structure RenderOp
     return y, x, f, psf_context(d.psf, e, y, x)
 end
 
-@inline function box_pixel!(op::RenderOp, out, c, q, gy, gx, ::Val{atomic}) where {atomic}
+# The CPU row kernel's per-pixel add (the GPU render is `render_tiles!`).
+@inline function box_pixel!(op::RenderOp, out, c, q, gy, gx)
     y, x, f, pc = c
-    val = f * psf_value(op.d.psf, pc, gy, gx, y, x)
-    if atomic
-        Atomix.@atomic out[q] += val
-    else
-        @inbounds out[q] += val
-    end
+    @inbounds out[q] += f * psf_value(op.d.psf, pc, gy, gx, y, x)
     return nothing
 end
 
@@ -114,7 +114,7 @@ Adapt.@adapt_structure MaskOp
 
 @inline box_radius(op::MaskOp, mR, s, e) = ifelse(mR[s, e] > 0, op.R_fit, Int32(0))
 @inline box_prepare(::MaskOp, s, e) = nothing
-@inline function box_pixel!(op::MaskOp, out, c, q, gy, gx, ::Val)
+@inline function box_pixel!(op::MaskOp, out, c, q, gy, gx)
     # concurrent GPU writes all store `true`
     @inbounds op.w[q] > 0 && (out[q] = true)
     return nothing
@@ -134,7 +134,7 @@ end
         lo <= hi || continue
         ctx = box_prepare(op, s, e)
         for gx in max(Int32(1), b - R):min(nx, b + R), gy in lo:hi
-            box_pixel!(op, out, ctx, off + gy + (gx - 1) * ny, gy, gx, Val(false))
+            box_pixel!(op, out, ctx, off + gy + (gx - 1) * ny, gy, gx)
         end
     end
 end
@@ -155,11 +155,137 @@ const BOX_GROUP = 64
         while m <= S * S
             gy = a - R + Int32((m - 1) % S); gx = b - R + Int32((m - 1) ÷ S)
             if (1 <= gy <= ny) & (1 <= gx <= nx)
-                box_pixel!(op, out, ctx, off + gy + (gx - 1) * ny, gy, gx, Val(true))
+                box_pixel!(op, out, ctx, off + gy + (gx - 1) * ny, gy, gx)
             end
             m += BOX_GROUP
         end
     end
+end
+
+const TILE = 16
+const TILE_G = TILE * TILE
+
+# The images' tiles: `nty[e]` tiles per column and `toff[e]` (0-based) the first in the flat list.
+function tile_layout(sc::JointScene)
+    nty = Int32[cld(d[1], TILE) for d in sc.dims]; ntx = Int32[cld(d[2], TILE) for d in sc.dims]
+    return nty, Int32.(cumsum([0; nty .* ntx]))
+end
+
+# The image of tile g: the last e with toff[e] < g (binary search; toff is sorted).
+@inline function tile_image(g, toff, E)
+    lo = Int32(1); hi = Int32(E)
+    while lo < hi
+        m = (lo + hi + Int32(1)) ÷ Int32(2)
+        toff[m] < g ? (lo = m) : (hi = m - Int32(1))
+    end
+    return lo
+end
+
+# Image and 0-based first row and column of tile g, in Int32: Metal's group index is UInt32, so
+# mixed arithmetic would promote a negative value to a huge unsigned one (an InexactError).
+@inline function tile_origin(g, toff, nty, E)
+    e = tile_image(g, toff, E); t = (g - 1 - toff[e]) % Int32
+    return e, (t % nty[e]) * Int32(TILE), (t ÷ nty[e]) * Int32(TILE)
+end
+
+# 0-based (row, column) of item li in its tile: each 32-item warp covers an 8 x 4 block, which a
+# typical box crosses with fewer partly idle warps than a 16 x 2 column pair (~10% faster).
+@inline function tile_pixel(li)
+    w = (li - 1) ÷ 32; l = (li - 1) % 32
+    return (w % 2) * 8 + l % 8, (w ÷ 2) * 4 + l ÷ 8
+end
+
+# Count (`fill = false`) or place (`true`) every (source, image) box into the tiles it overlaps.
+@kernel function tile_bin_kernel!(tcnt, tlist, tfill, @Const(tptr), @Const(ay), @Const(ax), @Const(mR), d, @Const(nty), @Const(toff), fill::Bool)
+    t = @index(Global)
+    N = size(ay, 1); s = (t - 1) % N + 1; e = (t - 1) ÷ N + 1
+    R = mR[s, e]
+    if R > 0
+        ny = d.dims[1, e]; nx = d.dims[2, e]; a = ay[s, e]; b = ax[s, e]
+        T0 = Int32(TILE)
+        r0 = max(Int32(1), a - R); r1 = min(ny, a + R); c0 = max(Int32(1), b - R); c1 = min(nx, b + R)
+        for tx in ((c0 - Int32(1)) ÷ T0):((c1 - Int32(1)) ÷ T0), ty in ((r0 - Int32(1)) ÷ T0):((r1 - Int32(1)) ÷ T0)
+            tile = toff[e] + tx * nty[e] + ty + Int32(1)
+            if fill
+                k = Atomix.@atomic tfill[tile] += Int32(1)    # the post-increment value
+                tlist[tptr[tile] + k - Int32(1)] = s % Int32
+            else
+                Atomix.@atomic tcnt[tile + 1] += Int32(1)
+            end
+        end
+    end
+end
+
+# Per tile, the sources whose boxes overlap it (ascending: the atomic slots are then sorted), the
+# batches of TILE_G sources the render needs for the fullest tile, and the non-empty tiles (`tid`),
+# the only ones the render launches: empty tiles add nothing, and launching them cost a sparse or
+# one-source render most of its time.
+function tile_bins(sc::JointScene, fp::Footprint)
+    be = sc.backend; N, E = size(fp.ay)
+    nty, toff = tile_layout(sc); NT = Int(toff[end])
+    ntyd = to_device(be, nty); toffd = to_device(be, toff)
+    tptr = KA.zeros(be, Int32, NT + 1)
+    launch!(tile_bin_kernel!, be, N * E, tptr, tptr, tptr, tptr, fp.ay, fp.ax, fp.mR, sc.dev, ntyd, toffd, false)
+    fill!(view(tptr, 1:1), one(Int32)); scan!(tptr)
+    ph = Array(tptr); nl = Int(ph[end]) - 1
+    cnt = diff(ph); nb = nl == 0 ? 0 : cld(maximum(cnt), TILE_G)
+    tid = to_device(be, Int32.(findall(>(0), cnt)))
+    tlist = KA.allocate(be, Int32, max(nl, 1)); tfill = KA.zeros(be, Int32, NT)
+    launch!(tile_bin_kernel!, be, N * E, tptr, tlist, tfill, tptr, fp.ay, fp.ax, fp.mR, sc.dev, ntyd, toffd, true)
+    launch!(segment_sort_kernel!, be, NT, tlist, tptr)
+    return (; tptr, tlist, tid, nty = ntyd, toff = toffd, nb, tfill)
+end
+
+# Group k renders the non-empty tile tid[k].  Per batch, item j sets up the batch's source j (`box_prepare`,
+# into local memory); then every item adds, for its pixel, the batch's sources whose boxes cover
+# it, in list order.  The CPU backend keeps no variables across @synchronize, so each segment
+# recomputes its indices and the loop runs `nb` (the fullest tile's) batches in every group.
+@kernel function render_tiles_kernel!(out, op, @Const(tid), @Const(tptr), @Const(tlist), @Const(ay), @Const(ax), @Const(mR), @Const(nty), @Const(toff), E, nb)
+    sY = @localmem eltype(out) (TILE_G,); sX = @localmem eltype(out) (TILE_G,); sF = @localmem eltype(out) (TILE_G,)
+    sC = @localmem eltype(out) (CTX_N, TILE_G)
+    sA = @localmem Int32 (TILE_G,); sB = @localmem Int32 (TILE_G,); sR = @localmem Int32 (TILE_G,)
+    acc = @private eltype(out) (1,)
+    acc[1] = zero(eltype(out))
+    for b in 1:nb
+        li = @index(Local, Linear); g = tid[@index(Group, Linear)]
+        l = tptr[g] + (b - 1) * TILE_G + li - 1
+        if l < tptr[g + 1]
+            e = tile_image(g, toff, E); s = tlist[l]
+            y, x, f, c = box_prepare(op, s, e)
+            sY[li] = y; sX[li] = x; sF[li] = f
+            ctx_store!(sC, li, op.d.psf, c)
+            sA[li] = ay[s, e]; sB[li] = ax[s, e]; sR[li] = mR[s, e]
+        end
+        @synchronize
+        li = @index(Local, Linear); g = tid[@index(Group, Linear)]
+        e, ty0, tx0 = tile_origin(g, toff, nty, E)
+        py, px = tile_pixel(li)
+        gy = ty0 + py + Int32(1); gx = tx0 + px + Int32(1)
+        for j in 1:min(TILE_G, tptr[g + 1] - tptr[g] - (b - 1) * TILE_G)
+            R = sR[j]
+            if (abs(gy - sA[j]) <= R) & (abs(gx - sB[j]) <= R)
+                acc[1] += sF[j] * psf_value(op.d.psf, ctx_load(op.d.psf, sC, j), gy, gx, sY[j], sX[j])
+            end
+        end
+        @synchronize
+    end
+    li = @index(Local, Linear); g = tid[@index(Group, Linear)]
+    e, ty0, tx0 = tile_origin(g, toff, nty, E)
+    py, px = tile_pixel(li)
+    gy = ty0 + py + Int32(1); gx = tx0 + px + Int32(1)
+    d = op.d; ny = d.dims[1, e]
+    ((gy <= ny) & (gx <= d.dims[2, e])) && (out[d.dims[3, e] + gy + (gx - 1) * ny] += acc[1])
+end
+
+"Add the model of footprint `fp`'s sources into `out` by tile gather (any backend; the GPU render)."
+function render_tiles!(out, op::RenderOp, sc::JointScene, fp::Footprint)
+    be = sc.backend; N, E = size(fp.ay)
+    N == 0 && return out
+    t = tile_bins(sc, fp)
+    t.nb > 0 && render_tiles_kernel!(be, TILE_G)(out, op, t.tid, t.tptr, t.tlist, fp.ay, fp.ax, fp.mR, t.nty, t.toff, E, t.nb; ndrange = TILE_G * length(t.tid))
+    KA.synchronize(be)
+    foreach(KA.unsafe_free!, (t.tptr, t.tlist, t.tid, t.nty, t.toff, t.tfill))
+    return out
 end
 
 "Apply `op` to every (source, image) box of footprint `fp`, accumulating into the flat `out`."
@@ -169,6 +295,8 @@ function box_apply!(op, out, sc::JointScene, fp::Footprint)
     if is_cpu(be)
         nchunk = max(1, cld(8 * Threads.nthreads(), E))
         launch!(box_rows_kernel!, be, nchunk * E, op, out, fp.ay, fp.ax, fp.mR, sc.dev, nchunk)
+    elseif op isa RenderOp
+        render_tiles!(out, op, sc, fp)
     else
         box_groups_kernel!(be, BOX_GROUP)(op, out, fp.ay, fp.ax, fp.mR, sc.dev, N; ndrange = BOX_GROUP * N * E)
     end
@@ -227,8 +355,11 @@ const COST_GROUP = 256
     li == 1 && (part[g] = sh[1] + sh[2])
 end
 
-"Per-workgroup partial sums for `cost!`: several groups per CPU thread, 256 groups on a GPU."
-cost_parts(be, ::Type{T}) where {T} = KA.zeros(be, T, is_cpu(be) ? 8 * Threads.nthreads() : 256)
+"""
+Per-workgroup partial sums for `cost!`: 256 on every backend, so the summation order, and with it
+the fit, does not depend on the thread count.
+"""
+cost_parts(be, ::Type{T}) where {T} = KA.zeros(be, T, 256)
 
 "Launch the cost kernel: `buf` and the partials `part` are written, nothing is read back."
 function cost_partials!(buf, sc::JointScene, model, mask, part, bkg = nothing)
