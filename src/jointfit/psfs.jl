@@ -94,6 +94,12 @@ end
     return t * (t * (t * c3 + c2) + c1) + b, t * (3 * t * c3 + 2 * c2) + c1
 end
 
+# Catmull-Rom weights of the four stencil samples at fraction t (the `cubic_conv` interpolant).
+@inline function cr_weights(t)
+    t2 = t * t; t3 = t2 * t
+    return ((-t3 + 2t2 - t) / 2, (3t3 - 5t2 + 2) / 2, (-3t3 + 4t2 + t) / 2, (t3 - t2) / 2)
+end
+
 # One node's (value, d/dv, d/du) at detector pixel (i, j) for a source at (Y, X): the
 # bicubic of `PSF.bicubic_interpolate` (same clamps, Int32 stencil, out-of-bounds fill).
 @inline function node_value_grad(nodes, par, k, i, j, Y::T, X::T) where {T}
