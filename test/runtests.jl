@@ -32,4 +32,5 @@ import CrowdPhot
 @safetestset "Joint multi-image fitting" include("jointfit/joint_fit_tests.jl")
 @safetestset "Coaddition" include("jointfit/coadd_tests.jl")
 @safetestset "Joint tiling" include("jointfit/tiling_tests.jl")
+@safetestset "Joint PSF refinement" include("jointfit/psfrefine_tests.jl")
 @safetestset "Doctests" include("doctests.jl")

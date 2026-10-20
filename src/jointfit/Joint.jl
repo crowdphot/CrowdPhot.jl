@@ -12,10 +12,11 @@ import Adapt
 import Atomix
 using KernelAbstractions
 const KA = KernelAbstractions
-using SpecialFunctions: erf
+using SpecialFunctions: erf, erfc, gamma_inc_inv
 using StaticArrays: SMatrix, SVector, MVector
 using StructArrays: StructArray
-using LinearAlgebra: opnorm
+using LinearAlgebra: opnorm, dot, svd, Diagonal
+import Random
 using Statistics: median
 
 import ..CrowdPhot
@@ -24,7 +25,7 @@ using ..PSF: CircularGaussianPRF, ImagePSF, GriddedPSFModel
 using ..Background: MeanBackground, MedianBackground, SExtractorBackground, MMMBackground, StdRMS, MADStdRMS
 
 export TanGrid, world_to_grid, grid_to_world, oversample, fits_wcs, PolyMap, JointImage, JointScene
-export JointDetector, JointFitOptions, JointLoopOptions, fit_joint_multipass, fit_joint_tiled, plan_tiles, coadd
+export JointDetector, JointFitOptions, JointLoopOptions, PSFRefineOptions, fit_joint_multipass, fit_joint_tiled, plan_tiles, coadd
 
 include("frame.jl")
 include("polymap.jl")
@@ -37,6 +38,7 @@ include("solve.jl")
 include("detect.jl")
 include("background.jl")
 include("finalize.jl")
+include("psfrefine.jl")
 include("loop.jl")
 include("coadd.jl")
 include("tiling.jl")

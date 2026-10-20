@@ -40,6 +40,8 @@
   e.g. `sigma`, `filter_size`); any other key throws.  Pixels with zero fit weight are masked
 - `device_background = true`: estimate the background on the backend ([`background2d!`]);
   boxes over $MAX_BOX_PIXELS pixels and the biweight estimators use the host `Background2D`
+- `psf_refine = nothing`: a [`PSFRefineOptions`](@ref) refines the PSFs after the fit and prune
+  of its passes (off by default)
 """
 Base.@kwdef struct JointLoopOptions
     detector::JointDetector = JointDetector()
@@ -57,6 +59,7 @@ Base.@kwdef struct JointLoopOptions
     error_neighbors::Int = 8
     background::NamedTuple = (;)
     device_background::Bool = true
+    psf_refine::Union{Nothing, PSFRefineOptions} = nothing
 end
 
 # The resolved background keywords, with the single-image loop's defaults.
@@ -236,9 +239,15 @@ Returns `catalog`, a `StructArray` (a Tables.jl table) with columns `u, v` (posi
 `frame`), `ra, dec`, `u_err, v_err`, then per band `b` (in `bands` order) `flux_b`, `flux_err_b`,
 the joint final `significance` and per band `significance_b`, `nimg` (images with data) and
 `pass_number` (the pass that first detected the source); the `bands` order; the per-pass
-`history`, whose `mem_est` is a rough peak memory in bytes (a warning is logged once on the CPU
+`history` (with PSF refinement, `refine` holds per PSF group the step's star counts, IRLS
+iterations, median χ²/dof of fitting and reserved stars, and their mean residual / flux by ring
+and S/N bin), whose `mem_est` is a rough peak memory in bytes (a warning is logged once on the CPU
 or an Apple GPU if it exceeds half of `Sys.total_memory()`); whether the stopping rule fired
-(`converged`); and `products`.
+(`converged`); `products`; with PSF refinement, the refined `psfs` and `psf_stars`, a
+`StructArray` with one row per (star, PSF group) of the last refinement's step: `row` (the
+star's `catalog` row), `group`, `band`, `reserve`, `rejected` (by the star-level test), `fit`
+(constrained the PSF to the end of the step), `snr`, and the star's `chi2` over its usable pixels
+at the solution with `dof` (pixels - 3).
 
 `products` lists the arrays to return, on the host in `T`, at the final catalog (the background
 and RMS are the terminal pass's, the ones the final fit used); `products.grid` is always the
@@ -281,16 +290,21 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         bkg = KA.zeros(sc.backend, T, length(sc.data))
         st = (; sc, images, rt, jd, tmpl, work = LinearizeWork(sc; bkg), bset,
                 bkg, rms = similar(sc.data), tmp = similar(sc.data), bmask = map!(w -> !(isfinite(w) && w > 0), KA.allocate(sc.backend, Bool, length(sc.weight)), sc.weight),
-                det_data, det_iv)
+                det_data, det_iv, psfs, offs, ivs)
+        groups = o.psf_refine === nothing ? nothing : _refine_setup(sc, psfs, o.psf_refine)
     end
     P = nparams(sc)
     θh = zeros(P, 0); born = Int[]; disc = NTuple{2, Float64}[]
+    # reserved PSF stars, drawn per source at detection in detection order; the last refinement's star rows
+    rrng = groups === nothing ? nothing : Random.MersenneTwister(o.psf_refine.reserve_seed)
+    resv = Bool[]; psf_stars = nothing
     λ = f.λ_init; history = NamedTuple[]; converged = false; pass_run = 0; mem_warned = false
     for pass in 1:o.max_iter
         pass_run = pass
         t_bkg = @elapsed _backgrounds!(st, to_device(backend, T, θh), pass, o)
         t_det = @elapsed dn = _detect_new(st, θh, disc, o)
         θh = hcat(θh, vcat(dn.u', dn.v', dn.flux)); append!(born, fill(pass, length(dn.u)))
+        append!(resv, rrng === nothing ? falses(length(dn.u)) : rand(rrng, length(dn.u)) .< o.psf_refine.reserve_frac)
         n_new = length(dn.u)
         isempty(born) && (push!(history, (; pass, dn.n_peaks, n_new = 0, n_catalog = 0)); continue)
         t_fit = @elapsed r = fit_pass(sc, to_device(backend, T, θh), rt, f, λ; n_new, work = st.work)
@@ -300,19 +314,35 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
             @warn "Estimated peak memory $(round(mem_est / 1e9, digits = 1)) GB at pass $pass ($(size(r.θ, 2)) sources) exceeds half of the system memory ($(round(Sys.total_memory() / 1e9, digits = 1)) GB); fit a smaller area per run."
         end
         θh = Float64.(Array(r.θ)); λ = r.λ
-        js = _flux_significance(θh, Array(r.lin.hdiag))
+        hd = Array(r.lin.hdiag)
+        js = _flux_significance(θh, hd)
         js[Array(r.lin.nimg) .== 0] .= NaN
         keep, n_snr, n_close = _prune_keep(θh, js, o.prune_snr_min, o.prune_separation)
         # pass 1 fits against a background that still holds every star's light, so its prunes include
         # real faint stars; logging them would block their re-detection for the rest of the run (on
         # a crowded Roman tile, leaving them out kept 123 more true sources for 10 more spurious ones)
         pass > 1 && for s in findall(!, keep); push!(disc, (θh[1, s], θh[2, s])); end
-        θh = θh[:, keep]; born = born[keep]
+        θh = θh[:, keep]; born = born[keep]; resv = resv[keep]
+        psf_stars = _remap_psf_stars(psf_stars, keep)
         n_surv = count(==(pass), born)
+        # PSF refinement after the prune (refining before it hurt on undithered data); the stars' updates are kept
+        t_refine = 0.0; refine = nothing
+        if groups !== nothing && pass in o.psf_refine.passes && size(θh, 2) > 0
+            t_refine = @elapsed (st, θh, refine, psf_stars) = _refine!(st, groups, θh, hd[:, keep], o; reserve = resv)
+            rt = st.rt
+        end
         h = (; pass, dn.n_peaks, dn.n_gated, n_dup_cat = dn.nd_cat, n_dup_disc = dn.nd_disc, n_new, n_pruned_snr = n_snr,
-               n_pruned_close = n_close, n_catalog = length(born), n_new_surviving = n_surv, λ, r.stats..., mem_est, t_bkg, t_det, t_fit)
+               n_pruned_close = n_close, n_catalog = length(born), n_new_surviving = n_surv, λ, r.stats..., mem_est, t_bkg, t_det, t_fit,
+               t_refine, refine)
         push!(history, h)
-        show_trace && println(h)
+        if show_trace
+            println(Base.structdiff(h, (; refine = 0)))
+            refine === nothing || for r in refine
+                println("  refine $(r.band): $(r.nsel) stars ($(r.n_reserve) reserved, $(r.n_rejected) rejected), iterations $(r.iters), ",
+                        "chi2/dof fit $(round(r.chi2_fit, sigdigits = 3)) reserve $(round(r.chi2_reserve, sigdigits = 3)), ",
+                        "build $(round(r.t_build, digits = 3)) s, solve $(round(r.t_solve, digits = 3)) s")
+            end
+        end
         # growth after passes 1 and 2 is always large, so the rule starts at pass 3
         if pass >= 3 && o.min_growth > 0 && n_surv <= o.min_growth * length(born)
             converged = true
@@ -320,14 +350,16 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         end
     end
     t_final = @elapsed begin
-        cat, prods = _terminal_and_finalize(st, θh, born, λ, pass_run + 1, o, products, coadd_options)
+        cat, prods, ok = _terminal_and_finalize(st, θh, born, λ, pass_run + 1, o, products, coadd_options)
+        psf_stars = _remap_psf_stars(psf_stars, ok)
     end
     # every result is on the host: return the device memory now, since a GPU array's is otherwise held
     # until the GC finalizes it, which host memory pressure barely drives (a no-op on the CPU)
     bk = st.jd.banks
     foreach(KA.unsafe_free!, (sc.data, sc.weight, st.bkg, st.rms, st.tmp, st.bmask, st.det_data, st.det_iv, st.work.model, st.work.resid,
                               st.work.mask, bk.P, bk.c, bk.cχ, bk.rng))
-    return (; catalog = cat, bands = sc.bands, history, converged, products = prods, t_setup, t_final)
+    psf_stars = psf_stars === nothing ? nothing : StructArray(merge((; row = psf_stars.col), Base.structdiff(psf_stars, (; col = 0))))
+    return (; catalog = cat, bands = sc.bands, history, converged, products = prods, psfs = st.psfs, psf_stars, t_setup, t_final)
 end
 
 "Checks of `fit_joint_multipass`'s arguments that need no data; `products` with `:coadd` expanded."
@@ -392,10 +424,11 @@ function _products(st, θh, products, coadd_options)
     return NamedTuple{(names..., :grid)}((map(p -> vals[p], names)..., st.jd.grid))
 end
 
-"The terminal pass (background, refit, no detection or pruning), finalize and the requested products."
+"The terminal pass (background, refit, no detection or pruning), finalize and the requested products; and the sources kept."
 function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, products, coadd_options)
     sc = st.sc; be = sc.backend; T = eltype(sc); f = o.fit
     _backgrounds!(st, to_device(be, T, θh), pass, o)
+    ok = trues(size(θh, 2))
     if size(θh, 2) > 0
         r = fit_pass(sc, to_device(be, T, θh), st.rt, f, λ; work = st.work)
         θh = Float64.(Array(r.θ))
@@ -417,5 +450,5 @@ function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, pr
     cols = merge((; u = θh[1, :], v = θh[2, :], ra = first.(radec), dec = last.(radec), u_err = σ[1, :], v_err = σ[2, :]),
                  perband(:flux, permutedims(θh[3:end, :])), perband(:flux_err, permutedims(σ[3:end, :])), (; significance = joint),
                  perband(:significance, sb), (; nimg, pass_number = born))
-    return StructArray(cols), _products(st, θh, products, coadd_options)
+    return StructArray(cols), _products(st, θh, products, coadd_options), ok
 end
