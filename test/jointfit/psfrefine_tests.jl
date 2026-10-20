@@ -117,6 +117,12 @@ end
         x = reshape(sol3.x[(n - 1) * g.nw^2 + 1:n * g.nw^2], g.nw, g.nw)
         @test sum(abs2, D(ref, n) .+ x .- D(truth, n)) < 0.3 * sum(abs2, D(ref, n) .- D(truth, n))
     end
+    # the CG stops on the device at cg_tol: the sweeps after the stop change nothing
+    @test sol3.iters == [10, 10]
+    ol = PSFRefineOptions(window = 3, cg_tol = 0.5); ol30 = PSFRefineOptions(window = 3, cg_tol = 0.5, cg_iterations = 30)
+    sl = J._refine_solve(s3.p, s3.g, ol, s3.sc.backend, Float64); sl30 = J._refine_solve(s3.p, s3.g, ol30, s3.sc.backend, Float64)
+    @test all(in(1:9), sl.iters) && sl30.iters == sl.iters
+    @test sl30.x == sl.x && sl30.d == sl.d
 end
 
 @testset "reserved stars and the star-level test" begin
