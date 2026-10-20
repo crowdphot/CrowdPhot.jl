@@ -154,7 +154,17 @@ end
             end
             @test J.image_view(s.sc, model, e) ≈ ref rtol = 1e-8
         end
+        # the GPU's tile gather adds each pixel's sources in the CPU kernel's order: bitwise equal
+        tiles = J.render_tiles!(zeros(length(s.sc.data)), J.RenderOp(s.θ, s.sc.dev), s.sc, fp)
+        @test tiles == model
     end
+    # a crowded field: tiles with more sources than one batch (TILE_G)
+    s = two_image_scene(; gridded = true, model_rad = 8)
+    rng = StableRNG(11); θ = vcat(rand(rng, 2, 3000) .* 30 .+ 45, exp.(randn(rng, 2, 3000) .+ 4))
+    fp = J.footprint(s.sc, θ, s.rt)
+    @test J.tile_bins(s.sc, fp).nb > 1
+    model = zeros(length(s.sc.data)); J.render!(model, s.sc, θ, fp)
+    @test J.render_tiles!(zeros(length(s.sc.data)), J.RenderOp(θ, s.sc.dev), s.sc, fp) == model
 end
 
 # Dense equilibration-undone H from a Linearization (host arrays).

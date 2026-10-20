@@ -143,6 +143,24 @@ end
     return s, dY, dX
 end
 
+# A source's context in column j of `buf` (CTX_N rows of the scene's element type: a GPU render's
+# local memory) and back, for `psf_value` (the derivative weights are not kept).
+const CTX_N = 8
+@inline ctx_store!(buf, j, ::DevGaussPRF, α) = (buf[1, j] = α; nothing)
+@inline ctx_load(::DevGaussPRF, buf, j) = buf[1, j]
+@inline function ctx_store!(buf, j, ::DevGridded, c)
+    ks, ws, _, _ = c
+    for q in 1:4
+        buf[q, j] = ks[q]; buf[q + 4, j] = ws[q]          # node indices are exact in Float32 below 2^24
+    end
+    return nothing
+end
+@inline function ctx_load(::DevGridded, buf, j)
+    z = zero(eltype(buf))
+    ks = (unsafe_trunc(Int32, buf[1, j]), unsafe_trunc(Int32, buf[2, j]), unsafe_trunc(Int32, buf[3, j]), unsafe_trunc(Int32, buf[4, j]))
+    return ks, (buf[5, j], buf[6, j], buf[7, j], buf[8, j]), (z, z, z, z), (z, z, z, z)
+end
+
 _as_gridded(p::ImagePSF) = GriddedPSFModel([p], [zero(eltype(p))], [zero(eltype(p))])
 _as_gridded(p::GriddedPSFModel{<:Any, <:ImagePSF}) = p
 
