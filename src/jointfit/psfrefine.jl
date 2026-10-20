@@ -565,6 +565,93 @@ const RF_GROUP = 256
     li == 1 && (part[g] = sh[1] + sh[2])
 end
 
+# The CG's scalars stay on the device: a host read per dot product left the GPU idle ~0.3 ms each
+# (~40% of a Metal solve).  Slots of `sv`: rᵀz and its successor alternate in 1 and 2; then pᵀq,
+# rᵀr, r0, the "still iterating" flag and the count of iterations taken.
+const RF_PQ = 3; const RF_RR = 4; const RF_R0 = 5; const RF_ACT = 6; const RF_CNT = 7
+
+# sv[k] = the sum of the n partials in one workgroup; `mode` then updates the CG state from it:
+# 1 (k = rᵀr) the convergence test for the next iteration (once stopped, it stays stopped), 2 (k =
+# rᵀr at the start) r0 and the first test, 3 (k = pᵀq) counts the iteration if still iterating.
+@kernel function rf_ssum_kernel!(sv, k, @Const(part), n, mode, tol)
+    li = @index(Local)
+    # (no local T: the CPU backend drops variables across @synchronize)
+    sh = @localmem eltype(sv) (RF_GROUP,)
+    acc = zero(eltype(sv)); t = li
+    while t <= n
+        acc += part[t]; t += RF_GROUP
+    end
+    sh[li] = acc
+    @synchronize
+    li <= 128 && (sh[li] += sh[li + 128])
+    @synchronize
+    li <= 64 && (sh[li] += sh[li + 64])
+    @synchronize
+    li <= 32 && (sh[li] += sh[li + 32])
+    @synchronize
+    li <= 16 && (sh[li] += sh[li + 16])
+    @synchronize
+    li <= 8 && (sh[li] += sh[li + 8])
+    @synchronize
+    li <= 4 && (sh[li] += sh[li + 4])
+    @synchronize
+    li <= 2 && (sh[li] += sh[li + 2])
+    @synchronize
+    if li == 1
+        v = sh[1] + sh[2]
+        sv[k] = v
+        if mode == 1
+            sv[RF_ACT] = ifelse((sv[RF_ACT] > zero(eltype(sv))) & (sqrt(v) > tol * sv[RF_R0]), one(eltype(sv)), zero(eltype(sv)))
+        elseif mode == 2
+            sv[RF_R0] = sqrt(v)
+            sv[RF_ACT] = ifelse(sqrt(v) > tol * sqrt(v), one(eltype(sv)), zero(eltype(sv)))
+        elseif mode == 3
+            sv[RF_CNT] += sv[RF_ACT]
+        end
+    end
+end
+
+# z += α p, r -= α q (α = sv[a] / pᵀq while iterating, else 0) and the per-workgroup partials of
+# the new rᵀr, with rf_dot_kernel!'s geometry.
+@kernel function rf_cg_xr_kernel!(z, r, part, @Const(pk), @Const(q), @Const(sv), a, n, step, cpu::Bool)
+    li = @index(Local); g = @index(Group); t = @index(Global)
+    T = eltype(part)
+    sh = @localmem eltype(part) (RF_GROUP,)
+    α = ifelse(sv[RF_ACT] > zero(T), sv[a] / sv[RF_PQ], zero(T))
+    acc = zero(T)
+    i = cpu ? (t - 1) * step + 1 : t
+    i1 = cpu ? min(t * step, n) : n
+    while i <= i1
+        z[i] += α * pk[i]
+        v = r[i] - α * q[i]
+        r[i] = v; acc += v * v
+        i += cpu ? 1 : step
+    end
+    sh[li] = acc
+    @synchronize
+    li <= 128 && (sh[li] += sh[li + 128])
+    @synchronize
+    li <= 64 && (sh[li] += sh[li + 64])
+    @synchronize
+    li <= 32 && (sh[li] += sh[li + 32])
+    @synchronize
+    li <= 16 && (sh[li] += sh[li + 16])
+    @synchronize
+    li <= 8 && (sh[li] += sh[li + 8])
+    @synchronize
+    li <= 4 && (sh[li] += sh[li + 4])
+    @synchronize
+    li <= 2 && (sh[li] += sh[li + 2])
+    @synchronize
+    li == 1 && (part[g] = sh[1] + sh[2])
+end
+
+# p = z + (sv[b] / sv[a]) p while iterating (once stopped p no longer matters: α = 0).
+@kernel function rf_cg_p_kernel!(pk, @Const(zz), @Const(sv), a, b)
+    i = @index(Global)
+    sv[RF_ACT] > zero(eltype(pk)) && (pk[i] = zz[i] + (sv[b] / sv[a]) * pk[i])
+end
+
 const RF_NMAX = 16            # node count up to which the preconditioner blocks are inverted on the device
 
 # Per window sample: Bi = inv(diag(dJ) + prior block), Gauss-Jordan without pivoting (the block is
@@ -846,11 +933,17 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
     lc!(out, x, y, a, b) = launch!(rf_lincomb_kernel!, be, length(out), out, x, y, T(a), T(b))
     mul!_(out, x, y) = launch!(rf_mul_kernel!, be, length(out), out, x, y)
     part = KA.zeros(be, T, 256)                   # fixed: the sums do not depend on the thread count
+    G = length(part)
+    dstep(n) = is_cpu(be) ? cld(n, G * RF_GROUP) : G * RF_GROUP
     function dot_(x, y; cnt = false)
-        n = length(x); G = length(part)
-        step = is_cpu(be) ? cld(n, G * RF_GROUP) : G * RF_GROUP
-        rf_dot_kernel!(be, RF_GROUP)(part, x, y, n, step, is_cpu(be), cnt; ndrange = G * RF_GROUP)
+        rf_dot_kernel!(be, RF_GROUP)(part, x, y, length(x), dstep(length(x)), is_cpu(be), cnt; ndrange = G * RF_GROUP)
         return sum(Float64, Array(part))
+    end
+    sv = KA.zeros(be, T, 8)                       # the CG's device scalars (RF_PQ ...)
+    ssum!(k, mode) = rf_ssum_kernel!(be, RF_GROUP)(sv, k, part, G, mode, T(o.cg_tol); ndrange = RF_GROUP)
+    function ddot!(k, x, y, mode)
+        rf_dot_kernel!(be, RF_GROUP)(part, x, y, length(x), dstep(length(x)), is_cpu(be), false; ndrange = G * RF_GROUP)
+        ssum!(k, mode)
     end
     # t = r + J x_cur: the residual of the model at the reference plus the correction
     z = KA.zeros(be, T, nz); copyto!(z, 1, T.(g.xcur), 1, np); proj!(z)
@@ -878,7 +971,7 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
     starchi!() = launch!(rf_star_chi_kernel!, be, ns, chi, cnt, prof, pcnt, e, p.W, p.m, ρ, p.d.srow, p.d.sptr, p.d.slist, p.d.soff,
                          p.d.ebatch, p.d.bP, p.fstar, T(o.mu))
     rejected = falses(ns)
-    iters = Int[]
+    cnts = KA.zeros(be, T, o.irls + 1)            # CG iterations per round, read with the diagnostics
     for round in 0:o.irls
         mul!_(Wρ, p.W, ρ)
         # preconditioner: star blocks and, per sample, inv(diag(Jᵀ W J) + prior block)
@@ -898,16 +991,21 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
         _rf_Jt!(vx(b), vy(b), tmp, p, g, buf, be)
         lc!(r, b, Aop!(q, z), 1, -1); proj!(r)
         Mi!(zz, r); copyto!(pk, zz)
-        rz = dot_(r, zz); r0 = sqrt(dot_(r, r)); k = 0
-        while k < o.cg_iterations && sqrt(dot_(r, r)) > o.cg_tol * r0
-            k += 1
+        # cg_iterations sweeps with the scalars on the device, no host read: once ‖r‖ <= cg_tol r0 a
+        # flag stops the updates (α = 0), as a host loop's early exit would
+        fill!(sv, zero(T))
+        a, bz = 1, 2
+        ddot!(a, r, zz, 0); ddot!(RF_RR, r, r, 2)
+        for _ in 1:o.cg_iterations
             Aop!(q, pk); proj!(q)
-            α = rz / dot_(pk, q)
-            lc!(z, z, pk, 1, α); lc!(r, r, q, 1, -α)
-            Mi!(zz, r); rzn = dot_(r, zz)
-            lc!(pk, zz, pk, 1, rzn / rz); rz = rzn
+            ddot!(RF_PQ, pk, q, 3)
+            rf_cg_xr_kernel!(be, RF_GROUP)(z, r, part, pk, q, sv, a, nz, dstep(nz), is_cpu(be); ndrange = G * RF_GROUP)
+            ssum!(RF_RR, 1)
+            Mi!(zz, r); ddot!(bz, r, zz, 0)
+            launch!(rf_cg_p_kernel!, be, nz, pk, zz, sv, a, bz)
+            a, bz = bz, a
         end
-        push!(iters, k)
+        copyto!(cnts, round + 1, sv, RF_CNT, 1)
         round == o.irls && break
         lc!(e, t, _rf_J!(tmp, vx(z), vy(z), p, g, buf, be), 1, -1)
         rob!(ρ, e)
@@ -926,10 +1024,10 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
     # per-star diagnostics at the solution
     lc!(e, t, _rf_J!(tmp, vx(z), vy(z), p, g, buf, be), 1, -1)
     rob!(ρ, e); starchi!()
-    zh = Array(z)
+    zh = Array(z); iters = Int.(Array(cnts))
     out = (; x = Float64.(zh[1:np]), d = Float64.(reshape(zh[(np + 1):nz], 3, ns)), H = Float64.(Array(H)), iters, wfrac,
              chi2 = Float64.(Array(chi)), npix = Int.(Array(cnt)), rejected, prof = Float64.(Array(prof)), pcnt = Int.(Array(pcnt)))
-    foreach(KA.unsafe_free!, (buf..., Pk, tmp, Wρ, ρ, e, H, Hi, Bi, r, q, zz, pk, b, z, t, part, dJb, chi, cnt, prof, pcnt))
+    foreach(KA.unsafe_free!, (buf..., Pk, tmp, Wρ, ρ, e, H, Hi, Bi, r, q, zz, pk, b, z, t, part, sv, cnts, dJb, chi, cnt, prof, pcnt))
     return out
 end
 
