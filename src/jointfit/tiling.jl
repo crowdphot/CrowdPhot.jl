@@ -272,9 +272,10 @@ function _merge_catalogs(cats, bands, ntiles, sep)
     perband(q) = Tuple(Symbol(q, :_, b) for b in bands)
     names = (:u, :v, :ra, :dec, :u_err, :v_err, perband(:flux)..., perband(:flux_err)..., :significance, perband(:significance)..., :nimg,
              :pass_number, :tile)
-    cols = NamedTuple{(names..., :depth)}(Tuple(reduce(vcat, (getproperty(c, n) for c in cats);
-                                                       init = n === :tile || n === :nimg || n === :pass_number ? Int[] : Float64[])
-                                                for n in (names..., :depth)))
+    # one allocation per column (Base's reduce(vcat, ::Vector{<:Vector}); with `init` it concatenates
+    # pairwise); without tile rows, empty columns of the catalog's types
+    col(n) = isempty(cats) ? (n in (:tile, :nimg, :pass_number) ? Int[] : Float64[]) : reduce(vcat, [getproperty(c, n) for c in cats])
+    cols = NamedTuple{(names..., :depth)}(Tuple(col(n) for n in (names..., :depth)))
     keep = _dedup_keep(cols.u, cols.v, cols.tile, cols.depth, sep)
     n_dedup = [count(i -> !keep[i] && cols.tile[i] == k, eachindex(keep)) for k in 1:ntiles]
     return StructArray(NamedTuple{names}(Tuple(getproperty(cols, n)[keep] for n in names))), n_dedup

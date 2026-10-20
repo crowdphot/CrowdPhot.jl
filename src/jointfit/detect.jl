@@ -370,7 +370,9 @@ function _tile_lists(footprints, bands, grid::TanGrid, K, hpad, tile)
         end
     end
     foreach(l -> sort!(l; by = e -> bands[e]), lists)
-    return Int32.(cumsum([1; length.(lists)])), reduce(vcat, lists; init = Int32[]), ntr
+    # no `init`: with one, reduce concatenates pairwise (quadratic in the tile count: 85 ms for a
+    # Roman detector's 16k tiles) instead of preallocating; `lists` has ntr * ntc >= 1 entries
+    return Int32.(cumsum([1; length.(lists)])), reduce(vcat, lists), ntr
 end
 
 """
