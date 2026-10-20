@@ -77,6 +77,20 @@ lazy(imgs, reads; fail = 0) = [JointImage(RangeOnly(im.data, reads; fail), Range
     @test_throws "tile_size = 150 must exceed twice the overlap (80 frame px)" J._partition(1000, 1000, 150, 80)
 end
 
+@testset "merging tile catalogs" begin
+    rows(k, u, v, depth) = (n = length(u); (; u, v, ra = u, dec = v, u_err = fill(0.1, n), v_err = fill(0.1, n), flux_A = ones(n), flux_err_A = fill(0.1, n),
+                                           significance = fill(9.0, n), significance_A = fill(9.0, n), nimg = fill(2, n), pass_number = fill(1, n),
+                                           tile = fill(k, n), depth))
+    # the second tile's first source duplicates the first tile's second one (within sep), shallower in its own tile
+    cats = [rows(1, [10.0, 50.0], [10.0, 50.0], [5.0, 3.0]), rows(2, [50.1, 90.0], [50.0, 90.0], [1.0, 7.0])]
+    cat, n_dedup = J._merge_catalogs(cats, [:A], 2, 0.5)
+    @test length(cat) == 3 && n_dedup == [0, 1] && cat.tile == [1, 1, 2]
+    @test eltype(cat.u) == Float64 && eltype(cat.nimg) == Int && eltype(cat.tile) == Int
+    # no tile with rows: empty columns of the same types
+    cat0, n0 = J._merge_catalogs([], [:A], 2, 0.5)
+    @test isempty(cat0) && n0 == [0, 0] && eltype(cat0.u) == Float64 && eltype(cat0.pass_number) == Int
+end
+
 @testset "fit_joint_tiled" begin
     f = tiling_field(DITHERS)
     o3 = JointLoopOptions(max_iter = 3, min_growth = 0)
