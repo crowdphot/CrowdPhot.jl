@@ -203,6 +203,8 @@ function fit_joint_tiled(images::AbstractVector{<:JointImage}, frame::TanGrid; t
         products = (), coadd_options::NamedTuple = (;), on_error::Symbol = :continue)
     on_error in (:continue, :throw) || throw(ArgumentError("on_error must be :continue or :throw"))
     o = options
+    # each tile would refine its own copy of a detector's PSF, discontinuous at tile edges
+    o.psf_refine === nothing || throw(ArgumentError("psf_refine is not supported by fit_joint_tiled; refine with fit_joint_multipass"))
     t_total = @elapsed begin
         # arguments that would fail every tile throw before any runs
         products = _check_run_args(o, products, coadd_options)
