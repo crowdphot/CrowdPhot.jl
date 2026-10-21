@@ -35,7 +35,8 @@ refined PSFs (`psfs`).  Not supported by `fit_joint_tiled`.
 - `window = 6`: refined half-width (native px).  Each star contributes its pixels within
   min(window, model radius)
 - `snr_min = 20`, `max_stars = 100_000`: stars with band S/N >= `snr_min` constrain their band's
-  PSFs; beyond `max_stars` per group, a fixed random subset
+  PSFs; beyond `max_stars` per band (one list for all of the band's PSF groups), a fixed random
+  subset
 - `eps = 0.1`, `eps_node = 0.05`, `tau = 1e-3`: prior on the correction of each sample: a part
   common to the group's nodes with scale `eps mean|D0| + tau max D0` and one per node with
   scale `eps_node |D0| + tau max D0`
@@ -162,14 +163,14 @@ end
 # Kernels.  Each is one work item per output element; nothing is written twice.
 # ------------------------------------------------------------------------------------------
 
-# Per entry (star, image): pixel position, d(y, x)/d(u, v), node corners and weights, the stencil
+# Per entry (star, image): pixel position, d(y, x)/d(u, v), node corners (the batch key), the stencil
 # base L0 and the sub-pixel fractions, as the fitter's model places the star.
-@kernel function rf_entry_kernel!(pos, jac, ks, ws, L, ph, @Const(eimg), @Const(estar), @Const(eay), @Const(eax), @Const(θ), d)
+@kernel function rf_entry_kernel!(pos, jac, ks, L, ph, @Const(eimg), @Const(estar), @Const(eay), @Const(eax), @Const(θ), d)
     k = @index(Global)
     T = eltype(pos)
     e = eimg[k]; s = estar[k]
     _, y, x, ya, yb, xa, xb = source_pixel(d, e, θ[1, s], θ[2, s])
-    kk, ww, _, _ = psf_context(d.psf, e, y, x)
+    kk, _, _, _ = psf_context(d.psf, e, y, x)
     par = d.psf.par
     v0 = par[4, kk[1]] * (T(eay[k]) - y) + par[2, kk[1]]
     u0 = par[3, kk[1]] * (T(eax[k]) - x) + par[1, kk[1]]
@@ -177,7 +178,7 @@ end
     pos[1, k] = y; pos[2, k] = x
     jac[1, k] = ya; jac[2, k] = xa; jac[3, k] = yb; jac[4, k] = xb
     for m in 1:4
-        ks[m, k] = kk[m]; ws[m, k] = ww[m]
+        ks[m, k] = kk[m]
     end
     L[1, k] = unsafe_trunc(Int32, fy); L[2, k] = unsafe_trunc(Int32, fx)
     ph[1, k] = v0 - fy; ph[2, k] = u0 - fx
@@ -185,18 +186,20 @@ end
 
 # Per entry: its 64 coefficients A[(stencil cell, corner), k] and, per stamp pixel with a row, the
 # star-parameter derivatives S = (d/du, d/dv, d/dflux) of its model at the current nodes.
-@kernel function rf_stamp_kernel!(A, S, @Const(pos), @Const(jac), @Const(ks), @Const(ws), @Const(ph), @Const(eay), @Const(eax),
-                                  @Const(eimg), @Const(estar), @Const(ebatch), @Const(soff), @Const(bP), @Const(srow), @Const(θ), d)
+@kernel function rf_stamp_kernel!(A, S, @Const(pos), @Const(jac), @Const(ph), @Const(eay), @Const(eax), @Const(eimg), @Const(estar),
+                                  @Const(ebatch), @Const(soff), @Const(bP), @Const(srow), @Const(θ), d)
     k = @index(Global)
     T = eltype(A)
     e = eimg[k]; s = estar[k]
     fs = d.ip[IP_SCALE, e]; f = fs * θ[2 + d.band[e], s]
     cv = cr_weights(ph[1, k]); cu = cr_weights(ph[2, k])
-    w = (ws[1, k], ws[2, k], ws[3, k], ws[4, k]); kk = (ks[1, k], ks[2, k], ks[3, k], ks[4, k])
+    y = pos[1, k]; x = pos[2, k]; yu = jac[1, k]; xu = jac[2, k]; yv = jac[3, k]; xv = jac[4, k]
+    # node corners and weights, as rf_entry_kernel! placed them, with the weights' derivatives (which
+    # d/du and d/dv include, as psf_value_grad does): recomputed here, cheaper than carrying them
+    kk, w, dwy, dwx = psf_context(d.psf, e, y, x)
     for bb in 1:4, a in 1:4, m in 1:4
         A[((bb - 1) * 4 + a - 1) * 4 + m, k] = f * w[m] * cv[a] * cu[bb]
     end
-    y = pos[1, k]; x = pos[2, k]; yu = jac[1, k]; xu = jac[2, k]; yv = jac[3, k]; xv = jac[4, k]
     P = bP[ebatch[k]]; R = (P - Int32(1)) ÷ Int32(2); o = soff[k]
     for p in 1:(P * P)
         f0 = o + p
@@ -205,13 +208,13 @@ end
             continue
         end
         i = eay[k] + Int32((p - 1) % P) - R; j = eax[k] + Int32((p - 1) ÷ P) - R
-        val = zero(T); dv = zero(T); du = zero(T); sx = one(T); sy = one(T)
+        val = zero(T); dv = zero(T); du = zero(T); wy = zero(T); wx = zero(T); sx = one(T); sy = one(T)
         for m in 1:4
             iszero(w[m]) && continue
             vm, dvm, dum, sxm, sym = node_value_grad(d.psf.nodes, d.psf.par, kk[m], i, j, y, x)
-            val += w[m] * vm; dv += w[m] * dvm; du += w[m] * dum; sx = sxm; sy = sym
+            val += w[m] * vm; dv += w[m] * dvm; du += w[m] * dum; wy += dwy[m] * vm; wx += dwx[m] * vm; sx = sxm; sy = sym
         end
-        Py = -sy * f * dv; Px = -sx * f * du
+        Py = f * (wy - sy * dv); Px = f * (wx - sx * du)
         S[1, f0] = Py * yu + Px * xu; S[2, f0] = Py * yv + Px * xv; S[3, f0] = fs * val
     end
 end
@@ -683,7 +686,7 @@ end
 
 const RF_CHUNK = 256          # stars per adjoint workgroup
 
-"The group's selected stars (catalog indices): band S/N >= snr_min, a fixed random subset beyond max_stars."
+"Band `b`'s selected stars (catalog indices), shared by its PSF groups: S/N >= snr_min, a fixed random subset beyond max_stars."
 function _refine_select(snr, b, o::PSFRefineOptions)
     cand = [s for s in axes(snr, 2) if snr[b, s] >= o.snr_min]
     length(cand) > o.max_stars && (cand = Random.shuffle(Random.MersenneTwister(b), cand)[1:o.max_stars])
@@ -815,9 +818,9 @@ function _refine_problem(st, g, θd, snr, ay, ax, mR, o::PSFRefineOptions; reser
     eay = Int32[ay[estar[k], eimg[k]] for k in 1:n]; eax = Int32[ax[estar[k], eimg[k]] for k in 1:n]
     # placement on the device, as the fitter's model places the star
     dv = map(x -> to_device(be, x), (; eimg, estar, eay, eax))
-    pos = KA.allocate(be, T, 2, n); jac = KA.allocate(be, T, 4, n); ks = KA.allocate(be, Int32, 4, n); ws = KA.allocate(be, T, 4, n)
+    pos = KA.allocate(be, T, 2, n); jac = KA.allocate(be, T, 4, n); ks = KA.allocate(be, Int32, 4, n)
     L = KA.allocate(be, Int32, 2, n); ph = KA.allocate(be, T, 2, n)
-    launch!(rf_entry_kernel!, be, n, pos, jac, ks, ws, L, ph, dv.eimg, dv.estar, dv.eay, dv.eax, θd, sc.dev)
+    launch!(rf_entry_kernel!, be, n, pos, jac, ks, L, ph, dv.eimg, dv.estar, dv.eay, dv.eax, θd, sc.dev)
     ksh = Array(ks); Lh = Array(L)
     base = g.nodes[1] - Int32(1)
     key(k) = (Lh[1, k], Lh[2, k], erb[k], ksh[1, k], ksh[2, k], ksh[3, k], ksh[4, k])
@@ -865,11 +868,10 @@ function _refine_problem(st, g, θd, snr, ay, ax, mR, o::PSFRefineOptions; reser
     launch!(rf_fquad_kernel!, be, n, fq, dd.qoff, dd.soff, dd.ebatch, dd.bP)
     nr = rows.nr; dd = merge(dd, Base.structdiff(rows, (; nr = 0)), (; fq), _rf_xlists(dd, g, be))
     # placement arrays, permuted to batch order
-    pos = to_device(be, Array(pos)[:, perm]); jac = to_device(be, Array(jac)[:, perm]); ws = to_device(be, Array(ws)[:, perm])
-    ks = to_device(be, ksh[:, perm]); ph = to_device(be, Array(ph)[:, perm])
+    pos = to_device(be, Array(pos)[:, perm]); jac = to_device(be, Array(jac)[:, perm]); ph = to_device(be, Array(ph)[:, perm])
     # coefficients, derivative stamps and the rows' data
     A = KA.allocate(be, T, 64, n); S = KA.allocate(be, T, 3, nf)
-    launch!(rf_stamp_kernel!, be, n, A, S, pos, jac, ks, ws, ph, dd.eay, dd.eax, dd.eimg, dd.estar, dd.ebatch, dd.soff, dd.bP, dd.srow, θd, sc.dev)
+    launch!(rf_stamp_kernel!, be, n, A, S, pos, jac, ph, dd.eay, dd.eax, dd.eimg, dd.estar, dd.ebatch, dd.soff, dd.bP, dd.srow, θd, sc.dev)
     res = Bool[reserve !== nothing && reserve[s] for s in stars]
     smask = to_device(be, Int32.(.!res))
     any(res) && launch!(rf_mask_kernel!, be, n, A, dd.eloc, smask)
@@ -878,7 +880,7 @@ function _refine_problem(st, g, θd, snr, ay, ax, mR, o::PSFRefineOptions; reser
     r = KA.allocate(be, T, nr); W = KA.allocate(be, T, nr); m = KA.allocate(be, T, nr)
     launch!(rf_rows_kernel!, be, nr, r, W, m, dd.rowpix, sc.data, st.bkg, st.work.model, sc.weight)
     KA.synchronize(be)
-    foreach(KA.unsafe_free!, (values(dv)..., pos, jac, ks, ws, L, ph))
+    foreach(KA.unsafe_free!, (values(dv)..., pos, jac, ks, L, ph))
     Pmax = Int(maximum(bP))
     return (; n, nf, nq, nr, nb, ns = ns_, stars, reserve = res, smask, fstar, M = 64 * Pmax^2, nx = go, npart = po, nchunk = length(cb), d = dd, A, S, r, W, m)
 end
@@ -913,7 +915,7 @@ The group's MAP step: projected preconditioned CG on the PSF correction (relativ
 reference, warm-started at the current one) and the stars' (u, v, flux) updates, with IRLS and,
 with `star_nsigma`, the star-level test after the first round (which zeroes the rejected stars'
 PSF coefficients in `p.A`).  Returns the correction, the star updates (`3 x ns`), their
-information blocks (`9 x ns`), the fraction of rows at full weight, and per star at the solution
+information blocks (`9 x ns`), the fraction of rows with robust weight above 1/2, and per star at the solution
 its χ² and usable pixel count, whether it was rejected, and its ring sums of residual / flux and
 their pixel counts (`(window + 1) x ns`).
 """
