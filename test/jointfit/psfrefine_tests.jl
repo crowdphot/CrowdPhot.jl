@@ -74,6 +74,13 @@ end
     fwd = J._rf_J!(zeros(p.nr), x, y, p, g, buf, be)
     gx = zeros(np); gy = zeros(3, p.ns); J._rf_Jt!(gx, gy, w, p, g, buf, be)
     @test dot(fwd, w) ≈ dot(x, gx) + dot(y, gy) rtol = 1e-12
+    # Js y is the central difference of the render when the stars move by y, with the footprint held
+    # (the bilinear node weights' derivatives included: the nodes here differ by 0.3 px FWHM)
+    fp = J.footprint(sc, f.θ, s.st.rt); h = 1e-4
+    δ = zeros(size(f.θ)); δ[:, p.stars] .= y
+    mp = zeros(length(sc.data)); mm = zeros(length(sc.data))
+    J.render!(mp, sc, f.θ .+ h .* δ, fp); J.render!(mm, sc, f.θ .- h .* δ, fp)
+    @test J._rf_J!(zeros(p.nr), nothing, y, p, g, buf, be) ≈ (mp[rows] .- mm[rows]) ./ 2h rtol = 1e-7
     # the gauge projection leaves no sum or first moment on any phase sub-lattice
     v = randn(rng, np)
     J.launch!(J.rf_proj_kernel!, be, g.N * g.sy * g.sx, v, g.gq, g.ra, g.ca, g.nw, g.sy, g.sx)
