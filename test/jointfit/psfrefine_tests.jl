@@ -2,7 +2,7 @@ using CrowdPhot
 using CrowdPhot.Joint
 using CrowdPhot.PSF: CircularGaussianPRF, ImagePSF, GriddedPSFModel, evaluate
 using StableRNGs: StableRNG
-using LinearAlgebra: dot
+using LinearAlgebra: dot, I
 using Test
 
 const J = CrowdPhot.Joint
@@ -82,16 +82,35 @@ end
     J.render!(mp, sc, f.θ .+ h .* δ, fp); J.render!(mm, sc, f.θ .- h .* δ, fp)
     @test J._rf_J!(zeros(p.nr), nothing, y, p, g, buf, be) ≈ (mp[rows] .- mm[rows]) ./ 2h rtol = 1e-7
     # the gauge projection leaves no sum or first moment on any phase sub-lattice
+    o0 = round(Int, (size(g.hpsf.psfs[1].data, 1) + 1) / 2)
+    function gauge_ok(v; tol = 1e-9)
+        all(Iterators.product(1:g.N, 0:(os - 1), 0:(os - 1))) do (n, a, b)
+            idx = [(r, c) for r in 1:g.nw, c in 1:g.nw if mod(g.r0 + r - 1 - o0, os) == a && mod(g.c0 + c - 1 - o0, os) == b]
+            vals = [v[(n - 1) * g.nw^2 + (c - 1) * g.nw + r] for (r, c) in idx]
+            abs(sum(vals)) < tol && abs(sum(vals .* [g.c0 + c - 1 - o0 for (r, c) in idx])) < tol &&
+                abs(sum(vals .* [g.r0 + r - 1 - o0 for (r, c) in idx])) < tol
+        end
+    end
     v = randn(rng, np)
     J.launch!(J.rf_proj_kernel!, be, g.N * g.sy * g.sx, v, g.gq, g.ra, g.ca, g.nw, g.sy, g.sx)
-    o0 = round(Int, (size(g.hpsf.psfs[1].data, 1) + 1) / 2)
-    for n in 1:g.N, a in 0:(os - 1), b in 0:(os - 1)
-        idx = [(r, c) for r in 1:g.nw, c in 1:g.nw if mod(g.r0 + r - 1 - o0, os) == a && mod(g.c0 + c - 1 - o0, os) == b]
-        vals = [v[(n - 1) * g.nw^2 + (c - 1) * g.nw + r] for (r, c) in idx]
-        @test abs(sum(vals)) < 1e-10
-        @test abs(sum(vals .* [g.c0 + c - 1 - o0 for (r, c) in idx])) < 1e-9
-        @test abs(sum(vals .* [g.r0 + r - 1 - o0 for (r, c) in idx])) < 1e-9
+    @test gauge_ok(v)
+    # the gauge in the preconditioner's metric, M r = B r - B Cᵀ (C B Cᵀ)⁻¹ C B r for node blocks B:
+    # M r satisfies the gauge without a projection, and M is symmetric (PCG needs both)
+    N = g.N; nws = g.nw^2; nsub = g.sy * g.sx; K = 3N
+    Bi = zeros(N, N, nws)
+    for s in 1:nws; Q = randn(rng, N, N); Bi[:, :, s] .= Q * Q' + N * I; end
+    Gi = J._rf_gauge_G!(zeros(K, K, nsub), Bi, g, be)
+    cv = zeros(K, nsub); yv = zeros(K, nsub)
+    function Mg(r)
+        z = zeros(np); J.launch!(J.rf_block_kernel!, be, nws, z, r, Bi, N, nws, false)
+        J.launch!(J.rf_gauge_c_kernel!, be, N * nsub, cv, z, g.gq, g.ra, g.ca, g.nw, g.sy, g.sx)
+        J.launch!(J.rf_gauge_y_kernel!, be, K * nsub, yv, Gi, cv, K)
+        J.launch!(J.rf_gauge_corr_kernel!, be, nws, z, Bi, g.gq, yv, g.rph, g.cph, g.nw, g.sy, N)
+        return z
     end
+    a1 = randn(rng, np); a2 = randn(rng, np); m1 = Mg(a1); m2 = Mg(a2)
+    @test gauge_ok(m1; tol = 1e-9 * maximum(abs, m1))
+    @test dot(a2, m1) ≈ dot(a1, m2) rtol = 1e-10
     # Float32 builds the same problem
     s32 = refine_state(f; T = Float32)
     Jx32 = J._rf_J!(zeros(Float32, p.nr), Float32.(x), nothing, s32.p, s32.g, s32.buf, be)

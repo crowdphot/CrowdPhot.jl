@@ -7,7 +7,8 @@
 # (a correction common to the group's nodes plus each node's own); the gauge fixes the sum and
 # first moments of every phase sub-lattice of the window; the likelihood is Huber with
 # gross-outlier rejection, weights taken at the warm start.  The step is solved by projected
-# preconditioned CG with all star couplings.  Design and validation:
+# preconditioned CG with all star couplings, the gauge applied in the preconditioner's metric.
+# Design and validation:
 # experiments/multi-image/psf-refinement/report/psf-refinement-report.tex.
 #
 # Stamp space.  For integer oversampling s, a star anchored at pixel (ay, ax) reads, for its stamp
@@ -101,8 +102,8 @@ Per PSF group, fixed for the run: images, band, device node indices `nodes` (loc
 `nodes[n]`), window geometry (node rows `r0 : r0 + nw - 1`, columns `c0 : c0 + nw - 1`), the
 reference window values `ref` (`nw x nw x N`, Float64), the prior precision blocks `Pk`
 (`N x N x nw²`), the gauge basis `gq` (`3 x nw²`: each sample's orthonormal vectors of its
-phase sub-lattice) with the sub-lattices' first rows `ra` and columns `ca`, and the host model
-`hpsf` the refinement updates.
+phase sub-lattice) with the sub-lattices' first rows `ra` and columns `ca` and each window row's and
+column's phase index `rph` / `cph`, and the host model `hpsf` the refinement updates.
 """
 function _refine_group_setup(sc, g, imgs, band, nodes, o::PSFRefineOptions)
     T = eltype(sc); be = sc.backend
@@ -140,7 +141,8 @@ function _refine_group_setup(sc, g, imgs, band, nodes, o::PSFRefineOptions)
     hpsf = GriddedPSFModel([ImagePSF(copy(nd.data); origin = nd.origin, oversampling = nd.oversampling, fill_value = nd.fill_value) for nd in g.psfs],
                            g.grid_y, g.grid_x)
     return (; images = imgs, band, nodes, N, sy, sx, r0, c0, nw, ref, Pk, gq = to_device(be, T, gq), ra = to_device(be, ra),
-              ca = to_device(be, ca), hpsf, xcur = zeros(N * ns))
+              ca = to_device(be, ca), rph = to_device(be, Int32[phy(r) + 1 for r in 1:nw]), cph = to_device(be, Int32[phx(c) + 1 for c in 1:nw]),
+              hpsf, xcur = zeros(N * ns))
 end
 
 "Groups of the run's PSFs (the device's node sharing), each set up by `_refine_group_setup`."
@@ -460,6 +462,70 @@ end
     for c in ca[b]:sx:nw, r in ra[a]:sy:nw
         s = (c - 1) * nw + r
         v[base + s] -= gq[1, s] * d1 + gq[2, s] * d2 + gq[3, s] * d3
+    end
+end
+
+# The gauge in the preconditioner's metric.  With B the node-block preconditioner and C the gauge
+# vectors (row q of `gq` on one node's phase sub-lattice), the preconditioned residual is
+# z = B r - B Cᵀ (C B Cᵀ)⁻¹ C B r, which satisfies the gauge exactly; projecting B r afterwards
+# (Euclidean) instead distorts the window-edge samples, where the moment vectors are largest, and
+# left the preconditioned PSF block about 3x slower to converge on the test fields.  B mixes nodes
+# only within a sample, so C B Cᵀ is block diagonal over the sub-lattices, one (3N x 3N) block each
+# (rows (n, q)).
+
+# G[(n, q), (n', q'), l] = Σ over sub-lattice l's samples s of gq[q, s] Bi[n, n', s] gq[q', s].
+@kernel function rf_gauge_G_kernel!(G, @Const(Bi), @Const(gq), @Const(ra), @Const(ca), nw, sy, sx, N)
+    t = @index(Global)
+    K = 3N; i = (t - 1) % K + 1; j = ((t - 1) ÷ K) % K + 1; l = (t - 1) ÷ (K * K) + 1
+    a = (l - 1) % sy + 1; b = (l - 1) ÷ sy + 1
+    n = (i - 1) ÷ 3 + 1; q = (i - 1) % 3 + 1; n2 = (j - 1) ÷ 3 + 1; q2 = (j - 1) % 3 + 1
+    acc = zero(eltype(G))
+    for c in ca[b]:sx:nw, r in ra[a]:sy:nw
+        s = (c - 1) * nw + r
+        acc += gq[q, s] * Bi[n, n2, s] * gq[q2, s]
+    end
+    G[i, j, l] = acc
+end
+
+# cv[(n, q), l] = Σ over sub-lattice l of node n of gq[q, s] z[n, s].
+@kernel function rf_gauge_c_kernel!(cv, @Const(z), @Const(gq), @Const(ra), @Const(ca), nw, sy, sx)
+    t = @index(Global)
+    nsub = sy * sx; n = (t - 1) ÷ nsub + 1; l = (t - 1) % nsub + 1
+    a = (l - 1) % sy + 1; b = (l - 1) ÷ sy + 1
+    base = (n - 1) * nw * nw
+    T = eltype(cv)
+    d1 = d2 = d3 = zero(T)
+    for c in ca[b]:sx:nw, r in ra[a]:sy:nw
+        s = (c - 1) * nw + r; val = z[base + s]
+        d1 += gq[1, s] * val; d2 += gq[2, s] * val; d3 += gq[3, s] * val
+    end
+    cv[3n - 2, l] = d1; cv[3n - 1, l] = d2; cv[3n, l] = d3
+end
+
+# yv[:, l] = Gi[:, :, l] cv[:, l].
+@kernel function rf_gauge_y_kernel!(yv, @Const(Gi), @Const(cv), K)
+    t = @index(Global)
+    i = (t - 1) % K + 1; l = (t - 1) ÷ K + 1
+    acc = zero(eltype(yv))
+    for j in 1:K
+        acc += Gi[i, j, l] * cv[j, l]
+    end
+    yv[i, l] = acc
+end
+
+# z[n', s] -= Σ_n Bi[n', n, s] Σ_q gq[q, s] yv[(n, q), l(s)] per window sample s (`rph` / `cph`: the
+# phase index of each window row / column, as `_refine_group_setup`).
+@kernel function rf_gauge_corr_kernel!(z, @Const(Bi), @Const(gq), @Const(yv), @Const(rph), @Const(cph), nw, sy, N)
+    s = @index(Global)
+    r = (s - 1) % nw + 1; c = (s - 1) ÷ nw + 1
+    l = (cph[c] - 1) * sy + rph[r]
+    g1 = gq[1, s]; g2 = gq[2, s]; g3 = gq[3, s]
+    for m in 1:N
+        acc = zero(eltype(z))
+        for n in 1:N
+            acc += Bi[m, n, s] * (g1 * yv[3n - 2, l] + g2 * yv[3n - 1, l] + g3 * yv[3n, l])
+        end
+        z[(m - 1) * nw * nw + s] -= acc
     end
 end
 
@@ -910,6 +976,73 @@ function _rf_Jt!(gx, gy, w, p, g, buf, be; sq = false)
     return gx
 end
 
+const RF_KMAX = 3RF_NMAX      # gauge block size up to which the blocks are inverted on the device
+
+# Gi[:, :, l] = inv(G[:, :, l]) per sub-lattice block: one workgroup per block, one item per row,
+# Gauss-Jordan without pivoting in local memory (the blocks are symmetric positive definite).  Rows
+# of a rank-deficient sub-lattice's basis are zero in `gq`; they get a unit diagonal (their
+# components are zero too).  The blocks are well conditioned (condition numbers 35-103 on WFI01), so
+# the working precision is enough for a preconditioner (the step changed by ~1e-6 against Float64).
+# Each item writes only its own row and reads only its own and the pivot row, so one barrier per step
+# (the pivot row scaled before the others read it) is all the ordering needed.
+@kernel function rf_gauge_inv_kernel!(Gi, @Const(G), K)
+    i = @index(Local, Linear); l = @index(Group, Linear)
+    @uniform T = eltype(Gi)
+    M = @localmem T (RF_KMAX, RF_KMAX)
+    V = @localmem T (RF_KMAX, RF_KMAX)
+    if i <= K
+        for j in 1:K
+            M[i, j] = G[i, j, l]; V[i, j] = ifelse(i == j, one(T), zero(T))
+        end
+        iszero(M[i, i]) && (M[i, i] = one(T))
+    end
+    for k in 1:K
+        if i == k
+            piv = inv(M[k, k])
+            for j in 1:K
+                M[k, j] *= piv; V[k, j] *= piv
+            end
+        end
+        @synchronize
+        if i <= K && i != k
+            f = M[i, k]
+            for j in 1:K
+                M[i, j] -= f * M[k, j]; V[i, j] -= f * V[k, j]
+            end
+        end
+    end
+    if i <= K
+        for j in 1:K
+            Gi[i, j, l] = V[i, j]
+        end
+    end
+end
+
+"""
+Write into `Gi` the inverse of every sub-lattice's block of C B Cᵀ for the node blocks `Bi` of group
+`g`: on the device up to `RF_KMAX` rows per block, on the host beyond (as the node blocks beyond
+`RF_NMAX`).
+"""
+function _rf_gauge_G!(Gi, Bi, g, be)
+    nsub = g.sy * g.sx; K = 3g.N
+    G = KA.allocate(be, eltype(Gi), K, K, nsub)
+    launch!(rf_gauge_G_kernel!, be, K * K * nsub, G, Bi, g.gq, g.ra, g.ca, g.nw, g.sy, g.sx, g.N)
+    if K <= RF_KMAX
+        rf_gauge_inv_kernel!(be, RF_KMAX)(Gi, G, K; ndrange = RF_KMAX * nsub)
+    else
+        Gh = Array(G)
+        for l in 1:nsub
+            M = Gh[:, :, l]
+            for i in 1:K; iszero(M[i, i]) && (M[i, i] = one(eltype(M))); end
+            Gh[:, :, l] .= inv(M)
+        end
+        copyto!(Gi, Gh)
+    end
+    KA.unsafe_free!(G)
+    return Gi
+end
+
+
 """
 The group's MAP step: projected preconditioned CG on the PSF correction (relative to the
 reference, warm-started at the current one) and the stars' (u, v, flux) updates, with IRLS and,
@@ -948,6 +1081,15 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
     rob!(ρ, e) = launch!(rf_robust_kernel!, be, p.nr, ρ, e, p.W, p.m, T(o.c), T(o.mu), T(o.reject_z))
     rob!(ρ, e)
     H = KA.zeros(be, T, 9, ns); Hi = KA.zeros(be, T, 9, ns); Bi = KA.zeros(be, T, N, N, nws); dJb = KA.zeros(be, T, np)
+    # the gauge in the preconditioner's metric (rf_gauge_G_kernel!)
+    nsub = g.sy * g.sx; K = 3N
+    Gi = KA.zeros(be, T, K, K, nsub); cv = KA.zeros(be, T, K, nsub); yv = KA.zeros(be, T, K, nsub)
+    function gauge!(x)
+        launch!(rf_gauge_c_kernel!, be, N * nsub, cv, x, g.gq, g.ra, g.ca, g.nw, g.sy, g.sx)
+        launch!(rf_gauge_y_kernel!, be, K * nsub, yv, Gi, cv, K)
+        launch!(rf_gauge_corr_kernel!, be, nws, x, Bi, g.gq, yv, g.rph, g.cph, g.nw, g.sy, N)
+        return x
+    end
     function Aop!(out, v)
         _rf_J!(tmp, vx(v), vy(v), p, g, buf, be)
         mul!_(tmp, tmp, Wρ)
@@ -956,8 +1098,10 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
         lc!(view(out, (np + 1):nz), view(out, (np + 1):nz), view(v, (np + 1):nz), 1, 1e-9)
         return out
     end
+    # the trailing projection only removes rounding from the gauge-metric step
     function Mi!(out, r)
         launch!(rf_block_kernel!, be, nws, vx(out), vx(r), Bi, N, nws, false)
+        gauge!(vx(out))
         launch!(rf_star_prec_kernel!, be, ns, vy(out), vy(r), Hi)
         return proj!(out)
     end
@@ -983,6 +1127,7 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
             end
             copyto!(Bi, T.(Bh))
         end
+        _rf_gauge_G!(Gi, Bi, g, be)
         mul!_(tmp, Wρ, t)
         _rf_Jt!(vx(b), vy(b), tmp, p, g, buf, be)
         lc!(r, b, Aop!(q, z), 1, -1); proj!(r)
@@ -1023,7 +1168,7 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
     zh = Array(z); iters = Int.(Array(cnts))
     out = (; x = Float64.(zh[1:np]), d = Float64.(reshape(zh[(np + 1):nz], 3, ns)), H = Float64.(Array(H)), iters, wfrac,
              chi2 = Float64.(Array(chi)), npix = Int.(Array(cnt)), rejected, prof = Float64.(Array(prof)), pcnt = Int.(Array(pcnt)))
-    foreach(KA.unsafe_free!, (buf..., Pk, tmp, Wρ, ρ, e, H, Hi, Bi, r, q, zz, pk, b, z, t, part, sv, cnts, dJb, chi, cnt, prof, pcnt))
+    foreach(KA.unsafe_free!, (buf..., Pk, tmp, Wρ, ρ, e, H, Hi, Bi, Gi, cv, yv, r, q, zz, pk, b, z, t, part, sv, cnts, dJb, chi, cnt, prof, pcnt))
     return out
 end
 
