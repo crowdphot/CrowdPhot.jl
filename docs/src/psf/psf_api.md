@@ -54,6 +54,7 @@ theta
 
 ```@docs
 extent
+box_half_width
 ellipse_bounds
 render
 add_star!

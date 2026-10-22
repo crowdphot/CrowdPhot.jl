@@ -26,10 +26,15 @@ struct Footprint{MI}
     mR::MI
 end
 
+# `nothing`: the PSFs' largest extent (±10 FWHM for an analytic PSF), no less than R_fit; smaller PSFs stop
+# at their own edge, where sb is 0
+_resolve_R_cap(R_cap, psfs, R_fit) = R_cap === nothing ? max(Int(R_fit), maximum(p -> CrowdPhot.PSF.box_half_width(p, 20), psfs)) : Int(R_cap)
+
 """
 `:auto` model-radius rule of the single-image fitter per image (`_model_radius_table`):
 `sb` `(R_cap, E)` and `thresh` `(E,)` on the device.  A scalar `model_rad` is the table that
-gives that radius to every source.
+gives that radius to every source.  `R_cap = nothing` is the largest of the PSFs' extents
+(`_resolve_R_cap`).
 """
 struct RadiusTable{M, V}
     sb::M
@@ -38,8 +43,8 @@ struct RadiusTable{M, V}
     R_cap::Int32
 end
 
-function RadiusTable(sc::JointScene{T}, psfs, weights; model_rad = :auto, nsigma = 1, R_fit::Integer, R_cap::Integer) where {T}
-    E = nimages(sc)
+function RadiusTable(sc::JointScene{T}, psfs, weights; model_rad = :auto, nsigma = 1, R_fit::Integer, R_cap::Union{Nothing, Integer}) where {T}
+    E = nimages(sc); R_cap = _resolve_R_cap(R_cap, psfs, R_fit)
     if model_rad isa Real
         r = clamp(round(Int, round(model_rad, RoundUp)), R_fit, R_cap)
         return RadiusTable(KA.zeros(sc.backend, T, max(r, 1), E), KA.zeros(sc.backend, T, E), Int32(r), Int32(r))

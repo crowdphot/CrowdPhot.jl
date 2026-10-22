@@ -340,6 +340,27 @@ end
 end
 
 """
+    box_half_width(model::AbstractPSFModel, fwhm_factor=5) -> Int
+
+The half-width (pixels, rounded up) of the smallest square centered on `(model.y, model.x)` that
+holds the model's [`extent`](@ref): the largest distance from the source position to an edge of
+the extent along either axis (a Chebyshev radius, not a circular one).  A tabulated model
+(`ImagePSF`, or a `GriddedPSFModel` of them) gives its stamp, and `fwhm_factor` is ignored; an
+analytic model gives `fwhm_factor / 2` FWHM.  Not the half width at half maximum.
+
+```jldoctest
+julia> using CrowdPhot.PSF: box_half_width, CircularGaussianPSF
+
+julia> box_half_width(CircularGaussianPSF(y=20, x=10, fwhm=5, flux=30, bkg=1))
+13
+```
+"""
+function box_half_width(model::AbstractPSFModel, fwhm_factor = 5)
+    (ylo, yhi), (xlo, xhi) = extent(model, fwhm_factor)
+    return ceil(Int, max(model.y - ylo, yhi - model.y, model.x - xlo, xhi - model.x))
+end
+
+"""
     CartesianIndices(model::AbstractPSFModel, [fwhm_factor]) -> CartesianIndices{2}
 
 Return the `CartesianIndices` covering the integer-rounded `extent` of `model`.

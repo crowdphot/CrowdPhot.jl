@@ -8,7 +8,12 @@
 Fitter settings, mirroring the single-image simultaneous fitter's keywords.
 
 - `R_fit = 3`: fit-stamp half-width (pixels)
-- `model_rad = :auto`, `model_rad_nsigma = 1.0`, `R_cap = 30`: model half-width rule
+- `model_rad = :auto`, `model_rad_nsigma = 0.5`, `R_cap = nothing`: model half-width rule, as in the
+  single-image fitter (`R_cap` is its `model_rad_max`).  `R_cap = nothing` caps the radius at the
+  PSFs' extent: a tabulated PSF's stamp half-width, ±10 FWHM for an
+  analytic one.  `model_rad_nsigma = 0.25` renders about 30% more pixels than 0.5 for better faint-star
+  errors: on simulated fields improves faint-star flux scatter by a few percent.
+  Wall time on a full 8-band WFI detector with PSF refinement (Metal): 0.25 is 10% slower than 0.5.
 - `linearizations = 1`: Gauss-Newton linearizations per pass
 - `cg_iterations = 10`: CG iterations per solve (fixed; no early stop)
 - `max_trials = 8`, `λ_init = 1e-3`, `λ_up = 10`, `λ_down = 10`, `λ_min = 1e-12`, `λ_max = 1e12`: damping schedule
@@ -20,8 +25,8 @@ Fitter settings, mirroring the single-image simultaneous fitter's keywords.
 Base.@kwdef struct JointFitOptions
     R_fit::Int = 3
     model_rad::Union{Symbol, Float64} = :auto
-    model_rad_nsigma::Float64 = 1.0
-    R_cap::Int = 30
+    model_rad_nsigma::Float64 = 0.5
+    R_cap::Union{Nothing, Int} = nothing
     linearizations::Int = 1
     cg_iterations::Int = 10
     max_trials::Int = 8
