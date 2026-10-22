@@ -1601,11 +1601,12 @@ const _MULTIPASS_DOC_FIT_COMMON = """
   every source, used as given.  Both forms are floored at `ceil(fit_rad)`, since
   the fitting box has to sit inside the model box; only `:auto` is capped, at
   `ceil(model_rad_max)`.
-- `model_rad_max::Real = 10 * fit_rad`: hard cap on the **auto** `model_rad` (and
-  hence on the size of the internal render buffers).  It bounds the `:auto`
-  search only and is ignored for a scalar `model_rad`, which sizes the buffers
-  itself.
-- `model_rad_nsigma::Real = 1.0`: the auto threshold, in units of the
+- `model_rad_max::Union{Nothing, Real} = nothing`: hard cap on the **auto**
+  `model_rad` (and hence on the size of the internal render buffers).  `nothing`
+  uses the PSF's own extent, `PSF.box_half_width(psf, 20)`: a tabulated PSF's
+  stamp half-width (beyond which it renders zeros), ±10 FWHM for an analytic model.  It bounds the `:auto` search
+  only and is ignored for a scalar `model_rad`, which sizes the buffers itself.
+- `model_rad_nsigma::Real = 0.5`: the auto threshold, in units of the
   background per-pixel noise.  Larger values give smaller `model_rad`.
 - `spread_model_fwhm::Union{Nothing, Real} = nothing`: FWHM of the reference
   exponential disk for `spread_model`; `nothing` derives it from the PSF's
@@ -1795,8 +1796,8 @@ function _fit_all_stars_multipass(
         inv_var::Union{Nothing, AbstractMatrix} = nothing,
         spread_model_fwhm::Union{Nothing, Real} = nothing,
         model_rad::Union{Symbol, Real} = :auto,
-        model_rad_max::Real = 10 * fit_rad,
-        model_rad_nsigma::Real = 1.0,
+        model_rad_max::Union{Nothing, Real} = nothing,
+        model_rad_nsigma::Real = 0.5,
         max_step::Real = 1.0,
         max_iter::Integer = 10,
         min_growth::Real = 0.01,
@@ -1816,7 +1817,7 @@ function _fit_all_stars_multipass(
     min_growth >= 0 || throw(ArgumentError("min_growth must be non-negative"))
     (model_rad === :auto || (model_rad isa Real && model_rad > 0)) ||
         throw(ArgumentError("model_rad must be :auto or a positive real, got $(repr(model_rad))"))
-    model_rad_max >= fit_rad || throw(ArgumentError("model_rad_max must be >= fit_rad"))
+    (model_rad_max === nothing || model_rad_max >= fit_rad) || throw(ArgumentError("model_rad_max must be >= fit_rad"))
     model_rad_nsigma > 0 || throw(ArgumentError("model_rad_nsigma must be positive"))
     max_step >= 0 || throw(ArgumentError("max_step must be non-negative"))
     fit_rad > 0 || throw(ArgumentError("fit_rad must be positive"))
@@ -1915,7 +1916,7 @@ function _fit_all_stars_multipass(
         blend_passes = Int(blend_passes),
         morph_half_width = morph_hw, psf_fwhm,
         # fit
-        R_fit, R_cap = ceil(Int, model_rad === :auto ? model_rad_max : max(float(model_rad), float(fit_rad))),
+        R_fit, R_cap = ceil(Int, model_rad === :auto ? something(model_rad_max, max(PSF.box_half_width(psf, 20), fit_rad)) : max(float(model_rad), float(fit_rad))),
         model_rad, model_rad_nsigma = FT(model_rad_nsigma), max_step = FT(max_step),
         freeze_positions_final, background_covariance, R_cov,
     )

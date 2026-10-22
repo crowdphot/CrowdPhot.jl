@@ -74,7 +74,7 @@ scale ratio of the images.
 """
 function _auto_overlap(images, frame::TanGrid, o::JointLoopOptions)
     box = maximum(_box_dims(o))
-    reach = max(o.fit.R_cap + o.fit.R_fit, 3box) + box
+    reach = max(_resolve_R_cap(o.fit.R_cap, [im.psf for im in images], o.fit.R_fit) + o.fit.R_fit, 3box) + box
     return ceil(Int, round(reach * maximum(_native_scale(im) for im in images) / frame.scale; digits = 3))
 end
 
