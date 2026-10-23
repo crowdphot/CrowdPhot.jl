@@ -29,7 +29,7 @@ function _roman_tree(af, path::AbstractString)
 end
 
 """
-    load_l2(fname; dq_flags = (:DO_NOT_USE, :NO_LIN_CORR)) -> NamedTuple
+    load_l2(fname; dq_flags = (:DO_NOT_USE, :NO_LIN_CORR), bad_pixels = true) -> NamedTuple
 
 Read a Roman WFI Level 2 (calibrated rate) ASDF file.
 
@@ -39,15 +39,19 @@ Read a Roman WFI Level 2 (calibrated rate) ASDF file.
 # Keyword arguments
 - `dq_flags`: the [`DQ_FLAGS`](@ref) names that mark a pixel unusable.  See
   [`parse_dq_mask`](@ref).
+- `bad_pixels`: also mark the unusable pixels that the DQ array does not flag
+  (invalid errors, cold and hot pixels; see [`bad_pixel_mask`](@ref)).
 
 # Returns
 - `data::Matrix{Float32}`: the science array.
-- `dq::BitMatrix`: `true` where any of `dq_flags` is set, i.e. `true` means
-  "bad", matching the `bkg_mask` convention of
-  [`CrowdPhot.fit_all_stars_multipass`](@ref).
+- `dq::BitMatrix`: `true` where any of `dq_flags` is set or, with `bad_pixels`,
+  where [`bad_pixel_mask`](@ref) fires, i.e. `true` means "bad", matching the
+  `bkg_mask` convention of [`CrowdPhot.fit_all_stars_multipass`](@ref).
 - `err::Matrix{Float32}`: the total error array.
 - `var_poisson::Matrix{Float32}`: the Poisson variance array.
 - `meta`: the file's `roman.meta` metadata tree, passed through as ASDF returns it.
+- `n_bad`: with `bad_pixels`, the counts `(; n_err, n_cold, n_hot)` of the pixels
+  [`bad_pixel_mask`](@ref) added; otherwise `nothing`.
 
 !!! note
     ASDF.jl reads array data in reverse dimension order relative to the
@@ -55,14 +59,21 @@ Read a Roman WFI Level 2 (calibrated rate) ASDF file.
     `permutedims`ed back on the way out.  Arrays are returned in CrowdPhot's
     `(y, x)` convention.
 """
-function load_l2(fname::AbstractString; dq_flags = (:DO_NOT_USE, :NO_LIN_CORR))
+function load_l2(fname::AbstractString; dq_flags = (:DO_NOT_USE, :NO_LIN_CORR), bad_pixels::Bool = true)
     afr = _roman_tree(_load_asdf(fname), fname)
     meta = afr["meta"]
     image_data = Matrix{Float32}(permutedims(afr["data"][]))
-    dq = BitMatrix(permutedims(parse_dq_mask(afr["dq"][]; flags = dq_flags)))
+    dq_raw = Matrix{UInt32}(permutedims(afr["dq"][]))
+    dq = BitMatrix(parse_dq_mask(dq_raw; flags = dq_flags))
     err = Matrix{Float32}(permutedims(afr["err"][]))
     var_poisson = Matrix{Float32}(permutedims(afr["var_poisson"][]))
-    return (; data = image_data, dq, err, var_poisson, meta)
+    n_bad = nothing
+    if bad_pixels
+        bad = bad_pixel_mask(image_data, err, dq_raw; flags = dq_flags)
+        dq .|= bad.mask
+        n_bad = (; bad.n_err, bad.n_cold, bad.n_hot)
+    end
+    return (; data = image_data, dq, err, var_poisson, meta, n_bad)
 end
 
 """

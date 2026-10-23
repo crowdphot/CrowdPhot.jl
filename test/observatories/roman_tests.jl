@@ -1,9 +1,10 @@
 import CrowdPhot
 using CrowdPhot.Roman: crds_gridded_epsf, load_l2, load_area, DQ_FLAGS, dq_mask_value,
-    parse_dq_mask, jansky_per_flux_unit
+    parse_dq_mask, bad_pixel_mask, jansky_per_flux_unit
 using CrowdPhot.PSF: GriddedPSFModel, ImagePSF, pixel_response_kernel
 using ASDF
 using OrderedCollections: OrderedDict
+using StableRNGs: StableRNG
 using Test
 
 # No synthetic fixture here touches the real (170 MB) Roman CRDS reference
@@ -264,6 +265,37 @@ end
     @test parse_dq_mask(dq) isa BitMatrix
 end
 
+@testset "bad_pixel_mask" begin
+    # A noisy flat sky with a bright star, whose error rises with its own flux, and one planted pixel
+    # of each kind.  Nothing else may be flagged: no noise pixel is 10σ low, and no star pixel's
+    # error is 10 times its neighbors'.
+    ny, nx = 40, 50
+    sky, σ = 2.0, 0.1
+    star = [1000 * exp(-((i - 20)^2 + (j - 25)^2) / (2 * 1.2^2)) for i in 1:ny, j in 1:nx]
+    data = sky .+ star .+ σ .* randn(StableRNG(1), ny, nx)
+    err = sqrt.(σ^2 .+ 0.01 .* star)
+    dq = zeros(UInt32, ny, nx)
+    data[5, 5] = -3.0; err[5, 5] = 0.05                     # cold: a falling ramp, read noise only
+    data[15, 5] = 0.5; err[15, 5] = 0.6                     # warm: 15σ_sky low but 2.5 of its own err, 6x its neighbors'
+    err[10, 40] = 5.0                                       # hot, data at the sky
+    data[30, 10] = 60.0; err[30, 10] = 3.0                  # hot spike with high data (no data guard)
+    err[30, 40] = 5.0; dq[30, 40] = DQ_FLAGS[:SATURATED]    # noisier ramp: exempt from the hot rule
+    err[35, 5] = 0.0; dq[35, 5] = DQ_FLAGS[:SATURATED]      # saturated from the first read: invalid error
+    data[2, 45] = NaN                                       # invalid data
+    data[38, 48] = -1.0e4; err[38, 48] = 0.0; dq[38, 48] = DQ_FLAGS[:DO_NOT_USE]   # already flagged
+    r = bad_pixel_mask(data, err, dq)
+    @test r.mask isa BitMatrix
+    @test Set(findall(r.mask)) == Set(CartesianIndex.([(5, 5), (10, 40), (30, 10), (35, 5), (2, 45)]))
+    @test (r.n_err, r.n_cold, r.n_hot) == (2, 1, 2)
+    # without the DQ array nothing is exempt or already flagged
+    r0 = bad_pixel_mask(data, err)
+    @test r0.mask[30, 40] && r0.mask[38, 48]
+    # the thresholds are keywords
+    @test bad_pixel_mask(data, err, dq; k_cold = 100).n_cold == 0      # -3 is 50σ below the sky
+    @test bad_pixel_mask(data, err, dq; k_hot = 100).n_hot == 0        # 50 times its neighbors
+    @test_throws "err has size" bad_pixel_mask(data, err[1:10, :])
+end
+
 @testset "load_l2 and load_area" begin
     # Round-trip through a synthetic L2 tree.  The load path is one
     # `permutedims` per array, so the thing worth testing is that the
@@ -302,6 +334,16 @@ end
         @test l2.meta["exposure"]["effective_exposure_time"] == 100.0
         # The flag set is a keyword, not hardcoded.
         @test count(load_l2(path; dq_flags = (:HOT,)).dq) == 1
+        # bad_pixel_mask runs by default and adds to the DQ mask; nothing in this image is bad
+        @test l2.n_bad == (; n_err = 0, n_cold = 0, n_hot = 0)
+        @test load_l2(path; bad_pixels = false).n_bad === nothing
+        err0 = copy(err); err0[1, 1] = 0                   # (y, x) = (1, 1): an infinite weight
+        tree0 = OrderedDict("roman" => merge(tree["roman"], OrderedDict("err" => nd(err0, "float32"))))
+        path0 = joinpath(dir, "l2_bad.asdf")
+        ASDF.save(path0, tree0)
+        l2b = load_l2(path0)
+        @test l2b.dq[1, 1] && count(l2b.dq) == 3 && l2b.n_bad.n_err == 1
+        @test !load_l2(path0; bad_pixels = false).dq[1, 1]
 
         area_tree = OrderedDict("roman" => OrderedDict(
             "meta" => OrderedDict("useafter" => "2020-01-01"), "data" => nd(data, "float32")))

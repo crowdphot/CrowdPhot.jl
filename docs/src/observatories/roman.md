@@ -30,7 +30,9 @@ convention of [`CrowdPhot.fit_all_stars_multipass`](@ref), so it can be passed
 straight through.
 
 Which flags count as unusable is the `dq_flags` keyword.
-See [Data quality flags](@ref roman_dq) below.
+See [Data quality flags](@ref roman_dq) below. By default `load_l2` also
+marks unusable pixels that the DQ array does not
+flag, with [`bad_pixel_mask`](@ref).
 
 [`load_area`](@ref) reads a pixel area map (PAM) reference file the same way.
 
@@ -192,5 +194,6 @@ jansky_per_flux_unit
 DQ_FLAGS
 dq_mask_value
 parse_dq_mask
+bad_pixel_mask
 crds_gridded_epsf
 ```

@@ -94,3 +94,63 @@ function parse_dq_mask(mask::AbstractMatrix{UInt32};
     bitmask = dq_mask_value(flags)
     return (mask .& bitmask) .!= 0
 end
+
+"""
+    bad_pixel_mask(data, err, dq = nothing; flags = (:DO_NOT_USE, :NO_LIN_CORR), k_cold = 10, k_hot = 10,
+                   hot_exempt = (:SATURATED, :JUMP_DET)) -> NamedTuple
+
+Pixels of a calibrated (Level 2) image that are unusable although their DQ does not mark them.
+Three rules are applied to the pixels that do not already carry any of `flags` in the raw `dq` array:
+
+- **invalid error**: `err` is not finite or is `<= 0`, or `data` is not finite.  A zero error is an
+  infinite `1 / err^2` weight (for example, pixels saturated from the first read but not marked
+  `DO_NOT_USE`).
+- **cold**: `data < sky - k_cold * max(σ_sky, err)`, where `sky` and `σ_sky` are the median `data` and
+  the median `err` of the usable pixels.  No source makes a pixel darker than the sky, so one global
+  noise level serves, where a local one would be inflated by neighboring stars.  Defects that read low
+  (a falling ramp) often have only the read noise in `err`, which gives them more weight than their
+  neighbors.  The pixel's own `err` keeps noisy (warm) pixels from being masked only when they
+  fluctuate low, which would bias the ones kept high.
+- **hot**: `err > k_hot` times the median `err` of the pixel's usable neighbors (of its 8).  A star's
+  error varies smoothly across its footprint, so one pixel this far above its neighbors is a hot pixel
+  or an unflagged cosmic ray.  Pixels carrying any of `hot_exempt`, whose ramps are legitimately
+  noisier, are not tested; nor are pixels with fewer than 3 usable neighbors.
+
+The sky is one median per image: a background that varies by more than a few `σ_sky` across the image
+makes the cold rule flag its faintest parts.
+
+Returns `(; mask, n_err, n_cold, n_hot)`.  `mask::BitMatrix` is `true` where a rule fires, and never on
+pixels already carrying `flags`.  The counts are per rule; each pixel is counted under the first rule
+above that it fails.  [`load_l2`](@ref) applies this by default.
+"""
+function bad_pixel_mask(data::AbstractMatrix{<:Real}, err::AbstractMatrix{<:Real}, dq::Union{Nothing, AbstractMatrix{UInt32}} = nothing;
+                        flags = (:DO_NOT_USE, :NO_LIN_CORR), k_cold::Real = 10, k_hot::Real = 10, hot_exempt = (:SATURATED, :JUMP_DET))
+    size(err) == size(data) || throw(DimensionMismatch("err has size $(size(err)) but data has size $(size(data))"))
+    dq === nothing || size(dq) == size(data) || throw(DimensionMismatch("dq has size $(size(dq)) but data has size $(size(data))"))
+    flagged = dq === nothing ? falses(size(data)) : parse_dq_mask(dq; flags)
+    exempt = dq === nothing ? falses(size(data)) : parse_dq_mask(dq; flags = hot_exempt)
+    bad_err = .!flagged .& .!(isfinite.(data) .& isfinite.(err) .& (err .> 0))
+    usable = .!(flagged .| bad_err)
+    cold = falses(size(data)); hot = falses(size(data))
+    if any(usable)
+        sky = median(data[usable])
+        σ_sky = median(err[usable])
+        cold .= usable .& (data .< sky .- k_cold .* max.(σ_sky, err))
+        ny, nx = size(err); buf = Vector{Float64}(undef, 8)
+        for j in 1:nx, i in 1:ny
+            (usable[i, j] && !exempt[i, j] && !cold[i, j]) || continue
+            n = 0
+            for dj in -1:1, di in -1:1
+                (di == 0 && dj == 0) && continue
+                a = i + di; b = j + dj
+                (1 <= a <= ny && 1 <= b <= nx && usable[a, b]) || continue
+                n += 1; buf[n] = err[a, b]
+            end
+            n >= 3 || continue
+            sort!(view(buf, 1:n))
+            m = isodd(n) ? buf[(n + 1) ÷ 2] : (buf[n ÷ 2] + buf[n ÷ 2 + 1]) / 2
+            hot[i, j] = err[i, j] > k_hot * m
+        end
+    end
+    return (; mask = bad_err .| cold .| hot, n_err = count(bad_err), n_cold = count(cold), n_hot = count(hot))
+end
