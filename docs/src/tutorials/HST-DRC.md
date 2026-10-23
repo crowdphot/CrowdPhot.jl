@@ -18,9 +18,10 @@ artifacts_toml = joinpath(pkgdir(CrowdPhot), "docs", "Artifacts.toml")
 artifact_dir = Pkg.Artifacts.ensure_artifact_installed("jbjl03010_drc", artifacts_toml)
 fits_path = joinpath(artifact_dir, "jbjl03010_drc.fits")
 
-# Load relevant parts from FITS file
+# Load relevant parts from FITS file. FITSIO returns arrays as `[x, y]` (FITS axis 1 first),
+# so permute them to CrowdPhot's `image[y, x]` convention.
 hdr, sci_hdr, img, weights = FITS(fits_path) do fits
-    read_header(fits[1]), read_header(fits[2]), read(fits[2]), read(fits[3])
+    read_header(fits[1]), read_header(fits[2]), permutedims(read(fits[2])), permutedims(read(fits[3]))
 end
 
 # Plot image
