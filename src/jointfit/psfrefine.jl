@@ -33,8 +33,10 @@ images' PSFs must be `ImagePSF`s or `GriddedPSFModel`s of them; the run's result
 refined PSFs (`psfs`).  Not supported by `fit_joint_tiled`.
 
 - `passes = 1:typemax(Int)`
-- `window = 6`: refined half-width (native px).  Each star contributes its pixels within
-  min(window, model radius)
+- `window = nothing`: half-width (native px) of the refinement box, by default the fit's `R_fit`.
+  Each star contributes its pixels within `min(window, model radius)`.  A window beyond `R_fit` is logged
+  as a warning: its samples outside the fit stamp are constrained only by this step and its prior,
+  which can lead to the fit and the PSF refinement diverging when running many passes
 - `snr_min = 20`, `max_stars = 100_000`: stars with band S/N >= `snr_min` constrain their band's
   PSFs; beyond `max_stars` per band (one list for all of the band's PSF groups), a fixed random
   subset
@@ -69,7 +71,7 @@ refined PSFs (`psfs`).  Not supported by `fit_joint_tiled`.
 """
 Base.@kwdef struct PSFRefineOptions
     passes::UnitRange{Int} = 1:typemax(Int)
-    window::Int = 6
+    window::Union{Nothing, Int} = nothing
     snr_min::Float64 = 20.0
     max_stars::Int = 100_000
     eps::Float64 = 0.1
@@ -104,24 +106,24 @@ end
 
 """
 Per PSF group, fixed for the run: images, band, device node indices `nodes` (local node `n` is
-`nodes[n]`), window geometry (node rows `r0 : r0 + nw - 1`, columns `c0 : c0 + nw - 1`), the
+`nodes[n]`), the refined half-width `window` (native px), window geometry (node rows `r0 : r0 + nw - 1`, columns `c0 : c0 + nw - 1`), the
 reference window values `ref` (`nw x nw x N`, Float64), the prior precision blocks `Pk`
 (`N x N x nw²`), the gauge basis `gq` (`3 x nw²`: each sample's orthonormal vectors of its
 phase sub-lattice) with the sub-lattices' first rows `ra` and columns `ca` and each window row's and
 column's phase index `rph` / `cph`, and the host model `hpsf` the refinement updates.
 """
-function _refine_group_setup(sc, g, imgs, band, nodes, o::PSFRefineOptions)
+function _refine_group_setup(sc, g, imgs, band, nodes, window, o::PSFRefineOptions)
     T = eltype(sc); be = sc.backend
     n1 = g.psfs[1]
     sx, sy = n1.oversampling
     all(n -> n.oversampling == n1.oversampling && n.origin == n1.origin && size(n.data) == size(n1.data), g.psfs) ||
         throw(ArgumentError("psf_refine needs every node of a PSF to share its origin, oversampling and size"))
-    hw = max(sx, sy) * o.window + 2
+    hw = max(sx, sy) * window + 2
     oyf, oxf = Float64(n1.origin.y), Float64(n1.origin.x)
     r0 = round(Int, oyf) - hw; c0 = round(Int, oxf) - hw; nw = 2hw + 1
     nd1, nd2 = size(n1.data)
     (r0 >= 1 && c0 >= 1 && r0 + nw - 1 <= nd1 && c0 + nw - 1 <= nd2) ||
-        throw(ArgumentError("psf_refine window ($(o.window) px) exceeds the PSF's $(nd1)x$(nd2) node data"))
+        throw(ArgumentError("psf_refine window ($window px) exceeds the PSF's $(nd1)x$(nd2) node data"))
     N = length(g.psfs); ns = nw * nw
     ref = [Float64(nd.data[r0 + r - 1, c0 + c - 1]) for r in 1:nw, c in 1:nw, nd in g.psfs]
     τ = o.tau * maximum(maximum(Float64, nd.data) for nd in g.psfs)
@@ -145,15 +147,17 @@ function _refine_group_setup(sc, g, imgs, band, nodes, o::PSFRefineOptions)
     for c in 1:nw; ca[phx(c) + 1] == 0 && (ca[phx(c) + 1] = c); end
     hpsf = GriddedPSFModel([ImagePSF(copy(nd.data); origin = nd.origin, oversampling = nd.oversampling, fill_value = nd.fill_value) for nd in g.psfs],
                            g.grid_y, g.grid_x)
-    return (; images = imgs, band, nodes, N, sy, sx, r0, c0, nw, ref, Pk, gq = to_device(be, T, gq), ra = to_device(be, ra),
+    return (; images = imgs, band, nodes, window, N, sy, sx, r0, c0, nw, ref, Pk, gq = to_device(be, T, gq), ra = to_device(be, ra),
               ca = to_device(be, ca), rph = to_device(be, Int32[phy(r) + 1 for r in 1:nw]), cph = to_device(be, Int32[phx(c) + 1 for c in 1:nw]),
               hpsf, xcur = zeros(N * ns))
 end
 
-"Groups of the run's PSFs (the device's node sharing), each set up by `_refine_group_setup`."
-function _refine_setup(sc::JointScene, psfs, o::PSFRefineOptions)
+"Groups of the run's PSFs (the device's node sharing), each set up by `_refine_group_setup` with the window (`R_fit` by default)."
+function _refine_setup(sc::JointScene, psfs, o::PSFRefineOptions, R_fit)
     _check_refine_options(o)
     sc.dev.psf isa DevGridded || throw(ArgumentError("psf_refine needs ImagePSF or GriddedPSFModel PSFs (not CircularGaussianPRF)"))
+    window = something(o.window, R_fit)
+    window > R_fit && @warn "psf_refine window ($window px) exceeds R_fit ($R_fit px): the PSF samples outside the fit stamp are constrained only by the refinement and its prior, and can diverge over the passes"
     gs = map(_as_gridded, psfs)
     units = [unit_psf(g, 0, 0) for g in gs]
     reps, slot = _groups((r, e) -> _same_content(units[r], units[e]), length(gs))   # as `device_psf`
@@ -162,7 +166,7 @@ function _refine_setup(sc::JointScene, psfs, o::PSFRefineOptions)
     return map(enumerate(reps)) do (i, r)
         imgs = findall(==(i), slot)
         all(e -> bands[e] == bands[r], imgs) || throw(ArgumentError("psf_refine: images sharing a PSF must share a band"))
-        _refine_group_setup(sc, gs[r], imgs, Int(bands[r]), Int32.(base[i] .+ (1:length(gs[r].psfs))), o)
+        _refine_group_setup(sc, gs[r], imgs, Int(bands[r]), Int32.(base[i] .+ (1:length(gs[r].psfs))), window, o)
     end
 end
 
@@ -887,7 +891,7 @@ function _refine_problem(st, g, θd, snr, ay, ax, mR, o::PSFRefineOptions; reser
     eimg = Int32[]; estar = Int32[]; erb = Int32[]
     for e in g.images, s in cand
         mR[s, e] > 0 || continue
-        push!(eimg, e); push!(estar, s); push!(erb, min(o.window, mR[s, e]))
+        push!(eimg, e); push!(estar, s); push!(erb, min(g.window, mR[s, e]))
     end
     n = length(eimg)
     n == 0 && return nothing
@@ -973,6 +977,13 @@ end
 # The operators' work buffers for problem p (Y padded for rf_adj_kernel!'s tiles).
 _rf_buffers(p, be, ::Type{T}) where {T} = (; Xb = KA.zeros(be, T, p.nx), V = KA.zeros(be, T, p.nf), Y = KA.zeros(be, T, p.nf + RF_YPAD),
                                             part = KA.zeros(be, T, p.npart), ys = KA.zeros(be, T, 3, 1))
+
+# Rough peak device memory (bytes) of group g's step on problem p: per stamp pixel fent, srow, rlist,
+# a quarter of fq (Int32) and S, V, Y; per row rowpix, rptr (Int32) and r, W, m plus the solve's five
+# row vectors; per adjoint partial part and xidx; per entry A and nine Int32 tables; Xb; per window
+# sample the prior and preconditioner blocks, xptr and the CG's six vectors (with their star parts).
+_refine_memory(p, g, ::Type{T}) where {T} = (t = sizeof(T); np = g.N * g.nw^2;
+    (13 + 5t) * p.nf + (8 + 8t) * p.nr + (4 + t) * p.npart + (36 + 64t) * p.n + t * p.nx + (2g.N * t + 6t + 4) * np + 18t * p.ns)
 
 # J v: rows of the PSF part (x) plus the star part (y); either may be `nothing`.
 function _rf_J!(out, x, y, p, g, buf, be)
@@ -1125,7 +1136,7 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
         return proj!(out)
     end
     r = similar(z); q = similar(z); zz = similar(z); pk = similar(z); b = similar(z)
-    nbin = o.window + 1
+    nbin = g.window + 1
     chi = KA.zeros(be, T, ns); cnt = KA.zeros(be, Int32, ns); prof = KA.zeros(be, T, nbin, ns); pcnt = KA.zeros(be, Int32, nbin, ns)
     starchi!() = launch!(rf_star_chi_kernel!, be, ns, chi, cnt, prof, pcnt, e, p.W, p.m, ρ, p.d.srow, p.d.sptr, p.d.slist, p.d.soff,
                          p.d.ebatch, p.d.bP, p.fstar, T(o.mu))
@@ -1251,12 +1262,14 @@ function _refine!(st, groups, θh, hd, lo; reserve = nothing)
     stats = []
     rows = (; col = Int[], group = Int[], band = Symbol[], reserve = Bool[], rejected = Bool[], fit = Bool[], snr = Float64[],
               chi2 = Float64[], dof = Int[])
-    nbin = o.window + 1; nsb = length(RF_SNR_EDGES) - 1
+    nsb = length(RF_SNR_EDGES) - 1
     for (gi, g) in enumerate(groups)
+        nbin = g.window + 1
         t_build = @elapsed p = _refine_problem(st, g, θd, snr, ay, ax, mR, o; reserve)
         if p === nothing
             push!(stats, (; band = sc.bands[g.band], nsel = 0, n_reserve = 0, n_masked = 0, n_rejected = 0, rows = 0, iters = Int[], wfrac = NaN,
-                          chi2_fit = NaN, chi2_reserve = NaN, prof_fit = fill(NaN, nbin, nsb), prof_reserve = fill(NaN, nbin, nsb), t_build, t_solve = 0.0))
+                          chi2_fit = NaN, chi2_reserve = NaN, prof_fit = fill(NaN, nbin, nsb), prof_reserve = fill(NaN, nbin, nsb), t_build, t_solve = 0.0,
+                          mem_est = 0))
             continue
         end
         t_solve = @elapsed sol = _refine_solve(p, g, o, be, T)
@@ -1286,7 +1299,7 @@ function _refine!(st, groups, θh, hd, lo; reserve = nothing)
         end
         push!(stats, (; band = sc.bands[g.band], nsel = length(p.stars), n_reserve = count(p.reserve), n_masked = count(p.masked), n_rejected = count(sol.rejected),
                       rows = p.nr, sol.iters, sol.wfrac, chi2_fit = red(fit), chi2_reserve = red(p.reserve), prof_fit = prof(fit),
-                      prof_reserve = prof(p.reserve), t_build, t_solve))
+                      prof_reserve = prof(p.reserve), t_build, t_solve, mem_est = _refine_memory(p, g, T)))
         append!(rows.col, p.stars); append!(rows.group, fill(gi, length(p.stars))); append!(rows.band, fill(sc.bands[g.band], length(p.stars)))
         append!(rows.reserve, p.reserve); append!(rows.rejected, sol.rejected); append!(rows.fit, fit); append!(rows.snr, ssnr)
         append!(rows.chi2, sol.chi2); append!(rows.dof, dof)

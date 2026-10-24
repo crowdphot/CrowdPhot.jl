@@ -293,7 +293,7 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         st = (; sc, images, rt, jd, tmpl, work = LinearizeWork(sc; bkg), bset,
                 bkg, rms = similar(sc.data), tmp = similar(sc.data), bmask = map!(w -> !(isfinite(w) && w > 0), KA.allocate(sc.backend, Bool, length(sc.weight)), sc.weight),
                 det_data, det_iv, psfs, offs, ivs)
-        groups = o.psf_refine === nothing ? nothing : _refine_setup(sc, psfs, o.psf_refine)
+        groups = o.psf_refine === nothing ? nothing : _refine_setup(sc, psfs, o.psf_refine, f.R_fit)
     end
     P = nparams(sc)
     θh = zeros(P, 0); born = Int[]; disc = NTuple{2, Float64}[]
@@ -311,10 +311,6 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         isempty(born) && (push!(history, (; pass, dn.n_peaks, n_new = 0, n_catalog = 0)); continue)
         t_fit = @elapsed r = fit_pass(sc, to_device(backend, T, θh), rt, f, λ; n_new, work = st.work)
         mem_est = _memory_estimate(sc, size(r.θ, 2), size(r.lin.Ho, 3))
-        if !mem_warned && (is_cpu(backend) || Sys.isapple()) && mem_est > Sys.total_memory() / 2
-            mem_warned = true
-            @warn "Estimated peak memory $(round(mem_est / 1e9, digits = 1)) GB at pass $pass ($(size(r.θ, 2)) sources) exceeds half of the system memory ($(round(Sys.total_memory() / 1e9, digits = 1)) GB); fit a smaller area per run."
-        end
         θh = Float64.(Array(r.θ)); λ = r.λ
         hd = Array(r.lin.hdiag)
         js = _flux_significance(θh, hd)
@@ -332,6 +328,12 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         if groups !== nothing && pass in o.psf_refine.passes && size(θh, 2) > 0
             t_refine = @elapsed (st, θh, refine, psf_stars) = _refine!(st, groups, θh, hd[:, keep], o; reserve = resv)
             rt = st.rt
+            # the fit's arrays are still live during the refinement, whose groups run one at a time
+            mem_est += maximum(g -> g.mem_est, refine)
+        end
+        if !mem_warned && (is_cpu(backend) || Sys.isapple()) && mem_est > Sys.total_memory() / 2
+            mem_warned = true
+            @warn "Estimated peak memory $(round(mem_est / 1e9, digits = 1)) GB at pass $pass ($(size(r.θ, 2)) sources) exceeds half of the system memory ($(round(Sys.total_memory() / 1e9, digits = 1)) GB); fit a smaller area per run."
         end
         h = (; pass, dn.n_peaks, dn.n_gated, n_dup_cat = dn.nd_cat, n_dup_disc = dn.nd_disc, n_new, n_pruned_snr = n_snr,
                n_pruned_close = n_close, n_catalog = length(born), n_new_surviving = n_surv, λ, r.stats..., mem_est, t_bkg, t_det, t_fit,
