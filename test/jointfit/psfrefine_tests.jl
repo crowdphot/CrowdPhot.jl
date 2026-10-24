@@ -2,7 +2,7 @@ using CrowdPhot
 using CrowdPhot.Joint
 using CrowdPhot.PSF: CircularGaussianPRF, ImagePSF, GriddedPSFModel, evaluate
 using StableRNGs: StableRNG
-using LinearAlgebra: dot, I
+using LinearAlgebra: dot, I, eigvals, Symmetric
 using Test
 
 const J = CrowdPhot.Joint
@@ -151,6 +151,25 @@ end
     @test sl30.x == sl.x && sl30.d == sl.d
 end
 
+@testset "star blocks in Float32" begin
+    # one star's 3x3 block Σ w s sᵀ and its preconditioner inverse, from stamp pixels with derivatives S
+    function block(S, w)
+        nf = size(S, 2); H = zeros(Float32, 9, 1); Hi = zeros(Float32, 9, 1)
+        J.launch!(J.rf_star_block_kernel!, J.KA.CPU(), 1, H, Hi, Float32.(S), Float32.(w), Int32[1, 2], Int32[1], Int32[0], Int32[1], Int32[isqrt(nf)])
+        return reshape(Float64.(H), 3, 3), reshape(Float64.(Hi), 3, 3)
+    end
+    posdef(M) = all(>(0), eigvals(Symmetric((M + M') / 2)))
+    # one usable pixel (rank 1, from a run whose Float32 inverse of H + 1e-9 I was NaN), and an extreme flux
+    for (S, w) in (([-531.43567; 622.52844; 0.021237567;;], [21.181997]), (randn(StableRNG(2), 3, 9) .* [1e9, 1e9, 1e-3], fill(50.0, 9)))
+        H, Hi = block(S, w)
+        @test all(isfinite, Hi) && posdef(Hi)
+    end
+    # a well-determined star: about the inverse; a star with every pixel rejected: 1/ε
+    S = randn(StableRNG(3), 3, 25) .* [10.0, 10.0, 1e-3]; H, Hi = block(S, fill(50.0, 25))
+    @test Hi ≈ inv(H) rtol = 0.05
+    @test block(S, zeros(25))[2] ≈ 1e9 * I rtol = 1e-5
+end
+
 @testset "reserved stars and the star-level test" begin
     # reserved stars never constrain the PSF: with every star reserved the correction stays zero
     f = refine_field(; ref = gridded(2.2), truth = gridded(2.3))
@@ -169,7 +188,20 @@ end
     # on the clean field none is rejected
     sn = refine_state(refine_field(; noise = sqrt(20.0), sky = 20.0); o = ot)
     @test !any(J._refine_solve(sn.p, sn.g, ot, sn.sc.backend, Float64).rejected)
+    # a star whose stamp is mostly masked (zero weight) is rejected from the start, and only it
+    f = refine_field(); s0 = refine_state(f; o); d = s0.p.d
+    ent(b) = findall(i -> s0.p.stars[d.eloc[i]] == b, eachindex(d.eloc))
+    b = argmax(b -> all(k -> 6 <= d.eay[k] <= 85 && 6 <= d.eax[k] <= 85, ent(b)) ? f.θ[3, b] : -Inf, s0.p.stars)    # the brightest interior star
+    for k in ent(b)
+        f.imgs[d.eimg[k]].weight[d.eay[k] .+ (-2:2), d.eax[k] .+ (-2:2)] .= 0      # 25 of the 7 x 7 stamp
+    end
+    sm = refine_state(f; o)
+    @test sm.p.masked == (sm.p.stars .== b)
+    @test J._refine_solve(sm.p, sm.g, o, sm.sc.backend, Float64).rejected == sm.p.masked
+    om = PSFRefineOptions(window = 3, max_masked = 0.6)
+    @test !any(refine_state(f; o = om).p.masked)
     # options
+    @test_throws "max_masked must be in [0, 1]" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(max_masked = 1.5))
     @test_throws "psf_refine needs irls >= 1" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(irls = 0))
     @test_throws "reserve_frac must be in [0, 1)" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(reserve_frac = 1.0))
 end

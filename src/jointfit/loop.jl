@@ -247,7 +247,7 @@ and S/N bin), whose `mem_est` is a rough peak memory in bytes (a warning is logg
 or an Apple GPU if it exceeds half of `Sys.total_memory()`); whether the stopping rule fired
 (`converged`); `products`; with PSF refinement, the refined `psfs` and `psf_stars`, a
 `StructArray` with one row per (star, PSF group) of the last refinement's step: `row` (the
-star's `catalog` row), `group`, `band`, `reserve`, `rejected` (by the star-level test), `fit`
+star's `catalog` row), `group`, `band`, `reserve`, `rejected` (by the star-level test or `max_masked`), `fit`
 (constrained the PSF to the end of the step), `snr`, and the star's `chi2` over its usable pixels
 at the solution with `dof` (pixels - 3).
 
