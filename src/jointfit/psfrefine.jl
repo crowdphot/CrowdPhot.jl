@@ -52,6 +52,9 @@ refined PSFs (`psfs`).  Not supported by `fit_joint_tiled`.
   Recommended 0.1-0.2 when validating on data without truth: the reserved stars' χ²/dof in the
   run history is a held-out check of the PSF.  At 0.15 the catalog changes were within the
   scatter between settings on test data
+- `max_masked = 0.25`: a star whose stamps' in-image pixels are more than this fraction masked
+  (zero weight; e.g. on a saturated star's flagged core) does not constrain the PSF (as a rejected
+  star): its band flux rests on the few pixels left and can be far off
 - `star_nsigma = nothing`, `star_max_remove = 0.01`: with a number, the star-level outlier test
   after the first IRLS round: a fitting star whose χ² over its usable pixels (robust scale, pixels
   already rejected excluded) exceeds the `star_nsigma` point of the χ² distribution for its
@@ -83,12 +86,14 @@ Base.@kwdef struct PSFRefineOptions
     reserve_seed::Int = 1
     star_nsigma::Union{Nothing, Float64} = nothing
     star_max_remove::Float64 = 0.01
+    max_masked::Float64 = 0.25
 end
 
 function _check_refine_options(o::PSFRefineOptions)
     o.irls >= 1 || throw(ArgumentError("psf_refine needs irls >= 1: the later rounds reweight against the refined PSF, and the star-level test runs between rounds"))
     0 <= o.reserve_frac < 1 || throw(ArgumentError("psf_refine reserve_frac must be in [0, 1)"))
     0 <= o.star_max_remove <= 1 || throw(ArgumentError("psf_refine star_max_remove must be in [0, 1]"))
+    0 <= o.max_masked <= 1 || throw(ArgumentError("psf_refine max_masked must be in [0, 1]"))
     (o.star_nsigma === nothing || o.star_nsigma > 0) || throw(ArgumentError("psf_refine star_nsigma must be positive or nothing"))
     return o
 end
@@ -406,7 +411,7 @@ end
     gy[1, s] = a1; gy[2, s] = a2; gy[3, s] = a3
 end
 
-# Each star's own 3x3 block Σ W S Sᵀ and the inverse of (block + 1e-9 I).
+# Each star's own 3x3 block Σ W S Sᵀ and, for the preconditioner, a regularized inverse of it.
 @kernel function rf_star_block_kernel!(H, Hi, @Const(S), @Const(Wst), @Const(sptr), @Const(slist), @Const(soff), @Const(ebatch), @Const(bP))
     s = @index(Global)
     T = eltype(H)
@@ -419,8 +424,14 @@ end
         end
     end
     Hm = SMatrix{3, 3, T}(h11, h12, h13, h12, h22, h23, h13, h23, h33)
-    ε = T(1e-9)
-    Hinv = inv(SMatrix{3, 3, T}(h11 + ε, h12, h13, h12, h22 + ε, h23, h13, h23, h33 + ε))
+    # inverted Jacobi-scaled (unit diagonal) with a relative ridge λ: the plain cofactor inverse of
+    # H + εI fails in Float32 for a star with 1-2 usable pixels (rank-deficient block: det rounds to 0,
+    # NaN; or to garbage, an indefinite preconditioner) and for an extreme flux (cofactors overflow).
+    # An all-rejected star (H = 0) still gets 1/ε.
+    ε = T(1e-9); λ = T(1e-2)
+    D = SVector{3, T}(inv(sqrt(h11 + ε)), inv(sqrt(h22 + ε)), inv(sqrt(h33 + ε)))
+    DD = D * D'
+    Hinv = DD .* inv(SMatrix{3, 3, T}(h11 + ε, h12, h13, h12, h22 + ε, h23, h13, h23, h33 + ε) .* DD + λ * one(SMatrix{3, 3, T})) .* (1 + λ)
     for q in 1:9
         H[q, s] = Hm[q]; Hi[q, s] = Hinv[q]
     end
@@ -938,9 +949,17 @@ function _refine_problem(st, g, θd, snr, ay, ax, mR, o::PSFRefineOptions; reser
     # coefficients, derivative stamps and the rows' data
     A = KA.allocate(be, T, 64, n); S = KA.allocate(be, T, 3, nf)
     launch!(rf_stamp_kernel!, be, n, A, S, pos, jac, ph, dd.eay, dd.eax, dd.eimg, dd.estar, dd.ebatch, dd.soff, dd.bP, dd.srow, θd, sc.dev)
+    # the in-image stamp pixels of each star and those usable (srow > 0: nonzero weight)
+    srowh = Array(dd.srow); nin = zeros(Int, ns_); nok = zeros(Int, ns_)
+    for k in 1:n
+        P = Int(bP[ebatch[k]]); R = (P - 1) ÷ 2; ny, nx = sc.dims[eimg[k]]
+        nin[eloc[k]] += (min(eay[k] + R, ny) - max(eay[k] - R, 1) + 1) * (min(eax[k] + R, nx) - max(eax[k] - R, 1) + 1)
+        nok[eloc[k]] += count(>(0), view(srowh, soff[k] .+ (1:P * P)))
+    end
+    masked = nok .< (1 - o.max_masked) .* nin
     res = Bool[reserve !== nothing && reserve[s] for s in stars]
-    smask = to_device(be, Int32.(.!res))
-    any(res) && launch!(rf_mask_kernel!, be, n, A, dd.eloc, smask)
+    smask = to_device(be, Int32.(.!(res .| masked)))
+    any(res .| masked) && launch!(rf_mask_kernel!, be, n, A, dd.eloc, smask)
     fstar = KA.allocate(be, T, ns_)
     launch!(rf_fstar_kernel!, be, ns_, fstar, θd, to_device(be, Int32.(stars)), 2 + g.band)
     r = KA.allocate(be, T, nr); W = KA.allocate(be, T, nr); m = KA.allocate(be, T, nr)
@@ -948,7 +967,7 @@ function _refine_problem(st, g, θd, snr, ay, ax, mR, o::PSFRefineOptions; reser
     KA.synchronize(be)
     foreach(KA.unsafe_free!, (values(dv)..., pos, jac, ks, L, ph))
     Pmax = Int(maximum(bP))
-    return (; n, nf, nq, nr, nb, ns = ns_, stars, reserve = res, smask, fstar, M = 64 * Pmax^2, nx = go, npart = po, nchunk = length(cb), d = dd, A, S, r, W, m)
+    return (; n, nf, nq, nr, nb, ns = ns_, stars, reserve = res, masked, smask, fstar, M = 64 * Pmax^2, nx = go, npart = po, nchunk = length(cb), d = dd, A, S, r, W, m)
 end
 
 # The operators' work buffers for problem p (Y padded for rf_adj_kernel!'s tiles).
@@ -1049,7 +1068,7 @@ reference, warm-started at the current one) and the stars' (u, v, flux) updates,
 with `star_nsigma`, the star-level test after the first round (which zeroes the rejected stars'
 PSF coefficients in `p.A`).  Returns the correction, the star updates (`3 x ns`), their
 information blocks (`9 x ns`), the fraction of rows with robust weight above 1/2, and per star at the solution
-its χ² and usable pixel count, whether it was rejected, and its ring sums of residual / flux and
+its χ² and usable pixel count, whether it was rejected (by the test or, from the start, `p.masked`), and its ring sums of residual / flux and
 their pixel counts (`(window + 1) x ns`).
 """
 function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
@@ -1110,7 +1129,7 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
     chi = KA.zeros(be, T, ns); cnt = KA.zeros(be, Int32, ns); prof = KA.zeros(be, T, nbin, ns); pcnt = KA.zeros(be, Int32, nbin, ns)
     starchi!() = launch!(rf_star_chi_kernel!, be, ns, chi, cnt, prof, pcnt, e, p.W, p.m, ρ, p.d.srow, p.d.sptr, p.d.slist, p.d.soff,
                          p.d.ebatch, p.d.bP, p.fstar, T(o.mu))
-    rejected = falses(ns)
+    rejected = copy(p.masked)
     cnts = KA.zeros(be, T, o.irls + 1)            # CG iterations per round, read with the diagnostics
     for round in 0:o.irls
         mul!_(Wρ, p.W, ρ)
@@ -1153,9 +1172,9 @@ function _refine_solve(p, g, o::PSFRefineOptions, be, ::Type{T}) where {T}
         # the star-level test, against the model after the first round's solve
         if round == 0 && o.star_nsigma !== nothing
             starchi!()
-            rej = _star_outliers(Float64.(Array(chi)), Int.(Array(cnt)), p.reserve, o)
+            rej = _star_outliers(Float64.(Array(chi)), Int.(Array(cnt)), p.reserve .| rejected, o)
             if any(rej)
-                rejected .= rej
+                rejected .|= rej
                 copyto!(p.smask, Int32.(.!(p.reserve .| rejected)))
                 launch!(rf_mask_kernel!, be, p.n, p.A, p.d.eloc, p.smask)
             end
@@ -1236,7 +1255,7 @@ function _refine!(st, groups, θh, hd, lo; reserve = nothing)
     for (gi, g) in enumerate(groups)
         t_build = @elapsed p = _refine_problem(st, g, θd, snr, ay, ax, mR, o; reserve)
         if p === nothing
-            push!(stats, (; band = sc.bands[g.band], nsel = 0, n_reserve = 0, n_rejected = 0, rows = 0, iters = Int[], wfrac = NaN,
+            push!(stats, (; band = sc.bands[g.band], nsel = 0, n_reserve = 0, n_masked = 0, n_rejected = 0, rows = 0, iters = Int[], wfrac = NaN,
                           chi2_fit = NaN, chi2_reserve = NaN, prof_fit = fill(NaN, nbin, nsb), prof_reserve = fill(NaN, nbin, nsb), t_build, t_solve = 0.0))
             continue
         end
@@ -1250,7 +1269,7 @@ function _refine!(st, groups, θh, hd, lo; reserve = nothing)
             gp[1, s] += h[1] * d[1] + h[4] * d[2]; gp[2, s] += h[2] * d[1] + h[5] * d[2]
             Hf[row, s] += h[9]; gf[row, s] += h[9] * d[3]
         end
-        # the step's stars: fitting (constrained the PSF to the end), reserved, rejected by the star test
+        # the step's stars: fitting (constrained the PSF to the end), reserved, rejected (star test or max_masked)
         fit = .!(p.reserve .| sol.rejected); dof = sol.npix .- 3
         ssnr = [snr[g.band, s] for s in p.stars]
         red(m) = (k = m .& (dof .> 0); any(k) ? median(sol.chi2[k] ./ dof[k]) : NaN)
@@ -1265,7 +1284,7 @@ function _refine!(st, groups, θh, hd, lo; reserve = nothing)
             end
             return P
         end
-        push!(stats, (; band = sc.bands[g.band], nsel = length(p.stars), n_reserve = count(p.reserve), n_rejected = count(sol.rejected),
+        push!(stats, (; band = sc.bands[g.band], nsel = length(p.stars), n_reserve = count(p.reserve), n_masked = count(p.masked), n_rejected = count(sol.rejected),
                       rows = p.nr, sol.iters, sol.wfrac, chi2_fit = red(fit), chi2_reserve = red(p.reserve), prof_fit = prof(fit),
                       prof_reserve = prof(p.reserve), t_build, t_solve))
         append!(rows.col, p.stars); append!(rows.group, fill(gi, length(p.stars))); append!(rows.band, fill(sc.bands[g.band], length(p.stars)))
