@@ -37,7 +37,7 @@ function refine_state(f; T = Float64, o = PSFRefineOptions(window = 3), reserve 
     rt = J.RadiusTable(sc, psfs, [im.weight for im in f.imgs]; model_rad = 3, R_fit = 3, R_cap = 30)
     st = (; sc, images = f.imgs, rt, bkg = J.KA.zeros(sc.backend, T, length(sc.data)), work = (; model = similar(sc.data)))
     θd = T.(f.θ); fp = J.footprint(sc, θd, rt); J.render!(st.work.model, sc, θd, fp)
-    groups = J._refine_setup(sc, psfs, o)
+    groups = J._refine_setup(sc, psfs, o, 3)
     snr = fill(1e3, 1, size(f.θ, 2))
     p = J._refine_problem(st, groups[1], θd, snr, Array(fp.ay), Array(fp.ax), Array(fp.mR), o; reserve)
     buf = J._rf_buffers(p, sc.backend, T)
@@ -200,10 +200,14 @@ end
     @test J._refine_solve(sm.p, sm.g, o, sm.sc.backend, Float64).rejected == sm.p.masked
     om = PSFRefineOptions(window = 3, max_masked = 0.6)
     @test !any(refine_state(f; o = om).p.masked)
-    # options
-    @test_throws "max_masked must be in [0, 1]" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(max_masked = 1.5))
-    @test_throws "psf_refine needs irls >= 1" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(irls = 0))
-    @test_throws "reserve_frac must be in [0, 1)" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(reserve_frac = 1.0))
+    # options: the window defaults to R_fit; a wider one warns
+    psfs = [im.psf for im in f.imgs]
+    @test only(J._refine_setup(s.sc, psfs, PSFRefineOptions(), 2)).window == 2
+    @test only(@test_logs J._refine_setup(s.sc, psfs, PSFRefineOptions(window = 2), 3)).window == 2
+    @test only(@test_logs (:warn, r"window \(4 px\) exceeds R_fit \(3 px\)") J._refine_setup(s.sc, psfs, PSFRefineOptions(window = 4), 3)).window == 4
+    @test_throws "max_masked must be in [0, 1]" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(max_masked = 1.5), 3)
+    @test_throws "psf_refine needs irls >= 1" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(irls = 0), 3)
+    @test_throws "reserve_frac must be in [0, 1)" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(reserve_frac = 1.0), 3)
 end
 
 @testset "fit_joint_multipass with psf_refine" begin
@@ -213,6 +217,8 @@ end
     R = fit_joint_multipass(f.imgs, f.frame; options = o)
     R0 = fit_joint_multipass(f.imgs, f.frame)
     @test all(h -> h.t_refine > 0 && only(h.refine).nsel > 0, R.history)
+    # the refinement's memory is in the pass's estimate
+    @test all(h -> only(h.refine).mem_est > 0 && h.mem_est >= 87 * sum(im -> length(im.data), f.imgs) + only(h.refine).mem_est, R.history)
     @test R0.psfs == [im.psf for im in f.imgs]
     @test R0.psf_stars === nothing
     # psf_stars: one row per star of the last step, pointing at catalog rows near the star
