@@ -20,6 +20,10 @@
 - `band_weights = Dict()`: detection weights per band (missing bands weigh 1)
 - `min_separation = 1.0`: new peaks within this of a catalog or discarded source are dropped
   (discarded: pruned in a pass after the first, whose background still holds the stars' light)
+- `discard_passes = nothing`: how many passes a discarded source blocks re-detection for
+  (`nothing`: the rest of the run; `0`: never).  The log stops a spurious peak from being
+  re-detected and pruned in every pass, but also keeps out real stars pruned while a bright
+  neighbor's flux was still converging
 - `prune_snr_min = 3 detect_sigma / 5`, `prune_separation = 0.5`
 
   Both are tighter than the single-image defaults (1.5 and 1.0): a blend's second star can only
@@ -51,6 +55,7 @@ Base.@kwdef struct JointLoopOptions
     gate::Float64 = 2.0
     band_weights::Dict{Symbol, Float64} = Dict{Symbol, Float64}()
     min_separation::Float64 = 1.0
+    discard_passes::Union{Nothing, Int} = nothing
     prune_snr_min::Float64 = 3 * detect_sigma / 5
     prune_separation::Float64 = 0.5
     min_growth::Float64 = 0.01
@@ -296,7 +301,7 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         groups = o.psf_refine === nothing ? nothing : _refine_setup(sc, psfs, o.psf_refine, f.R_fit)
     end
     P = nparams(sc)
-    θh = zeros(P, 0); born = Int[]; disc = NTuple{2, Float64}[]
+    θh = zeros(P, 0); born = Int[]; disc = NTuple{3, Float64}[]   # (u, v, pass pruned)
     # reserved PSF stars, drawn per source at detection in detection order; the last refinement's star rows
     rrng = groups === nothing ? nothing : Random.MersenneTwister(o.psf_refine.reserve_seed)
     resv = Bool[]; psf_stars = nothing
@@ -304,6 +309,7 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
     for pass in 1:o.max_iter
         pass_run = pass
         t_bkg = @elapsed _backgrounds!(st, to_device(backend, T, θh), pass, o)
+        o.discard_passes === nothing || filter!(d -> pass - d[3] <= o.discard_passes, disc)
         t_det = @elapsed dn = _detect_new(st, θh, disc, o)
         θh = hcat(θh, vcat(dn.u', dn.v', dn.flux)); append!(born, fill(pass, length(dn.u)))
         append!(resv, rrng === nothing ? falses(length(dn.u)) : rand(rrng, length(dn.u)) .< o.psf_refine.reserve_frac)
@@ -319,7 +325,7 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         # pass 1 fits against a background that still holds every star's light, so its prunes include
         # real faint stars; logging them would block their re-detection for the rest of the run (on
         # a crowded Roman tile, leaving them out kept 123 more true sources for 10 more spurious ones)
-        pass > 1 && for s in findall(!, keep); push!(disc, (θh[1, s], θh[2, s])); end
+        pass > 1 && for s in findall(!, keep); push!(disc, (θh[1, s], θh[2, s], pass)); end
         θh = θh[:, keep]; born = born[keep]; resv = resv[keep]
         psf_stars = _remap_psf_stars(psf_stars, keep)
         n_surv = count(==(pass), born)
@@ -369,6 +375,7 @@ end
 "Checks of `fit_joint_multipass`'s arguments that need no data; `products` with `:coadd` expanded."
 function _check_run_args(o::JointLoopOptions, products, coadd_options)
     o.accept in (:nu, :snm) || throw(ArgumentError("accept must be :nu or :snm"))
+    o.discard_passes === nothing || o.discard_passes >= 0 || throw(ArgumentError("discard_passes must be nothing or >= 0, got $(o.discard_passes)"))
     products = Tuple(unique(Iterators.flatten(p === :coadd ? _COADD_DEFAULT : (p,) for p in products)))
     avail = (_IMAGE_PRODUCTS..., _MAP_PRODUCTS..., _COADD_PRODUCTS...)
     bad = setdiff(products, avail)
