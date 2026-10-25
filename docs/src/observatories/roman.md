@@ -30,9 +30,12 @@ convention of [`CrowdPhot.fit_all_stars_multipass`](@ref), so it can be passed
 straight through.
 
 Which flags count as unusable is the `dq_flags` keyword.
-See [Data quality flags](@ref roman_dq) below. By default `load_l2` also
-marks unusable pixels that the DQ array does not
-flag, with [`bad_pixel_mask`](@ref).
+See [Data quality flags](@ref roman_dq) below. With `bad_pixels = true`,
+`load_l2` also marks unusable pixels that the DQ array does not
+flag, with [`bad_pixel_mask`](@ref); this is mostly needed for `romanisim`
+simulations, whose DQ arrays may miss defective pixels.
+`ramp_weights = :uniform` returns the uniformly weighted ramp fit instead of
+the optimally weighted one.
 
 [`load_area`](@ref) reads a pixel area map (PAM) reference file the same way.
 

@@ -29,7 +29,7 @@ function _roman_tree(af, path::AbstractString)
 end
 
 """
-    load_l2(fname; dq_flags = (:DO_NOT_USE, :NO_LIN_CORR), bad_pixels = true) -> NamedTuple
+    load_l2(fname; dq_flags = (:DO_NOT_USE, :NO_LIN_CORR, :HOT), bad_pixels = false, ramp_weights = :optimal) -> NamedTuple
 
 Read a Roman WFI Level 2 (calibrated rate) ASDF file.
 
@@ -39,8 +39,13 @@ Read a Roman WFI Level 2 (calibrated rate) ASDF file.
 # Keyword arguments
 - `dq_flags`: the [`DQ_FLAGS`](@ref) names that mark a pixel unusable.  See
   [`parse_dq_mask`](@ref).
-- `bad_pixels`: also mark the unusable pixels that the DQ array does not flag
-  (invalid errors, cold and hot pixels; see [`bad_pixel_mask`](@ref)).
+- `bad_pixels`: use heuristics to try to mark unusable pixels that the DQ array does not flag
+  (invalid errors, cold and hot pixels; see [`bad_pixel_mask`](@ref)). Mostly used on `romanisim`
+  simulations where the DQ array may not capture all problematic pixels.
+- `ramp_weights`: `:optimal` returns the file's `data` (the optimally weighted ramp fit);
+  `:uniform` returns `data + dumo`, the uniformly weighted ramp fit (`dumo` = "data uniform minus
+  optimal", flat-fielded like `data`).  `err` and `var_poisson` are the file's arrays in both cases,
+  i.e. they describe the optimal fit, not the noisier uniform one.
 
 # Returns
 - `data::Matrix{Float32}`: the science array.
@@ -59,10 +64,15 @@ Read a Roman WFI Level 2 (calibrated rate) ASDF file.
     `permutedims`ed back on the way out.  Arrays are returned in CrowdPhot's
     `(y, x)` convention.
 """
-function load_l2(fname::AbstractString; dq_flags = (:DO_NOT_USE, :NO_LIN_CORR), bad_pixels::Bool = true)
+function load_l2(fname::AbstractString; dq_flags = (:DO_NOT_USE, :NO_LIN_CORR, :HOT), bad_pixels::Bool = false, ramp_weights::Symbol = :optimal)
+    ramp_weights in (:optimal, :uniform) || throw(ArgumentError("ramp_weights must be :optimal or :uniform, got :$ramp_weights"))
     afr = _roman_tree(_load_asdf(fname), fname)
     meta = afr["meta"]
     image_data = Matrix{Float32}(permutedims(afr["data"][]))
+    if ramp_weights === :uniform
+        haskey(afr, "dumo") || throw(ArgumentError("$fname has no \"dumo\" array, so ramp_weights = :uniform is unavailable"))
+        image_data .+= permutedims(afr["dumo"][])
+    end
     dq_raw = Matrix{UInt32}(permutedims(afr["dq"][]))
     dq = BitMatrix(parse_dq_mask(dq_raw; flags = dq_flags))
     err = Matrix{Float32}(permutedims(afr["err"][]))
