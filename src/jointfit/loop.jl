@@ -3,7 +3,7 @@
 #
 #   per pass: render the model at θ -> per image, the package's `estimate_background_multipass`
 #   on raw - model (host) -> joint detection on all residuals (maps, peaks accepted on
-#   `accept >= detect_sigma`, wing gate) -> dedup against the catalog and the discard log (prunes after pass 1) at
+#   `accept >= detect_sigma`, wing gate, blend gate) -> dedup against the catalog and the discard log (prunes after pass 1) at
 #   `min_separation` (frame px) -> seeds: refined peak position and per-band fluxes from
 #   `joint_point` -> `fit_pass` -> prune on the joint signed significance (Stouffer over bands of
 #   f_b sqrt(H_bb)) and close pairs.
@@ -16,7 +16,18 @@
 - `detector = JointDetector()`, `detect_sigma = 5.0`, `accept = :nu`: peaks are thresholded on
   `accept` (`:nu` or `:snm`) at `detect_sigma`
 - `dedup = 1.5`: peak suppression radius (frame px)
-- `gate = 2.0`: wing-gate factor applied in every pass (`0` disables it)
+- `gate = 2.0`: wing-gate factor (`0` disables it).  It compares each peak with the brighter
+  peaks of the same pass only, so it acts in pass 1, where bright stars are still peaks, and
+  gates almost nothing once they are fitted and subtracted
+- `blend_threshold = 0.2`, `blend_threshold_initial = blend_threshold === nothing ? nothing : 2.0`,
+  `blend_passes = 2`: the single-image fitter's model-based blend gate (see
+  [`CrowdPhot.fit_all_stars_simultaneous_multipass`](@ref)), based on crowdsource.  A peak
+  is kept only if its seed's light in its own pixel exceeds `t` times the rendered model's there,
+  summed over the images with S/N weights ([`blend_terms`](@ref)); `t = blend_threshold_initial`
+  on passes `1:blend_passes`, `blend_threshold` afterwards, and `nothing` does not gate.  It cannot
+  gate in pass 1 (the model is empty), so it complements the wing gate.  Peaks whose pixel is
+  masked in every image (saturated cores) are not gated, and gated peaks are not logged as
+  discarded.  Helps prevent spurious detections in the wings of bright stars.
 - `band_weights = Dict()`: detection weights per band (missing bands weigh 1)
 - `min_separation = 1.0`: new peaks within this of a catalog or discarded source are dropped
   (discarded: pruned in a pass after the first, whose background still holds the stars' light)
@@ -53,6 +64,9 @@ Base.@kwdef struct JointLoopOptions
     accept::Symbol = :nu
     dedup::Float64 = 1.5
     gate::Float64 = 2.0
+    blend_threshold::Union{Nothing, Float64} = 0.2
+    blend_threshold_initial::Union{Nothing, Float64} = blend_threshold === nothing ? nothing : 2.0
+    blend_passes::Int = 2
     band_weights::Dict{Symbol, Float64} = Dict{Symbol, Float64}()
     min_separation::Float64 = 1.0
     discard_passes::Union{Nothing, Int} = nothing
@@ -167,7 +181,7 @@ function _sep_hit(ix, u, v)
 end
 
 "Joint detection on the pass's residuals: new (u, v) and per-band seed fluxes after the gate and dedup."
-function _detect_new(st, θh, disc, o::JointLoopOptions)
+function _detect_new(st, θh, disc, o::JointLoopOptions, pass)
     sc = st.sc; jd = st.jd; K = jd.det.K
     maps = joint_maps(jd, sc, st.det_data, st.det_iv)
     pk = find_peaks(maps; floor = o.detect_sigma, dedup = o.dedup * K, accept = o.accept)
@@ -176,6 +190,19 @@ function _detect_new(st, θh, disc, o::JointLoopOptions)
     if st.tmpl !== nothing
         keep = wing_gate(pk, st.tmpl; gate = o.gate)
         n_gated = count(!, keep)
+        pk = map(x -> x[keep], pk)
+    end
+    # the blend gate against the rendered model (st.work.model, set by _backgrounds! this pass)
+    thr = pass <= o.blend_passes ? o.blend_threshold_initial : o.blend_threshold
+    n_blend = 0
+    if thr !== nothing && !isempty(pk.y)
+        B = nbands(sc)
+        uv = to_device(sc.backend, eltype(sc), permutedims(hcat((pk.y .- 0.5) ./ K .+ 0.5, (pk.x .- 0.5) ./ K .+ 0.5)))
+        seed = joint_point(jd, sc, st.det_data, st.det_iv, uv)[4:3 + B, :]
+        bt = Array(blend_terms(jd, sc, st.work.model, st.det_iv, uv, seed))
+        # a peak no image has a usable pixel for (a masked saturated core) is not gated
+        keep = [bt[3, i] == 0 || bt[1, i] > thr * bt[2, i] for i in axes(bt, 2)]
+        n_blend = count(!, keep)
         pk = map(x -> x[keep], pk)
     end
     occ = _sep_index(o.min_separation); dsc = _sep_index(o.min_separation)
@@ -195,7 +222,7 @@ function _detect_new(st, θh, disc, o::JointLoopOptions)
         jp = Array(joint_point(jd, sc, st.det_data, st.det_iv, to_device(sc.backend, eltype(sc), permutedims(hcat(us, vs)))))
         flux .= map(x -> isfinite(x) ? Float64(x) : 0.0, jp[4:3 + B, :])
     end
-    return (; u = us, v = vs, flux, n_peaks, n_gated, nd_cat, nd_disc)
+    return (; u = us, v = vs, flux, n_peaks, n_gated, n_blend, nd_cat, nd_disc)
 end
 
 "Joint signed significance Stouffer_b(f_b sqrt(H_bb)) over bands with data (NaN without any)."
@@ -310,7 +337,7 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         pass_run = pass
         t_bkg = @elapsed _backgrounds!(st, to_device(backend, T, θh), pass, o)
         o.discard_passes === nothing || filter!(d -> pass - d[3] <= o.discard_passes, disc)
-        t_det = @elapsed dn = _detect_new(st, θh, disc, o)
+        t_det = @elapsed dn = _detect_new(st, θh, disc, o, pass)
         θh = hcat(θh, vcat(dn.u', dn.v', dn.flux)); append!(born, fill(pass, length(dn.u)))
         append!(resv, rrng === nothing ? falses(length(dn.u)) : rand(rrng, length(dn.u)) .< o.psf_refine.reserve_frac)
         n_new = length(dn.u)
@@ -341,7 +368,7 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
             mem_warned = true
             @warn "Estimated peak memory $(round(mem_est / 1e9, digits = 1)) GB at pass $pass ($(size(r.θ, 2)) sources) exceeds half of the system memory ($(round(Sys.total_memory() / 1e9, digits = 1)) GB); fit a smaller area per run."
         end
-        h = (; pass, dn.n_peaks, dn.n_gated, n_dup_cat = dn.nd_cat, n_dup_disc = dn.nd_disc, n_new, n_pruned_snr = n_snr,
+        h = (; pass, dn.n_peaks, dn.n_gated, n_blend_rejected = dn.n_blend, n_dup_cat = dn.nd_cat, n_dup_disc = dn.nd_disc, n_new, n_pruned_snr = n_snr,
                n_pruned_close = n_close, n_catalog = length(born), n_new_surviving = n_surv, λ, r.stats..., mem_est, t_bkg, t_det, t_fit,
                t_refine, refine)
         push!(history, h)
