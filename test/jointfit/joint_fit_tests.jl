@@ -575,6 +575,13 @@ end
     @test R.converged == (length(h) >= 3 && h[end].n_new_surviving <= 0.01 * h[end].n_catalog)
     @test all(x -> x.pass < 3 || x.n_new_surviving > 0.01 * x.n_catalog, h[1:(end - 1)])
     @test length(fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 3, min_growth = 0)).history) == 3
+    # discard_passes: prune_snr_min = 40 prunes real stars from pass 2 on, whose re-detections the log blocks.
+    # 0 turns the log off; with 1 a pass-2 prune blocks pass 3 (the runs agree through pass 3) and expires at pass 4
+    ndisc(K) = [get(x, :n_dup_disc, 0) for x in fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 4, min_growth = 0, prune_snr_min = 40, discard_passes = K)).history]
+    dn, d0, d1 = ndisc(nothing), ndisc(0), ndisc(1)
+    @test dn[3] > 0 && dn[4] > 0 && all(==(0), d0)
+    @test d1[3] == dn[3] && d1[4] < dn[4]
+    @test_throws "discard_passes must be nothing or >= 0, got -1" fit_joint_multipass(imgs, frame; options = JointLoopOptions(discard_passes = -1))
     # flat per-band columns in `bands` order; a Tables.jl table with one row per source
     @test propertynames(c) == (:u, :v, :ra, :dec, :u_err, :v_err, :flux_A, :flux_B, :flux_err_A, :flux_err_B, :significance,
                                :significance_A, :significance_B, :nimg, :pass_number)
