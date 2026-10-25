@@ -96,7 +96,7 @@ function parse_dq_mask(mask::AbstractMatrix{UInt32};
 end
 
 """
-    bad_pixel_mask(data, err, dq = nothing; flags = (:DO_NOT_USE, :NO_LIN_CORR), k_cold = 10, k_hot = 10,
+    bad_pixel_mask(data, err, dq = nothing; flags = (:DO_NOT_USE, :NO_LIN_CORR, :HOT), k_cold = 10, k_hot = 10,
                    hot_exempt = (:SATURATED, :JUMP_DET)) -> NamedTuple
 
 Pixels of a calibrated (Level 2) image that are unusable although their DQ does not mark them.
@@ -121,10 +121,10 @@ makes the cold rule flag its faintest parts.
 
 Returns `(; mask, n_err, n_cold, n_hot)`.  `mask::BitMatrix` is `true` where a rule fires, and never on
 pixels already carrying `flags`.  The counts are per rule; each pixel is counted under the first rule
-above that it fails.  [`load_l2`](@ref) applies this by default.
+above that it fails.  [`load_l2`](@ref) applies this with `bad_pixels = true`.
 """
 function bad_pixel_mask(data::AbstractMatrix{<:Real}, err::AbstractMatrix{<:Real}, dq::Union{Nothing, AbstractMatrix{UInt32}} = nothing;
-                        flags = (:DO_NOT_USE, :NO_LIN_CORR), k_cold::Real = 10, k_hot::Real = 10, hot_exempt = (:SATURATED, :JUMP_DET))
+                        flags = (:DO_NOT_USE, :NO_LIN_CORR, :HOT), k_cold::Real = 10, k_hot::Real = 10, hot_exempt = (:SATURATED, :JUMP_DET))
     size(err) == size(data) || throw(DimensionMismatch("err has size $(size(err)) but data has size $(size(data))"))
     dq === nothing || size(dq) == size(data) || throw(DimensionMismatch("dq has size $(size(dq)) but data has size $(size(data))"))
     flagged = dq === nothing ? falses(size(data)) : parse_dq_mask(dq; flags)

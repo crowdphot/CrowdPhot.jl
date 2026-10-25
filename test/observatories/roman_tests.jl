@@ -307,7 +307,7 @@ end
     dq_raw = zeros(UInt32, nx, ny)
     dq_raw[2, 1] = DQ_FLAGS[:DO_NOT_USE]
     dq_raw[3, 2] = DQ_FLAGS[:NO_LIN_CORR]
-    dq_raw[4, 3] = DQ_FLAGS[:HOT]        # not in the default flag set
+    dq_raw[4, 3] = DQ_FLAGS[:HOT]        # in the default flag set
 
     nd(a, T) = ASDF.NDArray(ASDF.LazyBlockHeaders(), nothing, a,
                             reverse(collect(size(a))), T, nothing)
@@ -328,22 +328,33 @@ end
         @test l2.data isa Matrix{Float32}
         @test l2.dq isa BitMatrix
         @test size(l2.dq) == (ny, nx)
-        # Default flags catch DO_NOT_USE and NO_LIN_CORR but not HOT.
-        @test l2.dq[1, 2] && l2.dq[2, 3] && !l2.dq[3, 4]
-        @test count(l2.dq) == 2
+        # Default flags catch DO_NOT_USE, NO_LIN_CORR and HOT.
+        @test l2.dq[1, 2] && l2.dq[2, 3] && l2.dq[3, 4]
+        @test count(l2.dq) == 3
         @test l2.meta["exposure"]["effective_exposure_time"] == 100.0
         # The flag set is a keyword, not hardcoded.
         @test count(load_l2(path; dq_flags = (:HOT,)).dq) == 1
-        # bad_pixel_mask runs by default and adds to the DQ mask; nothing in this image is bad
-        @test l2.n_bad == (; n_err = 0, n_cold = 0, n_hot = 0)
-        @test load_l2(path; bad_pixels = false).n_bad === nothing
+        @test !load_l2(path; dq_flags = (:DO_NOT_USE, :NO_LIN_CORR)).dq[3, 4]
+        # bad_pixel_mask is off by default; with bad_pixels it adds to the DQ mask (nothing in this image is bad)
+        @test l2.n_bad === nothing
+        @test load_l2(path; bad_pixels = true).n_bad == (; n_err = 0, n_cold = 0, n_hot = 0)
         err0 = copy(err); err0[1, 1] = 0                   # (y, x) = (1, 1): an infinite weight
         tree0 = OrderedDict("roman" => merge(tree["roman"], OrderedDict("err" => nd(err0, "float32"))))
         path0 = joinpath(dir, "l2_bad.asdf")
         ASDF.save(path0, tree0)
-        l2b = load_l2(path0)
-        @test l2b.dq[1, 1] && count(l2b.dq) == 3 && l2b.n_bad.n_err == 1
-        @test !load_l2(path0; bad_pixels = false).dq[1, 1]
+        l2b = load_l2(path0; bad_pixels = true)
+        @test l2b.dq[1, 1] && count(l2b.dq) == 4 && l2b.n_bad.n_err == 1
+        @test !load_l2(path0).dq[1, 1]
+        # ramp_weights = :uniform returns data + dumo (stored as float16, like real L2 files)
+        dumo = Float16[0.5(10i + j) for i in 1:nx, j in 1:ny]
+        pathu = joinpath(dir, "l2_dumo.asdf")
+        ASDF.save(pathu, OrderedDict("roman" => merge(tree["roman"], OrderedDict("dumo" => nd(dumo, "float16")))))
+        @test load_l2(pathu).data == permutedims(data)
+        l2u = load_l2(pathu; ramp_weights = :uniform)
+        @test l2u.data == permutedims(data .+ Float32.(dumo)) && l2u.data isa Matrix{Float32}
+        @test l2u.err == permutedims(err) && l2u.dq == l2.dq
+        @test_throws "has no \"dumo\" array" load_l2(path; ramp_weights = :uniform)
+        @test_throws "ramp_weights must be :optimal or :uniform" load_l2(pathu; ramp_weights = :mean)
 
         area_tree = OrderedDict("roman" => OrderedDict(
             "meta" => OrderedDict("useafter" => "2020-01-01"), "data" => nd(data, "float32")))
