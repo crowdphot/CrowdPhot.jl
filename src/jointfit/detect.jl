@@ -407,6 +407,54 @@ function joint_point(jd::JointDetection, sc::JointScene{T}, data, iv, uv::Abstra
     return out
 end
 
+@kernel function blend_terms_kernel!(out, @Const(uv), @Const(flux), @Const(model), @Const(iv), d, bk, @Const(tptr), @Const(timg), @Const(wf),
+                                     K, tile, ntr, ngy, ngx)
+    k = @index(Global)
+    T = eltype(out)
+    u = uv[1, k]; v = uv[2, k]
+    r = clamp(unsafe_trunc(Int32, round(K * (u - T(0.5)) + T(0.5))), Int32(1), Int32(ngy))
+    c = clamp(unsafe_trunc(Int32, round(K * (v - T(0.5)) + T(0.5))), Int32(1), Int32(ngx))
+    t = (r - 1) ÷ tile + ((c - 1) ÷ tile) * ntr + 1
+    a = m = n = zero(T)
+    @inbounds for q in tptr[t]:(tptr[t + 1] - 1)
+        e = timg[q]
+        ok, y, x = source_pixel(d, e, u, v)
+        ok || continue
+        ny = d.dims[1, e]; nx = d.dims[2, e]
+        py = unsafe_trunc(Int32, round(y)); px = unsafe_trunc(Int32, round(x))
+        ((1 <= py <= ny) & (1 <= px <= nx)) || continue
+        p = d.dims[3, e] + py + (px - 1) * ny
+        f = d.band[e]; s = flux[f, k]
+        ((iv[p] > 0) & isfinite(s)) || continue
+        kb = bank_index(bk, e, py, px); h = Int(bk.h[kb])
+        P = bk.P[bank_entry(bk, kb, h + 1, h + 1, phase_index(y - T(py), bk.Q), phase_index(x - T(px), bk.Q))]
+        w = wf[f] * sqrt(iv[p])
+        a += w * d.ip[IP_SCALE, e] * s * P
+        m += w * max(model[p], zero(T))
+        n += one(T)
+    end
+    out[1, k] = a; out[2, k] = m; out[3, k] = n
+end
+
+"""
+    blend_terms(jd, sc, model, iv, uv, flux) -> Matrix (3, n)
+
+The blend gate's two sides at `n` fit-frame positions `uv` (`2 x n`) with per-band seed fluxes
+`flux` (`B x n`, from [`joint_point`](@ref)), both on the device.  Over every image `e` that
+covers a position with `iv > 0` at the source's pixel: row 1 is `Σ w_e g_e s_f P_e`, the new
+source's light in that pixel (`P_e` the unit PRF there, at the source's phase); row 2 is
+`Σ w_e max(model_e, 0)`, the rendered catalog model in the same pixel; row 3 counts those
+images (`0`, e.g. a masked saturated core: no evidence either way).  `w_e = wf_f √iv_e` makes
+each term a per-pixel S/N, so one image reduces to the single-image blend gate's test.
+"""
+function blend_terms(jd::JointDetection, sc::JointScene{T}, model, iv, uv::AbstractMatrix, flux::AbstractMatrix) where {T}
+    be = sc.backend
+    out = KA.allocate(be, T, 3, size(uv, 2))
+    launch!(blend_terms_kernel!, be, size(uv, 2), out, uv, flux, model, iv, sc.dev, jd.banks, jd.tptr, jd.timg, jd.wf, T(jd.det.K),
+            jd.tile, jd.ntr, jd.grid.ny, jd.grid.nx)
+    return out
+end
+
 # ------------------------------------------------------------------------------------------
 # Peaks (flagged and refined on the device) and the wing gate (host)
 # ------------------------------------------------------------------------------------------

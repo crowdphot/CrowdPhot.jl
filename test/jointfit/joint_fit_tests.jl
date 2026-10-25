@@ -362,6 +362,15 @@ end
     # at the star's exact position the seed fluxes are its band fluxes (noise is negligible)
     jp = J.joint_point(jd, s.sc, data, s.sc.weight, θ1[1:2, :])
     @test jp[4:5, 1] ≈ θ1[3:4, 1] rtol = 0.02
+    # blend_terms: a star's own rendered model holds its light in its pixel, so the gate's two sides
+    # agree there (up to the bank's phase steps); the model side scales with the model, clamped at 0
+    bt = J.blend_terms(jd, s.sc, data, s.sc.weight, θ1[1:2, :], θ1[3:4, :])
+    @test bt[1, 1] ≈ bt[2, 1] rtol = 0.02
+    @test J.blend_terms(jd, s.sc, 2 .* data, s.sc.weight, θ1[1:2, :], θ1[3:4, :])[1:2, 1] ≈ [bt[1, 1], 2 * bt[2, 1]]
+    @test J.blend_terms(jd, s.sc, -data, s.sc.weight, θ1[1:2, :], θ1[3:4, :])[2, 1] == 0
+    # both images count; with the star's pixel masked in every image none does (the loop then does not gate)
+    @test bt[3, 1] == 2
+    @test J.blend_terms(jd, s.sc, data, zero(s.sc.weight), θ1[1:2, :], θ1[3:4, :])[:, 1] == [0, 0, 0]
     # the peak of the map sits on the star
     pk = J.find_peaks((; ν = Array(m.ν), snm = Array(m.snm)); floor = 5.0, dedup = 3.0)
     @test length(pk.y) >= 1
@@ -576,12 +585,20 @@ end
     @test all(x -> x.pass < 3 || x.n_new_surviving > 0.01 * x.n_catalog, h[1:(end - 1)])
     @test length(fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 3, min_growth = 0)).history) == 3
     # discard_passes: prune_snr_min = 40 prunes real stars from pass 2 on, whose re-detections the log blocks.
-    # 0 turns the log off; with 1 a pass-2 prune blocks pass 3 (the runs agree through pass 3) and expires at pass 4
-    ndisc(K) = [get(x, :n_dup_disc, 0) for x in fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 4, min_growth = 0, prune_snr_min = 40, discard_passes = K)).history]
+    # 0 turns the log off; with 1 a pass-2 prune blocks pass 3 (the runs agree through pass 3) and expires at pass 4.
+    # Blend gate off: here it gates the re-detections before the log sees them
+    ndisc(K) = [get(x, :n_dup_disc, 0) for x in fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 4, min_growth = 0, prune_snr_min = 40, discard_passes = K, blend_threshold = nothing)).history]
     dn, d0, d1 = ndisc(nothing), ndisc(0), ndisc(1)
     @test dn[3] > 0 && dn[4] > 0 && all(==(0), d0)
     @test d1[3] == dn[3] && d1[4] < dn[4]
     @test_throws "discard_passes must be nothing or >= 0, got -1" fit_joint_multipass(imgs, frame; options = JointLoopOptions(discard_passes = -1))
+    # blend gate: on by default (crowdsource's 2.0 then 0.2), `nothing` turns it off; a huge threshold gates nothing in pass 1
+    # (the model is empty) and the later peaks on modeled light
+    @test (JointLoopOptions().blend_threshold, JointLoopOptions().blend_threshold_initial) == (0.2, 2.0)
+    @test JointLoopOptions(blend_threshold = nothing).blend_threshold_initial === nothing
+    @test all(x -> get(x, :n_blend_rejected, 0) == 0, fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 3, min_growth = 0, blend_threshold = nothing)).history)
+    hb = fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 3, min_growth = 0, blend_threshold = 1e6, blend_passes = 0)).history
+    @test hb[1].n_blend_rejected == 0 && all(x -> x.n_blend_rejected > 0, hb[2:end])
     # flat per-band columns in `bands` order; a Tables.jl table with one row per source
     @test propertynames(c) == (:u, :v, :ra, :dec, :u_err, :v_err, :flux_A, :flux_B, :flux_err_A, :flux_err_B, :significance,
                                :significance_A, :significance_B, :nimg, :pass_number)
