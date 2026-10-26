@@ -6,7 +6,8 @@
 # linear in the samples; the prior is the reference ePSF with a hierarchical fractional Gaussian
 # (a correction common to the group's nodes plus each node's own); the gauge fixes the sum and
 # first moments of every phase sub-lattice of the window; the likelihood is Huber with
-# gross-outlier rejection, weights taken at the warm start.  The step is solved by projected
+# gross-outlier rejection, weights taken at the warm start.  (`gauge = :derivative` fixes, in place of
+# the first moments, the projections onto the reference's shift modes.)  The step is solved by projected
 # preconditioned CG with all star couplings, the gauge applied in the preconditioner's metric.
 # Design and validation:
 # experiments/multi-image/psf-refinement/report/psf-refinement-report.tex.
@@ -54,6 +55,17 @@ refined PSFs (`psfs`).  Not supported by `fit_joint_tiled`.
   Recommended 0.1-0.2 when validating on data without truth: the reserved stars' χ²/dof in the
   run history is a held-out check of the PSF.  At 0.15 the catalog changes were within the
   scatter between settings on test data
+- `gauge = :moment`: what the correction leaves unchanged on every phase sub-lattice of the window,
+  (the sum is always preserved). `:moment`: the first moments (the window's center of light). `:derivative`:
+  the projections onto the reference's shift modes ∂D0/∂x, ∂D0/∂y (of the group's mean
+  reference), so a least-squares fit with uniform weights places a star where it placed it on the
+  reference PSF (to first order) -- this ensures positions keep the reference's centroid convention, as an
+  external WCS fitted with that PSF expects.  On simulations the moment gauge recovered the true
+  PSF shape better (window mismatch ‖D - D_true‖ / ‖D0 - D_true‖, 0 exact and 1 no better than the
+  reference: 0.13-0.17 vs 0.44-0.52 with the exact catalog, psf-refinement report): a real PSF
+  difference generally has a component along the shift modes, which this gauge forbids.
+  `:derivative` is a diagnostic for alignment / WCS offsets (whether positions move because the
+  refinement shifts the PSF's centroid convention or because of the data), not for production fits
 - `max_masked = 0.25`: a star whose stamps' in-image pixels are more than this fraction masked
   (zero weight; e.g. on a saturated star's flagged core) does not constrain the PSF (as a rejected
   star): its band flux rests on the few pixels left and can be far off
@@ -89,6 +101,7 @@ Base.@kwdef struct PSFRefineOptions
     star_nsigma::Union{Nothing, Float64} = nothing
     star_max_remove::Float64 = 0.01
     max_masked::Float64 = 0.25
+    gauge::Symbol = :moment
 end
 
 function _check_refine_options(o::PSFRefineOptions)
@@ -96,6 +109,7 @@ function _check_refine_options(o::PSFRefineOptions)
     0 <= o.reserve_frac < 1 || throw(ArgumentError("psf_refine reserve_frac must be in [0, 1)"))
     0 <= o.star_max_remove <= 1 || throw(ArgumentError("psf_refine star_max_remove must be in [0, 1]"))
     0 <= o.max_masked <= 1 || throw(ArgumentError("psf_refine max_masked must be in [0, 1]"))
+    o.gauge in (:moment, :derivative) || throw(ArgumentError("psf_refine gauge must be :moment or :derivative, got :$(o.gauge)"))
     (o.star_nsigma === nothing || o.star_nsigma > 0) || throw(ArgumentError("psf_refine star_nsigma must be positive or nothing"))
     return o
 end
@@ -134,12 +148,19 @@ function _refine_group_setup(sc, g, imgs, band, nodes, window, o::PSFRefineOptio
         N > 1 && (C .+= Diagonal((o.eps_node .* d0 .+ τ) .^ 2))
         Pk[:, :, (c - 1) * nw + r] .= inv(C)
     end
-    # sum and first moments of each phase sub-lattice (samples whose offsets from the origin agree mod s)
+    # sum and first moments (or shift-mode projections) of each phase sub-lattice (samples whose offsets
+    # from the origin agree mod s)
     gq = zeros(3, ns); ra = zeros(Int32, sy); ca = zeros(Int32, sx)
     phy(r) = mod(round(Int, r0 + r - 1 - oyf), sy); phx(c) = mod(round(Int, c0 + c - 1 - oxf), sx)
+    # shift modes: central differences of the mean reference, the Catmull-Rom interpolant's slopes at the nodes
+    D = o.gauge === :derivative ? sum(nd -> Float64.(nd.data), g.psfs) / N : nothing
+    Dat(r, c) = D[clamp(r0 + r - 1, 1, nd1), clamp(c0 + c - 1, 1, nd2)]
+    mode = o.gauge === :derivative ?
+        (s -> (r = (s - 1) % nw + 1; c = (s - 1) ÷ nw + 1; [Dat(r, c + 1) - Dat(r, c - 1), Dat(r + 1, c) - Dat(r - 1, c)])) :
+        (s -> [(c0 + (s - 1) ÷ nw) - oxf, (r0 + (s - 1) % nw) - oyf])
     for a in 0:(sy - 1), b in 0:(sx - 1)
         idx = [(c - 1) * nw + r for c in 1:nw for r in 1:nw if phy(r) == a && phx(c) == b]
-        Cm = reduce(hcat, [[1.0, (c0 + (s - 1) ÷ nw) - oxf, (r0 + (s - 1) % nw) - oyf] for s in idx])'
+        Cm = reduce(hcat, [[1.0; mode(s)] for s in idx])'
         F = svd(Cm); rk = count(>(1e-10 * F.S[1]), F.S)
         gq[1:rk, idx] .= permutedims(F.U[:, 1:rk])
     end

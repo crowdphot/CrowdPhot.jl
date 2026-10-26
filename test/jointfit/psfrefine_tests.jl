@@ -117,6 +117,26 @@ end
     @test maximum(abs, Jx32 .- Jx) / maximum(abs, Jx) < 1e-4
 end
 
+@testset "derivative gauge, oversampling $os" for os in (2, 3)
+    f = refine_field(; ref = gridded(2.2; os))
+    s = refine_state(f; o = PSFRefineOptions(window = 3, gauge = :derivative)); g = s.g
+    nd1, nd2 = size(g.hpsf.psfs[1].data); o0 = round(Int, (nd1 + 1) / 2)
+    D = sum(nd -> nd.data, g.hpsf.psfs) / g.N
+    at(r, c) = D[clamp(g.r0 + r - 1, 1, nd1), clamp(g.c0 + c - 1, 1, nd2)]
+    # the projection leaves no sum and no component along the mean reference's shift modes on any phase sub-lattice
+    v = randn(StableRNG(3), g.N * g.nw^2)
+    J.launch!(J.rf_proj_kernel!, s.sc.backend, g.N * g.sy * g.sx, v, g.gq, g.ra, g.ca, g.nw, g.sy, g.sx)
+    @test all(Iterators.product(1:g.N, 0:(os - 1), 0:(os - 1))) do (n, a, b)
+        idx = [(r, c) for r in 1:g.nw, c in 1:g.nw if mod(g.r0 + r - 1 - o0, os) == a && mod(g.c0 + c - 1 - o0, os) == b]
+        val(r, c) = v[(n - 1) * g.nw^2 + (c - 1) * g.nw + r]
+        abs(sum(val(r, c) for (r, c) in idx)) < 1e-9 &&
+            abs(sum(val(r, c) * (at(r, c + 1) - at(r, c - 1)) for (r, c) in idx)) < 1e-9 &&
+            abs(sum(val(r, c) * (at(r + 1, c) - at(r - 1, c)) for (r, c) in idx)) < 1e-9
+    end
+    @test !(Array(g.gq) ≈ Array(refine_state(f).g.gq))
+    @test_throws "gauge must be :moment or :derivative" J._check_refine_options(PSFRefineOptions(gauge = :centroid))
+end
+
 @testset "PSF refinement step" begin
     o = PSFRefineOptions(window = 3)
     # null test: reference = truth and the exact catalog, so the step changes nothing
