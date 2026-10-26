@@ -121,8 +121,8 @@ end
     f = refine_field(; ref = gridded(2.2; os))
     s = refine_state(f; o = PSFRefineOptions(window = 3, gauge = :derivative)); g = s.g
     nd1, nd2 = size(g.hpsf.psfs[1].data); o0 = round(Int, (nd1 + 1) / 2)
-    D = sum(nd -> nd.data, g.hpsf.psfs) / g.N
-    at(r, c) = D[clamp(g.r0 + r - 1, 1, nd1), clamp(g.c0 + c - 1, 1, nd2)]
+    P0 = sum(nd -> nd.data, g.hpsf.psfs) / g.N
+    at(r, c) = P0[clamp(g.r0 + r - 1, 1, nd1), clamp(g.c0 + c - 1, 1, nd2)]
     # the projection leaves no sum and no component along the mean reference's shift modes on any phase sub-lattice
     v = randn(StableRNG(3), g.N * g.nw^2)
     J.launch!(J.rf_proj_kernel!, s.sc.backend, g.N * g.sy * g.sx, v, g.gq, g.ra, g.ca, g.nw, g.sy, g.sx)

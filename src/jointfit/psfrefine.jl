@@ -41,9 +41,9 @@ refined PSFs (`psfs`).  Not supported by `fit_joint_tiled`.
 - `snr_min = 20`, `max_stars = 100_000`: stars with band S/N >= `snr_min` constrain their band's
   PSFs; beyond `max_stars` per band (one list for all of the band's PSF groups), a fixed random
   subset
-- `eps = 0.1`, `eps_node = 0.05`, `tau = 1e-3`: prior on the correction of each sample: a part
-  common to the group's nodes with scale `eps mean|D0| + tau max D0` and one per node with
-  scale `eps_node |D0| + tau max D0`
+- `eps = 0.1`, `eps_node = 0.05`, `tau = 1e-3`: prior on the correction of each sample of the reference
+  PSF `P0` (its node samples): a part common to the group's nodes with scale
+  `eps mean|P0| + tau max P0` and one per node with scale `eps_node |P0| + tau max P0`
 - `c = 2`, `mu = 0.02`, `reject_z = 20`, `irls = 1`: Huber weights (`c`) of
   `z = residual / sqrt(1/W + (mu model)²)`, zero beyond `|z| = reject_z`; computed at the
   warm start, then `irls >= 1` reweightings against the refined model
@@ -57,12 +57,13 @@ refined PSFs (`psfs`).  Not supported by `fit_joint_tiled`.
   scatter between settings on test data
 - `gauge = :moment`: what the correction leaves unchanged on every phase sub-lattice of the window,
   (the sum is always preserved). `:moment`: the first moments (the window's center of light). `:derivative`:
-  the projections onto the reference's shift modes ∂D0/∂x, ∂D0/∂y (of the group's mean
+  the projections onto the reference's shift modes ∂P0/∂x, ∂P0/∂y (of the group's mean
   reference), so a least-squares fit with uniform weights places a star where it placed it on the
   reference PSF (to first order) -- this ensures positions keep the reference's centroid convention, as an
   external WCS fitted with that PSF expects.  On simulations the moment gauge recovered the true
-  PSF shape better (window mismatch ‖D - D_true‖ / ‖D0 - D_true‖, 0 exact and 1 no better than the
-  reference: 0.13-0.17 vs 0.44-0.52 with the exact catalog, psf-refinement report): a real PSF
+  PSF shape better (window mismatch ‖P - P_true‖ / ‖P0 - P_true‖ for the refined PSF `P`, 0 exact
+  and 1 no better than the reference: 0.13-0.17 vs 0.44-0.52 with the exact catalog,
+  psf-refinement report): a real PSF
   difference generally has a component along the shift modes, which this gauge forbids.
   `:derivative` is a diagnostic for alignment / WCS offsets (whether positions move because the
   refinement shifts the PSF's centroid convention or because of the data), not for production fits
@@ -143,9 +144,9 @@ function _refine_group_setup(sc, g, imgs, band, nodes, window, o::PSFRefineOptio
     τ = o.tau * maximum(maximum(Float64, nd.data) for nd in g.psfs)
     Pk = Array{Float64}(undef, N, N, ns)
     for c in 1:nw, r in 1:nw
-        d0 = [abs(ref[r, c, n]) for n in 1:N]
-        C = fill((o.eps * sum(d0) / N + τ)^2, N, N)
-        N > 1 && (C .+= Diagonal((o.eps_node .* d0 .+ τ) .^ 2))
+        p0 = [abs(ref[r, c, n]) for n in 1:N]
+        C = fill((o.eps * sum(p0) / N + τ)^2, N, N)
+        N > 1 && (C .+= Diagonal((o.eps_node .* p0 .+ τ) .^ 2))
         Pk[:, :, (c - 1) * nw + r] .= inv(C)
     end
     # sum and first moments (or shift-mode projections) of each phase sub-lattice (samples whose offsets
@@ -153,10 +154,10 @@ function _refine_group_setup(sc, g, imgs, band, nodes, window, o::PSFRefineOptio
     gq = zeros(3, ns); ra = zeros(Int32, sy); ca = zeros(Int32, sx)
     phy(r) = mod(round(Int, r0 + r - 1 - oyf), sy); phx(c) = mod(round(Int, c0 + c - 1 - oxf), sx)
     # shift modes: central differences of the mean reference, the Catmull-Rom interpolant's slopes at the nodes
-    D = o.gauge === :derivative ? sum(nd -> Float64.(nd.data), g.psfs) / N : nothing
-    Dat(r, c) = D[clamp(r0 + r - 1, 1, nd1), clamp(c0 + c - 1, 1, nd2)]
+    P0 = o.gauge === :derivative ? sum(nd -> Float64.(nd.data), g.psfs) / N : nothing
+    P0at(r, c) = P0[clamp(r0 + r - 1, 1, nd1), clamp(c0 + c - 1, 1, nd2)]
     mode = o.gauge === :derivative ?
-        (s -> (r = (s - 1) % nw + 1; c = (s - 1) ÷ nw + 1; [Dat(r, c + 1) - Dat(r, c - 1), Dat(r + 1, c) - Dat(r - 1, c)])) :
+        (s -> (r = (s - 1) % nw + 1; c = (s - 1) ÷ nw + 1; [P0at(r, c + 1) - P0at(r, c - 1), P0at(r + 1, c) - P0at(r - 1, c)])) :
         (s -> [(c0 + (s - 1) ÷ nw) - oxf, (r0 + (s - 1) % nw) - oyf])
     for a in 0:(sy - 1), b in 0:(sx - 1)
         idx = [(c - 1) * nw + r for c in 1:nw for r in 1:nw if phy(r) == a && phx(c) == b]
@@ -1249,14 +1250,14 @@ end
 function _refine_apply!(g, x, sc)
     T = eltype(sc); nodes = sc.dev.psf.nodes; nws = g.nw * g.nw
     for (n, nd) in enumerate(g.hpsf.psfs)
-        D = nd.data
+        P = nd.data
         for c in 1:g.nw, r in 1:g.nw
-            v = convert(eltype(D), g.ref[r, c, n] + x[(n - 1) * nws + (c - 1) * g.nw + r])
-            D[g.r0 + r - 1, g.c0 + c - 1] = v
+            v = convert(eltype(P), g.ref[r, c, n] + x[(n - 1) * nws + (c - 1) * g.nw + r])
+            P[g.r0 + r - 1, g.c0 + c - 1] = v
             g.xcur[(n - 1) * nws + (c - 1) * g.nw + r] = Float64(v) - g.ref[r, c, n]
         end
-        len = length(D)
-        copyto!(nodes, (g.nodes[n] - 1) * len + 1, convert(Array{T}, D), 1, len)
+        len = length(P)
+        copyto!(nodes, (g.nodes[n] - 1) * len + 1, convert(Array{T}, P), 1, len)
     end
 end
 
