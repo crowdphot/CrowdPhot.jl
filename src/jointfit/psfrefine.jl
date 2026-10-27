@@ -38,12 +38,19 @@ refined PSFs (`psfs`).  Not supported by `fit_joint_tiled`.
   Each star contributes its pixels within `min(window, model radius)`.  A window beyond `R_fit` is logged
   as a warning: its samples outside the fit stamp are constrained only by this step and its prior,
   which can lead to the fit and the PSF refinement diverging when running many passes
-- `snr_min = 20`, `max_stars = 100_000`: stars with band S/N >= `snr_min` constrain their band's
-  PSFs; beyond `max_stars` per band (one list for all of the band's PSF groups), a fixed random
-  subset
-- `eps = 0.1`, `eps_node = 0.05`, `tau = 1e-3`: prior on the correction of each sample of the reference
+- `snr_min = 20`, `snr_max = Inf`, `max_stars = 100_000`: stars with band S/N in
+  [`snr_min`, `snr_max`] constrain their band's PSFs; beyond `max_stars` per band (one list for all
+  of the band's PSF groups), a fixed random subset.  A finite `snr_max` excludes the brightest stars,
+  e.g. when flux-dependent effects (non-linearity, brighter-fatter) make them fit any single PSF
+  worse than their S/N implies and there are enough fainter stars to constrain the PSF
+- `eps = 0.1`, `eps_node = 0.02`, `tau = 1e-3`: prior on the correction of each sample of the reference
   PSF `P0` (its node samples): a part common to the group's nodes with scale
-  `eps mean|P0| + tau max P0` and one per node with scale `eps_node |P0| + tau max P0`
+  `eps mean|P0| + tau max P0` and one per node with scale `eps_node |P0| + tau max P0`.  The defaults
+  leave the common correction nearly free and hold each node's own deviation to about 2 % of the
+  reference, which keeps the node-to-node structure of real data while damping the noise each node's
+  correction picks up from the fewer stars near it; this matters most when every image is its own PSF
+  group.  A larger `eps_node` (e.g. 0.05-0.1) lets the nodes depart further from each other, for a
+  reference that is wrong node by node with many stars per node
 - `c = 2`, `mu = 0.02`, `reject_z = 20`, `irls = 1`: Huber weights (`c`) of
   `z = residual / sqrt(1/W + (mu model)²)`, zero beyond `|z| = reject_z`; computed at the
   warm start, then `irls >= 1` reweightings against the refined model
@@ -86,9 +93,10 @@ Base.@kwdef struct PSFRefineOptions
     passes::UnitRange{Int} = 1:typemax(Int)
     window::Union{Nothing, Int} = nothing
     snr_min::Float64 = 20.0
+    snr_max::Float64 = Inf
     max_stars::Int = 100_000
     eps::Float64 = 0.1
-    eps_node::Float64 = 0.05
+    eps_node::Float64 = 0.02
     tau::Float64 = 1e-3
     c::Float64 = 2.0
     mu::Float64 = 0.02
@@ -107,6 +115,7 @@ end
 
 function _check_refine_options(o::PSFRefineOptions)
     o.irls >= 1 || throw(ArgumentError("psf_refine needs irls >= 1: the later rounds reweight against the refined PSF, and the star-level test runs between rounds"))
+    o.snr_max > o.snr_min || throw(ArgumentError("psf_refine snr_max must be greater than snr_min"))
     0 <= o.reserve_frac < 1 || throw(ArgumentError("psf_refine reserve_frac must be in [0, 1)"))
     0 <= o.star_max_remove <= 1 || throw(ArgumentError("psf_refine star_max_remove must be in [0, 1]"))
     0 <= o.max_masked <= 1 || throw(ArgumentError("psf_refine max_masked must be in [0, 1]"))
@@ -789,9 +798,9 @@ end
 
 const RF_CHUNK = 256          # stars per adjoint workgroup
 
-"Band `b`'s selected stars (catalog indices), shared by its PSF groups: S/N >= snr_min, a fixed random subset beyond max_stars."
+"Band `b`'s selected stars (catalog indices), shared by its PSF groups: snr_min <= S/N <= snr_max, a fixed random subset beyond max_stars."
 function _refine_select(snr, b, o::PSFRefineOptions)
-    cand = [s for s in axes(snr, 2) if snr[b, s] >= o.snr_min]
+    cand = [s for s in axes(snr, 2) if o.snr_min <= snr[b, s] <= o.snr_max]
     length(cand) > o.max_stars && (cand = Random.shuffle(Random.MersenneTwister(b), cand)[1:o.max_stars])
     sort!(cand; by = s -> -snr[b, s])
     return cand

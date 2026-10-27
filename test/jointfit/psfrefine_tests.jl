@@ -137,6 +137,13 @@ end
     @test_throws "gauge must be :moment or :derivative" J._check_refine_options(PSFRefineOptions(gauge = :centroid))
 end
 
+@testset "PSF star selection" begin
+    snr = [10.0 25 60 400 1000]                        # one band, five stars
+    @test J._refine_select(snr, 1, PSFRefineOptions()) == [5, 4, 3, 2]
+    @test J._refine_select(snr, 1, PSFRefineOptions(snr_min = 50, snr_max = 500)) == [4, 3]
+    @test_throws "snr_max must be greater than snr_min" J._check_refine_options(PSFRefineOptions(snr_min = 50, snr_max = 50))
+end
+
 @testset "PSF refinement step" begin
     o = PSFRefineOptions(window = 3)
     # null test: reference = truth and the exact catalog, so the step changes nothing
