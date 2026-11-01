@@ -262,7 +262,8 @@ function _core_rows(c, t, bands, k, ε)
     n = count(keep)
     col(name) = hasproperty(c, name) ? getproperty(c, name)[keep] : fill(NaN, n)
     perband(q) = NamedTuple{Tuple(Symbol(q, :_, b) for b in bands)}(Tuple(col(Symbol(q, :_, b)) for b in bands))
-    return merge((; u = u[keep], v = v[keep], ra = c.ra[keep], dec = c.dec[keep], u_err = c.u_err[keep], v_err = c.v_err[keep]),
+    return merge((; u = u[keep], v = v[keep], ra = c.ra[keep], dec = c.dec[keep], u_err = c.u_err[keep], v_err = c.v_err[keep],
+                  uv_cov = c.uv_cov[keep]),
                  perband(:flux), perband(:flux_err), (; significance = c.significance[keep]), perband(:significance),
                  (; nimg = c.nimg[keep], pass_number = c.pass_number[keep], tile = fill(k, n), depth = depth[keep]))
 end
@@ -270,7 +271,7 @@ end
 # Concatenated tile rows less the cross-tile duplicates, and each tile's count of removed rows.
 function _merge_catalogs(cats, bands, ntiles, sep)
     perband(q) = Tuple(Symbol(q, :_, b) for b in bands)
-    names = (:u, :v, :ra, :dec, :u_err, :v_err, perband(:flux)..., perband(:flux_err)..., :significance, perband(:significance)..., :nimg,
+    names = (:u, :v, :ra, :dec, :u_err, :v_err, :uv_cov, perband(:flux)..., perband(:flux_err)..., :significance, perband(:significance)..., :nimg,
              :pass_number, :tile)
     # one allocation per column (Base's reduce(vcat, ::Vector{<:Vector}); with `init` it concatenates
     # pairwise); without tile rows, empty columns of the catalog's types

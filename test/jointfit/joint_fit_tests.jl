@@ -286,14 +286,14 @@ end
     @test c ≈ sum(abs2, ref) rtol = 1e-12
 end
 
-@testset "marginal_errors matches a dense reference" begin
+@testset "marginal_covariances and marginal_errors match a dense reference" begin
     s = two_image_scene()
     h = J.HostH(J.linearize(s.sc, s.θ, s.rt, J.LinearizeWork(s.sc); R_fit = 3))
     P, N = size(h.D)
     act(b) = [p for p in 1:P if h.hdiag[p, b] > 0]
     blk(b, c) = (B = J.hblock(h, b, c); B === nothing ? zeros(length(act(b)), length(act(c))) : B[act(b), act(c)])
     for k in (0, 2, 8)
-        σ = J.marginal_errors(h; k)
+        Σ = J.marginal_covariances(h; k); σ = J.marginal_errors(h; k)
         for a in 1:N
             A = act(a)
             isempty(A) && continue
@@ -304,8 +304,11 @@ end
             srcs = [nb[1:min(k, end)]; a]
             M = reduce(vcat, [reduce(hcat, [blk(b, c) for c in srcs]) for b in srcs])
             t = sum(diag(M)); for i in axes(M, 1); M[i, i] += 1e-12 * t; end
-            ref = sqrt.(diag(inv(M))[(end - length(A) + 1):end]) ./ h.D[A, a]
-            @test σ[A, a] ≈ ref rtol = 1e-8
+            I = (size(M, 1) - length(A) + 1):size(M, 1)
+            ref = inv(M)[I, I] ./ (h.D[A, a] * h.D[A, a]')
+            @test Σ[A, A, a] ≈ ref rtol = 1e-8
+            @test σ[A, a] ≈ sqrt.(diag(ref)) rtol = 1e-8
+            @test all(isnan, Σ[setdiff(1:P, A), :, a]) && all(isnan, Σ[:, setdiff(1:P, A), a])
         end
     end
     # a Float32 H (a GPU run's) is factored in Float64: a near-duplicate pair makes its blocks nearly
@@ -600,7 +603,7 @@ end
     hb = fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 3, min_growth = 0, blend_threshold = 1e6, blend_passes = 0)).history
     @test hb[1].n_blend_rejected == 0 && all(x -> x.n_blend_rejected > 0, hb[2:end])
     # flat per-band columns in `bands` order; a Tables.jl table with one row per source
-    @test propertynames(c) == (:u, :v, :ra, :dec, :u_err, :v_err, :flux_A, :flux_B, :flux_err_A, :flux_err_B, :significance,
+    @test propertynames(c) == (:u, :v, :ra, :dec, :u_err, :v_err, :uv_cov, :flux_A, :flux_B, :flux_err_A, :flux_err_B, :significance,
                                :significance_A, :significance_B, :nimg, :pass_number)
     @test c[1].flux_B == c.flux_B[1]
     @test all(in(1:length(h)), c.pass_number)

@@ -39,17 +39,18 @@ function hblock(h::HostH, a, b)
 end
 
 """
-    marginal_errors(h::HostH; k = 8) -> Matrix (P x N)
+    marginal_covariances(h::HostH; k = 8) -> Array (P x P x N)
 
-1σ errors of every parameter with the `k` most strongly coupled neighbors marginalized (NaN
-for parameters without data).  The blocks are factored in at least Float64 whatever the
-element type of `h`: in Float32, nearly singular blocks of close blends gave errors off by up to
-~10⁴ (host-side work, so the precision costs nothing measurable).
+Covariance of every source's parameters with the `k` most strongly coupled neighbors
+marginalized: `Σ[:, :, a]` is source `a`'s block (NaN in the rows and columns of parameters
+without data).  The blocks are factored in at least Float64 whatever the element type of `h`:
+in Float32, nearly singular blocks of close blends gave errors off by up to ~10⁴ (host-side
+work, so the precision costs nothing measurable).
 """
-function marginal_errors(h::HostH{T}; k::Integer = 8) where {T}
+function marginal_covariances(h::HostH{T}; k::Integer = 8) where {T}
     F = promote_type(T, Float64)
     P, N = size(h.D)
-    σ = fill(F(NaN), P, N)
+    Σ = fill(F(NaN), P, P, N)
     Lmax = (k + 1) * P
     # per-task buffers; column k + 1 of `act` holds a's active parameters
     chunks = collect(Iterators.partition(1:N, max(1, cld(N, 8 * Threads.nthreads()))))
@@ -94,8 +95,7 @@ function marginal_errors(h::HostH{T}; k::Integer = 8) where {T}
                 end
                 tr_ = zero(F); for i in 1:L; tr_ += M[i, i]; end
                 for i in 1:L; M[i, i] += F(1e-12) * tr_; end
-                # a's covariance is (UᵀU)⁻¹ for U the last m x m block of the factor, so its
-                # diagonal is the row norms of U⁻¹
+                # a's covariance is (UᵀU)⁻¹ = VVᵀ for U the last m x m block of the factor and V = U⁻¹
                 o = L - m
                 if !_chol_upper!(M, L)
                     o = 0                              # own block, as the single-image fitter falls back
@@ -107,15 +107,25 @@ function marginal_errors(h::HostH{T}; k::Integer = 8) where {T}
                     for i in (r + 1):m; t -= M[o + r, o + i] * V[i, c]; end
                     V[r, c] = t / M[o + r, o + r]
                 end
-                for t in 1:m
-                    s = zero(F); for j in 1:m; s += abs2(V[t, j]); end
-                    p = act[t, nsrc]; σ[p, a] = sqrt(max(s, zero(F))) / h.D[p, a]
+                for t in 1:m, t2 in 1:t
+                    s = zero(F); for j in t:m; s += V[t, j] * V[t2, j]; end   # V is upper triangular
+                    p, p2 = act[t, nsrc], act[t2, nsrc]
+                    Σ[p, p2, a] = Σ[p2, p, a] = s / (F(h.D[p, a]) * F(h.D[p2, a]))   # in F: a Float32 product loses digits
                 end
             end
         end
     end
-    return σ
+    return Σ
 end
+
+"""
+    marginal_errors(h::HostH; k = 8) -> Matrix (P x N)
+
+1σ errors of every parameter, the square roots of [`marginal_covariances`](@ref)'s diagonals
+(NaN for parameters without data).
+"""
+marginal_errors(h::HostH; k::Integer = 8) = marginal_errors(marginal_covariances(h; k))
+marginal_errors(Σ::AbstractArray{<:Real, 3}) = [isnan(Σ[p, p, a]) ? Σ[p, p, a] : sqrt(max(Σ[p, p, a], zero(eltype(Σ)))) for p in axes(Σ, 1), a in axes(Σ, 3)]
 
 # Insert neighbor j with score s into the descending top-k lists (nb, sc) holding cnt entries.
 function _topk_insert!(nb, sc, cnt, k, j, s)
