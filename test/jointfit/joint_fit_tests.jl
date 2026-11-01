@@ -417,6 +417,14 @@ end
     # at the star's exact position the seed fluxes are its band fluxes (noise is negligible)
     jp = J.joint_point(jd, s.sc, data, s.sc.weight, θ1[1:2, :])
     @test jp[4:5, 1] ≈ θ1[3:4, 1] rtol = 0.02
+    # the seeds' detector is the same detection without the local level: a star on a negative residual (an
+    # over-subtracted neighbor's wing) keeps its flux with the level, and the seed without it reads the dip
+    jd0 = J._without_level(jd)
+    @test Array(J.joint_point(jd0, s.sc, data, s.sc.weight, θ1[1:2, :])) ≈
+          Array(J.joint_point(J.JointDetection(s.sc, psfs, offs, JointDetector(K = 2, level = false)), s.sc, data, s.sc.weight, θ1[1:2, :]))
+    dip = data .- 0.05 * maximum(data)
+    @test Array(J.joint_point(jd, s.sc, dip, s.sc.weight, θ1[1:2, :]))[4:5, 1] ≈ θ1[3:4, 1] rtol = 0.02
+    @test all(Array(J.joint_point(jd0, s.sc, dip, s.sc.weight, θ1[1:2, :]))[4:5, 1] .< 0.95 .* θ1[3:4, 1])
     # blend_terms: a star's own rendered model holds its light in its pixel, so the gate's two sides
     # agree there (up to the bank's phase steps); the model side scales with the model, clamped at 0
     bt = J.blend_terms(jd, s.sc, data, s.sc.weight, θ1[1:2, :], θ1[3:4, :])
@@ -640,12 +648,14 @@ end
     @test all(x -> x.pass < 3 || x.n_new_surviving > 0.01 * x.n_catalog, h[1:(end - 1)])
     @test length(fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 3, min_growth = 0)).history) == 3
     # discard_passes: prune_snr_min = 40 prunes real stars from pass 2 on, whose re-detections the log blocks.
-    # 0 turns the log off; with 1 a pass-2 prune blocks pass 3 (the runs agree through pass 3) and expires at pass 4.
+    # 0 turns the log off; with 1 a pass-2 prune blocks pass 3 (the runs agree through pass 3) and then expires, so
+    # more pruned stars come back as new sources in passes 4-7 than under the permanent log.
     # Blend gate off: here it gates the re-detections before the log sees them
-    ndisc(K) = [get(x, :n_dup_disc, 0) for x in fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 4, min_growth = 0, prune_snr_min = 40, discard_passes = K, blend_threshold = nothing)).history]
-    dn, d0, d1 = ndisc(nothing), ndisc(0), ndisc(1)
-    @test dn[3] > 0 && dn[4] > 0 && all(==(0), d0)
-    @test d1[3] == dn[3] && d1[4] < dn[4]
+    ndisc(K) = (h = fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 7, min_growth = 0, prune_snr_min = 40, discard_passes = K, blend_threshold = nothing)).history;
+                ([get(x, :n_dup_disc, 0) for x in h], [x.n_new for x in h]))
+    (dn, nn), (d0, _), (d1, n1) = ndisc(nothing), ndisc(0), ndisc(1)
+    @test dn[3] > 0 && all(==(0), d0)
+    @test d1[3] == dn[3] && sum(n1[4:end]) > sum(nn[4:end])
     @test_throws "discard_passes must be nothing or >= 0, got -1" fit_joint_multipass(imgs, frame; options = JointLoopOptions(discard_passes = -1))
     @test_throws "grad_support must be :fit or :model, got :all" fit_joint_multipass(imgs, frame; options = JointLoopOptions(fit = J.JointFitOptions(grad_support = :all)))
     # blend gate: on by default (crowdsource's 2.0 then 0.2), `nothing` turns it off; a huge threshold gates nothing in pass 1
@@ -660,6 +670,10 @@ end
                                :significance_A, :significance_B, :nimg, :pass_number)
     @test c[1].flux_B == c.flux_B[1]
     @test all(in(1:length(h)), c.pass_number)
+    # the blend gate's no-level fluxes are the seeds: where it rejects nothing (pass 1, empty model) the run is the
+    # ungated one, whose seeds come from their own joint_point call
+    rg = [fit_joint_multipass(imgs, frame; options = JointLoopOptions(max_iter = 1, min_growth = 0, blend_passes = 1, blend_threshold_initial = t)) for t in (1e-6, nothing)]
+    @test rg[1].history[1].n_blend_rejected == 0 && isequal(collect(rg[1].catalog), collect(rg[2].catalog))
     # memory estimate: per-pixel term plus H (own and pair blocks) and its host copy, P = 4 in Float64
     @test J._memory_estimate(sc, 10, 5) == 87 * length(sc.data) + 2 * 16 * 8 * 15
     @test all(x -> x.mem_est >= 87 * length(sc.data), h)
