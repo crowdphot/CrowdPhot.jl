@@ -190,6 +190,89 @@ end
     end
 end
 
+# grad_support = :model: each source's gradient and own H block from its model box beyond its fit stamp (all of the box where
+# the source has no stamp in the image), over the cost's mask: pixels the cost sees but the stamps do not.  `r` is the weighted
+# residual.  `_wing_sum` covers box pixels m0, m0 + step, ... of source s in image e and returns the local (y, x, flux) sums
+# Σ v r and the upper triangle of Σ v vᵀ.
+@inline function _wing_sum(r, mask, θ, d, w, ay, ax, mR, pidx, s, e, R, m0, step)
+    T = eltype(θ)
+    z1 = z2 = z3 = zero(T)
+    h11 = h12 = h13 = h22 = h23 = h33 = zero(T)
+    Rm = Int32(mR[s, e])
+    Rm > 0 || return z1, z2, z3, h11, h12, h13, h22, h23, h33
+    _, y, x = source_pixel(d, e, θ[1, s], θ[2, s])
+    f = d.ip[IP_SCALE, e] * θ[2 + d.band[e], s]
+    pc = psf_context(d.psf, e, y, x)
+    a = ay[s, e]; b = ax[s, e]; S = 2Rm + Int32(1)
+    own = pidx[s, e] > 0
+    ny = d.dims[1, e]; nx = d.dims[2, e]; off = d.dims[3, e]
+    m = m0
+    while m <= S * S
+        dy = Int32((m - 1) % S) - Rm; dx = Int32((m - 1) ÷ S) - Rm
+        gy = a + dy; gx = b + dx
+        if !(own & (abs(dy) <= R) & (abs(dx) <= R)) & (1 <= gy <= ny) & (1 <= gx <= nx)
+            q = off + gy + (gx - 1) * ny
+            if mask[q]
+                rq = r[q]
+                v1, v2, v3 = stamp_pixel(d, w, e, m, a, b, Rm, y, x, f, pc)
+                z1 += v1 * rq; z2 += v2 * rq; z3 += v3 * rq
+                h11 += v1 * v1; h12 += v1 * v2; h13 += v1 * v3; h22 += v2 * v2; h23 += v2 * v3; h33 += v3 * v3
+            end
+        end
+        m += step
+    end
+    return z1, z2, z3, h11, h12, h13, h22, h23, h33
+end
+
+# Add the local sums of source s in image e to its gradient and raw own H block through the chain rule (as `own_kernel!`).
+@inline function _wing_add!(g, Hd, θ, d, s, e, z1, z2, z3, h11, h12, h13, h22, h23, h33)
+    C = chain(d, θ, s, e)
+    gl = C' * SVector(z1, z2, z3)
+    G = C' * SMatrix{3, 3}(h11, h12, h13, h12, h22, h23, h13, h23, h33) * C
+    ix = (1, 2, 2 + Int(d.band[e]))
+    for q in 1:3
+        g[ix[q], s] += gl[q]
+        for p in 1:3
+            Hd[ix[p], ix[q], s] += G[p, q]
+        end
+    end
+    return nothing
+end
+
+# CPU: one work item per source, over every image.
+@kernel function wing_rows_kernel!(g, Hd, @Const(r), @Const(mask), @Const(θ), d, @Const(w), @Const(ay), @Const(ax), @Const(mR), @Const(pidx), E, R)
+    s = @index(Global)
+    for e in 1:E
+        z1, z2, z3, h11, h12, h13, h22, h23, h33 = _wing_sum(r, mask, θ, d, w, ay, ax, mR, pidx, s, e, R, 1, 1)
+        h11 + h22 + h33 > 0 && _wing_add!(g, Hd, θ, d, s, e, z1, z2, z3, h11, h12, h13, h22, h23, h33)
+    end
+end
+
+# GPU: image e only, one workgroup of BOX_GROUP lanes per source striding over its box (as `box_groups_kernel!`), summed in
+# local memory (the tree assumes BOX_GROUP = 64); one lane adds, and each source is one group's, so no atomics.
+BOX_GROUP == 64 || error("wing_groups_kernel!'s reduction assumes BOX_GROUP = 64, got $BOX_GROUP")
+@kernel function wing_groups_kernel!(g, Hd, @Const(r), @Const(mask), @Const(θ), d, @Const(w), @Const(ay), @Const(ax), @Const(mR), @Const(pidx), e, R)
+    li = @index(Local); s = @index(Group)
+    sh = @localmem eltype(g) (9, BOX_GROUP)
+    v = _wing_sum(r, mask, θ, d, w, ay, ax, mR, pidx, s, e, R, li, BOX_GROUP)
+    for k in 1:9; sh[k, li] = v[k]; end
+    @synchronize
+    li <= 32 && (for k in 1:9; sh[k, li] += sh[k, li + 32]; end)
+    @synchronize
+    li <= 16 && (for k in 1:9; sh[k, li] += sh[k, li + 16]; end)
+    @synchronize
+    li <= 8 && (for k in 1:9; sh[k, li] += sh[k, li + 8]; end)
+    @synchronize
+    li <= 4 && (for k in 1:9; sh[k, li] += sh[k, li + 4]; end)
+    @synchronize
+    li <= 2 && (for k in 1:9; sh[k, li] += sh[k, li + 2]; end)
+    @synchronize
+    if li == 1
+        t = ntuple(k -> sh[k, 1] + sh[k, 2], Val(9))
+        t[4] + t[7] + t[9] > 0 && _wing_add!(g, Hd, θ, d, s, e, t...)
+    end
+end
+
 # Pair blocks: one work item per stored slot q = (row[q], nbr[q]), over the batch's images.
 @kernel function pair_kernel!(Ho, @Const(V), @Const(cn), @Const(θ), d, @Const(ay), @Const(ax), @Const(pidx), @Const(row), @Const(nbr),
                               e0, nb, k0, R)
@@ -445,15 +528,18 @@ LinearizeWork(sc::JointScene{T}; bkg = nothing) where {T} =
                   cost_parts(sc.backend, T), bkg)
 
 """
-    linearize(sc, θ, rt, work; R_fit, stamp_budget = 100_000_000) -> Linearization
+    linearize(sc, θ, rt, work; R_fit, stamp_budget = 100_000_000, grad_support = :fit) -> Linearization
 
-Footprint, cost support and residual, stamps, gradient and equilibrated H at `θ`.  `work.model`
+Footprint, cost support and residual, stamps, gradient and equilibrated H at `θ`; with
+`grad_support = :model` the gradient and each source's own H block also cover its model box beyond
+its stamp (`JointFitOptions`).  `work.model`
 holds the model at `θ` and `work.resid` the weighted residual on return.  One host
 synchronization: the per-image stamp counts, the pair count and the cost partials are read
 together.
 """
 function linearize(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, work::LinearizeWork; R_fit::Integer,
-        stamp_budget::Integer = 100_000_000) where {T}
+        stamp_budget::Integer = 100_000_000, grad_support::Symbol = :fit) where {T}
+    grad_support in (:fit, :model) || throw(ArgumentError("grad_support must be :fit or :model, got :$grad_support"))
     be = sc.backend; P, N = size(θ); E = nimages(sc); R = Int32(R_fit)
     fp = footprint(sc, θ, rt)
     fit_mask!(work.mask, sc, fp, R)
@@ -485,6 +571,16 @@ function linearize(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, wo
         launch!(own_kernel!, be, N, g, Hd, V, cn, work.resid, θ, sc.dev, fp.ay, fp.ax, si.pidx, e0, nb, k0, R)
         launch!(pair_kernel!, be, pat.np, Ho, V, cn, θ, sc.dev, fp.ay, fp.ax, si.pidx, pat.row, pat.nbr, e0, nb, k0, R)
         e0 += nb
+    end
+    if grad_support === :model && N > 0
+        if is_cpu(be)
+            launch!(wing_rows_kernel!, be, N, g, Hd, work.resid, work.mask, θ, sc.dev, sc.weight, fp.ay, fp.ax, fp.mR, si.pidx, E, R)
+        else
+            for e in 1:E
+                wing_groups_kernel!(be, BOX_GROUP)(g, Hd, work.resid, work.mask, θ, sc.dev, sc.weight, fp.ay, fp.ax, fp.mR, si.pidx, Int32(e), R;
+                                                   ndrange = BOX_GROUP * N)
+            end
+        end
     end
     D = KA.allocate(be, T, P, N); hdiag = KA.allocate(be, T, P, N)
     launch!(equilibrate_own_kernel!, be, N, D, hdiag, Hd)

@@ -235,6 +235,43 @@ end
     @test all(isfinite, x) && x ≈ -vec(lin.g ./ lin.D) ./ 2
 end
 
+@testset "grad_support = :model is the cost's gradient and own curvature" begin
+    # automatic model radii reach beyond R_fit: the cost sees each source's light out to its model radius, :fit's
+    # gradient and own H block only its stamp, :model's the whole box within the cost's mask
+    s = two_image_scene(; gridded = true)
+    rng = StableRNG(9)
+    s.sc.data .= randn(rng, length(s.sc.data)) .* 5
+    work = J.LinearizeWork(s.sc)
+    lin = J.linearize(s.sc, s.θ, s.rt, work; R_fit = 3, grad_support = :model)
+    @test maximum(Array(lin.fp.mR)) > 3
+    sw = sqrt.(s.sc.weight) .* work.mask
+    wmodel(θ) = (m = zeros(length(s.sc.data)); J.render!(m, s.sc, θ, lin.fp); sw .* m)
+    r0 = wmodel(s.θ) .- sw .* s.sc.data
+    Jd = zeros(length(s.sc.data), length(s.θ))
+    for k in eachindex(s.θ)
+        h = mod1(k, 4) <= 2 ? 1e-5 : 1e-3
+        tp = copy(s.θ); tp[k] += h; tm = copy(s.θ); tm[k] -= h
+        Jd[:, k] .= (wmodel(tp) .- wmodel(tm)) ./ 2h
+    end
+    @test vec(Array(lin.g)) ≈ Jd' * r0 rtol = 1e-7
+    lf = J.linearize(s.sc, s.θ, s.rt, work; R_fit = 3)
+    @test !isapprox(vec(Array(lf.g)), Jd' * r0; rtol = 1e-3)
+    @test lf.cost == lin.cost
+    # own blocks: Jᵀ J of the source's own columns (sources whose model box covers their stamp in every image: a stamp
+    # reaching past the rendered box holds pixels the model does not); pair blocks as :fit's
+    H, Hf, Hfd = dense_H(lin), dense_H(lf), Jd' * Jd
+    P, N = size(lin.g); mR = Array(lin.fp.mR); blk(i) = (i - 1) * P + 1:i * P
+    full = [all(r -> r == 0 || r >= 3, mR[i, :]) for i in 1:N]
+    @test count(full) > N ÷ 2
+    @test all(i -> isapprox(H[blk(i), blk(i)], Hfd[blk(i), blk(i)]; rtol = 1e-7), findall(full))
+    @test !all(i -> isapprox(Hf[blk(i), blk(i)], Hfd[blk(i), blk(i)]; rtol = 1e-6), findall(full))   # Gaussian wings: ~1e-5
+    for i in 1:N; H[blk(i), blk(i)] .= 0; Hf[blk(i), blk(i)] .= 0; end
+    @test H ≈ Hf rtol = 1e-12
+    r = J.fit_pass(s.sc, s.θ, s.rt, J.JointFitOptions(max_trials = 1, grad_support = :model), 1e3; work)
+    @test r.stats.gain_first ≈ 1 atol = 1e-3
+    @test_throws "grad_support must be :fit or :model, got :all" J.linearize(s.sc, s.θ, s.rt, work; R_fit = 3, grad_support = :all)
+end
+
 @testset "noiseless convergence" begin
     s = two_image_scene(; model_rad = 3)     # fixed radii: the data are rendered with the fit's own boxes
     rng = StableRNG(2)
@@ -610,6 +647,7 @@ end
     @test dn[3] > 0 && dn[4] > 0 && all(==(0), d0)
     @test d1[3] == dn[3] && d1[4] < dn[4]
     @test_throws "discard_passes must be nothing or >= 0, got -1" fit_joint_multipass(imgs, frame; options = JointLoopOptions(discard_passes = -1))
+    @test_throws "grad_support must be :fit or :model, got :all" fit_joint_multipass(imgs, frame; options = JointLoopOptions(fit = J.JointFitOptions(grad_support = :all)))
     # blend gate: on by default (crowdsource's 2.0 then 0.2), `nothing` turns it off; a huge threshold gates nothing in pass 1
     # (the model is empty) and the later peaks on modeled light
     @test (JointLoopOptions().blend_threshold, JointLoopOptions().blend_threshold_initial) == (0.2, 2.0)
