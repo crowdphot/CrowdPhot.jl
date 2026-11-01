@@ -21,6 +21,11 @@ Fitter settings, mirroring the single-image simultaneous fitter's keywords.
 - `stamp_budget = 100_000_000`: bytes of derivative stamps held at once (images are batched, never
   fewer than one image's stamps).  It trades memory only: on simulated Roman stacks the
   linearization time was flat (within ~10%) from 17 MB to 1.07 GB.
+- `grad_support = :fit`: the pixels each source's gradient and own H block sum over.  `:fit`, its
+  own (2 `R_fit` + 1)² stamp; `:model`, also the rest of its model box within the cost's mask, so the
+  gradient is the exact gradient of the cost the trials evaluate (which sees every source's light out
+  to its model radius over the union of fit stamps) and the own block its matching curvature.  The
+  neighbor pairs stay on the stamps either way.
 """
 Base.@kwdef struct JointFitOptions
     R_fit::Int = 3
@@ -37,6 +42,7 @@ Base.@kwdef struct JointFitOptions
     λ_max::Float64 = 1.0e12
     max_step::Float64 = 1.0
     stamp_budget::Int = 100_000_000
+    grad_support::Symbol = :fit
 end
 
 @inline loadblock(H, q, ::Val{P}) where {P} = SMatrix{P, P}(ntuple(k -> H[(q - 1) * P * P + k], Val(P * P)))
@@ -278,7 +284,7 @@ function fit_pass(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, o::
     gain_first = gain_last = NaN
     for l in 1:o.linearizations
         # synchronize so t_lin holds linearize's kernels, not t_solve (cg!'s first reduction waits for them anyway)
-        t_lin += @elapsed (lin = linearize(sc, θ, rt, work; o.R_fit, o.stamp_budget); KA.synchronize(be))
+        t_lin += @elapsed (lin = linearize(sc, θ, rt, work; o.R_fit, o.stamp_budget, o.grad_support); KA.synchronize(be))
         cost = lin.cost
         l == 1 && (cost_start = cost)
         accepted = false

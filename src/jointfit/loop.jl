@@ -404,6 +404,7 @@ end
 function _check_run_args(o::JointLoopOptions, products, coadd_options)
     o.accept in (:nu, :snm) || throw(ArgumentError("accept must be :nu or :snm"))
     o.discard_passes === nothing || o.discard_passes >= 0 || throw(ArgumentError("discard_passes must be nothing or >= 0, got $(o.discard_passes)"))
+    o.fit.grad_support in (:fit, :model) || throw(ArgumentError("grad_support must be :fit or :model, got :$(o.fit.grad_support)"))
     products = Tuple(unique(Iterators.flatten(p === :coadd ? _COADD_DEFAULT : (p,) for p in products)))
     avail = (_IMAGE_PRODUCTS..., _MAP_PRODUCTS..., _COADD_PRODUCTS...)
     bad = setdiff(products, avail)
@@ -478,7 +479,7 @@ function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, pr
     N = size(θh, 2); B = nbands(sc)
     σ = fill(NaN, 2 + B, N); uv_cov = fill(NaN, N); nimg = zeros(Int, N)
     if N > 0
-        lin = linearize(sc, to_device(be, T, θh), st.rt, st.work; f.R_fit, f.stamp_budget)
+        lin = linearize(sc, to_device(be, T, θh), st.rt, st.work; f.R_fit, f.stamp_budget, f.grad_support)
         Σ = marginal_covariances(HostH(lin); k = o.error_neighbors)
         σ = Float64.(marginal_errors(Σ)); uv_cov = Float64.(Σ[1, 2, :])
         nimg = Int.(Array(lin.nimg))
