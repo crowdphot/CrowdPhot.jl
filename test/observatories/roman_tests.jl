@@ -1,6 +1,6 @@
 import CrowdPhot
 using CrowdPhot.Roman: crds_gridded_epsf, load_l2, load_area, DQ_FLAGS, dq_mask_value,
-    parse_dq_mask, bad_pixel_mask, jansky_per_flux_unit
+    parse_dq_mask, bad_pixel_mask, jansky_per_flux_unit, uniform_delta
 using CrowdPhot.PSF: GriddedPSFModel, ImagePSF, pixel_response_kernel
 using ASDF
 using OrderedCollections: OrderedDict
@@ -353,8 +353,32 @@ end
         l2u = load_l2(pathu; ramp_weights = :uniform)
         @test l2u.data == permutedims(data .+ Float32.(dumo)) && l2u.data isa Matrix{Float32}
         @test l2u.err == permutedims(err) && l2u.dq == l2.dq
+        @test l2u.n_uniform == (; n_jump = 0, n_replaced = 0) && l2.n_uniform === nothing
         @test_throws "has no \"dumo\" array" load_l2(path; ramp_weights = :uniform)
         @test_throws "ramp_weights must be :optimal or :uniform" load_l2(pathu; ramp_weights = :mean)
+        # JUMP_DET pixels: a cosmic ray on faint sky (data 11, err 1.1, dumo 100) takes the optimal value, a small jump on
+        # (y, x) = (2, 2) (data 22, err 2.2, dumo 3 < 5 err) keeps the uniform one
+        dqj = copy(dq_raw); dqj[1, 1] = dqj[2, 2] = DQ_FLAGS[:JUMP_DET]
+        dumoj = zeros(Float16, nx, ny); dumoj[1, 1] = 100; dumoj[2, 2] = 3; dumoj[3, 3] = 1
+        pathj = joinpath(dir, "l2_jump.asdf")
+        ASDF.save(pathj, OrderedDict("roman" => merge(tree["roman"], OrderedDict("dq" => nd(dqj, "uint32"), "dumo" => nd(dumoj, "float16")))))
+        l2j = load_l2(pathj; ramp_weights = :uniform)
+        @test l2j.data[1, 1] == 11 && l2j.data[2, 2] == 25 && l2j.data[3, 3] == 34      # unflagged (3, 3) keeps its dumo
+        @test l2j.n_uniform == (; n_jump = 2, n_replaced = 1)
+        @test load_l2(pathj; ramp_weights = :uniform, uniform_jumps = :keep).data[1, 1] == 111
+        l2d = load_l2(pathj; ramp_weights = :uniform, uniform_jumps = :data)
+        @test l2d.data[2, 2] == 22 && l2d.data[3, 3] == 34 && l2d.n_uniform.n_replaced == 2
+        @test_throws "uniform_jumps must be :clip, :keep or :data" load_l2(pathj; ramp_weights = :uniform, uniform_jumps = :mask)
+        # uniform_delta directly: within 5 err kept, beyond replaced, no usable err replaced, NaN dumo is 0 (kept)
+        J = DQ_FLAGS[:JUMP_DET]
+        d = Float32[0 0 0 100]; e = Float32[1 1 0 1]; q = UInt32[J J J J]
+        u = uniform_delta(d, Float32[4 6 1 NaN], q, e)
+        @test u.delta == Float32[4 0 0 0] && u.n_jump == 4 && u.n_replaced == 2
+        # a bright pixel's noise includes frac x signal: 5 hypot(1, 0.2 x 100) ≈ 100.1 (sky = median 0)
+        @test uniform_delta(d, Float32[0 0 0 99], q, e).delta[4] == 99
+        @test uniform_delta(d, Float32[0 0 0 101], q, e).delta[4] == 0
+        @test uniform_delta(d, Float32[0 0 0 101], q, e; frac = 0.3).delta[4] == 101
+        @test_throws DimensionMismatch uniform_delta(d, Float32[1 2], q, e)
 
         area_tree = OrderedDict("roman" => OrderedDict(
             "meta" => OrderedDict("useafter" => "2020-01-01"), "data" => nd(data, "float32")))
