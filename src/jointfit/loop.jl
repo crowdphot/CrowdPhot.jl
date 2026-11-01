@@ -22,7 +22,8 @@
 - `blend_threshold = 0.2`, `blend_threshold_initial = blend_threshold === nothing ? nothing : 2.0`,
   `blend_passes = 2`: the single-image fitter's model-based blend gate (see
   [`CrowdPhot.fit_all_stars_simultaneous_multipass`](@ref)), based on crowdsource.  A peak
-  is kept only if its seed's light in its own pixel exceeds `t` times the rendered model's there,
+  is kept only if its seed's light (the detector's `joint_point` flux without the local level, as
+  the new source starts with) in its own pixel exceeds `t` times the rendered model's there,
   summed over the images with S/N weights ([`blend_terms`](@ref)); `t = blend_threshold_initial`
   on passes `1:blend_passes`, `blend_threshold` afterwards, and `nothing` does not gate.  It cannot
   gate in pass 1 (the model is empty), so it complements the wing gate.  Peaks whose pixel is
@@ -169,6 +170,13 @@ function _backgrounds!(st, θ, pass, o::JointLoopOptions)
     return nothing
 end
 
+# The detection with its detector's local level off, for the new sources' seed fluxes (and the blend gate's): the model
+# has no level, and a level fitted next to a bright star's over-subtracted wing (a negative residual) inflates the flux
+# above it 2-4x.  Detection keeps the level, which absorbs the ePSF's wing and diffraction structure.  The banks do not
+# depend on it.
+_without_level(jd::JointDetection) = (d = jd.det;
+    JointDetection(JointDetector(d.method, d.rap, d.rchi, false, d.μ, d.mf_half, d.Q, d.K, d.psf_regions), jd.grid, jd.banks, jd.tptr, jd.timg, jd.wf, jd.tile, jd.ntr))
+
 # Uniform-bucket index answering "is there a point within `sep`?"
 _sep_index(sep) = (; sep, cells = Dict{NTuple{2, Int}, Vector{NTuple{2, Float64}}}())
 _sep_add!(ix, u, v) = push!(get!(() -> NTuple{2, Float64}[], ix.cells, (floor(Int, u / ix.sep), floor(Int, v / ix.sep))), (u, v))
@@ -195,31 +203,36 @@ function _detect_new(st, θh, disc, o::JointLoopOptions, pass)
     # the blend gate against the rendered model (st.work.model, set by _backgrounds! this pass)
     thr = pass <= o.blend_passes ? o.blend_threshold_initial : o.blend_threshold
     n_blend = 0
+    jds = _without_level(jd)
+    gate_flux = nothing                            # the gate's seed fluxes, per kept peak: the survivors' seeds
     if thr !== nothing && !isempty(pk.y)
         B = nbands(sc)
         uv = to_device(sc.backend, eltype(sc), permutedims(hcat((pk.y .- 0.5) ./ K .+ 0.5, (pk.x .- 0.5) ./ K .+ 0.5)))
-        seed = joint_point(jd, sc, st.det_data, st.det_iv, uv)[4:3 + B, :]
+        seed = joint_point(jds, sc, st.det_data, st.det_iv, uv)[4:3 + B, :]
         bt = Array(blend_terms(jd, sc, st.work.model, st.det_iv, uv, seed))
         # a peak no image has a usable pixel for (a masked saturated core) is not gated
         keep = [bt[3, i] == 0 || bt[1, i] > thr * bt[2, i] for i in axes(bt, 2)]
         n_blend = count(!, keep)
         pk = map(x -> x[keep], pk)
+        gate_flux = Array(seed)[:, keep]
     end
     occ = _sep_index(o.min_separation); dsc = _sep_index(o.min_separation)
     for s in axes(θh, 2); _sep_add!(occ, θh[1, s], θh[2, s]); end
     for (u, v) in disc; _sep_add!(dsc, u, v); end
-    us = Float64[]; vs = Float64[]; nd_cat = 0; nd_disc = 0
+    us = Float64[]; vs = Float64[]; nd_cat = 0; nd_disc = 0; kept = Int[]
     for i in eachindex(pk.y)                       # find_peaks orders by snm, descending
         u = (pk.y[i] - 0.5) / K + 0.5; v = (pk.x[i] - 0.5) / K + 0.5
         _sep_hit(occ, u, v) && (nd_cat += 1; continue)
         _sep_hit(dsc, u, v) && (nd_disc += 1; continue)
-        push!(us, u); push!(vs, v)
+        push!(us, u); push!(vs, v); push!(kept, i)
         _sep_add!(occ, u, v)                       # mutual dedup within the batch
     end
     B = nbands(sc)
     flux = zeros(B, length(us))
-    if !isempty(us)
-        jp = Array(joint_point(jd, sc, st.det_data, st.det_iv, to_device(sc.backend, eltype(sc), permutedims(hcat(us, vs)))))
+    if gate_flux !== nothing
+        flux .= map(x -> isfinite(x) ? Float64(x) : 0.0, gate_flux[:, kept])
+    elseif !isempty(us)
+        jp = Array(joint_point(jds, sc, st.det_data, st.det_iv, to_device(sc.backend, eltype(sc), permutedims(hcat(us, vs)))))
         flux .= map(x -> isfinite(x) ? Float64(x) : 0.0, jp[4:3 + B, :])
     end
     return (; u = us, v = vs, flux, n_peaks, n_gated, n_blend, nd_cat, nd_disc)
