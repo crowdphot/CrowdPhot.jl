@@ -178,6 +178,49 @@ CGWork(be, ::Type{T}, n, N) where {T} =
 _cg_sum!(s, k, part, be) = cg_sum_kernel!(be, CG_GROUP)(s, k, part, length(part); ndrange = CG_GROUP)
 _padded(n) = cld(n, CG_GROUP) * CG_GROUP
 
+# y = D (θc - θ) (the step in the equilibrated system) and part[g] = the group's Σ g (θc - θ).
+@kernel function pred_y_kernel!(y, part, @Const(θc), @Const(θ), @Const(g0), @Const(D), n)
+    i = @index(Global); li = @index(Local); g = @index(Group)
+    sh = @localmem eltype(y) (CG_GROUP,)
+    d = zero(eltype(y))
+    if i <= n
+        δ = θc[i] - θ[i]
+        y[i] = D[i] * δ; d = g0[i] * δ
+    end
+    sh[li] = d
+    @synchronize
+    li <= 128 && (sh[li] += sh[li + 128])
+    @synchronize
+    li <= 64 && (sh[li] += sh[li + 64])
+    @synchronize
+    li <= 32 && (sh[li] += sh[li + 32])
+    @synchronize
+    li <= 16 && (sh[li] += sh[li + 16])
+    @synchronize
+    li <= 8 && (sh[li] += sh[li + 8])
+    @synchronize
+    li <= 4 && (sh[li] += sh[li + 4])
+    @synchronize
+    li <= 2 && (sh[li] += sh[li + 2])
+    @synchronize
+    li == 1 && (part[g] = sh[1] + sh[2])
+end
+
+"""
+The cost change the linearization predicts for the step `θc - θ` (as taken, after the position cap): 2 gᵀδ + δᵀHδ with the
+undamped H, the second term as yᵀH̃y for y = D δ.  Uses the CG vectors r and q, free once the step is applied; one host read.
+"""
+function predicted_change(w::CGWork, lin::Linearization, θc, θ, be)
+    n = length(w.x); P, N = size(lin.D); T = eltype(w.x)
+    pred_y_kernel!(be, CG_GROUP)(w.r, w.pr, vec(θc), vec(θ), vec(lin.g), vec(lin.D), n; ndrange = _padded(n))
+    _cg_sum!(w.s, 1, w.pr, be)
+    hmul_kernel!(be, CG_GROUP)(w.q, w.ph, w.r, lin.Hd, lin.Ho, lin.pat.ptr, lin.pat.nbr, lin.pat.cptr, lin.pat.cslot, lin.pat.row,
+                               zero(T), N, Val(P); ndrange = _padded(N))
+    _cg_sum!(w.s, 2, w.ph, be)
+    s = Array(w.s)
+    return 2 * Float64(s[1]) + Float64(s[2])
+end
+
 "`itmax` CG iterations on (H̃ + λI) x = -g ./ D from x = 0 (same recurrences as Krylov.cg)."
 function cg!(w::CGWork, lin::Linearization, λ, itmax, be)
     n = length(w.x); P, N = size(lin.D); T = eltype(w.x)
@@ -219,7 +262,10 @@ end
 schedule: `λ` floored at `λ_init` when `n_new` sources were just added, divided by `λ_down` on
 an accepted step, multiplied by `λ_up` on a rejected one, up to `max_trials` per
 linearization.  Trial costs use the linearization's anchors, model radii and cost support.
-`lin` is the last linearization (H at the start of the last accepted step).
+`lin` is the last linearization (H at the start of the last accepted step).  `stats` holds the
+first and last trial's gain ratio (actual / predicted cost change, [`predicted_change`](@ref); ~1
+where the linearization describes the cost, ≤ 0 for a rejected step whose predicted decrease did not
+happen) as `gain_first` and `gain_last` (NaN without trials).
 """
 function fit_pass(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, o::JointFitOptions, λ::Real;
         n_new::Integer = 0, work::LinearizeWork = LinearizeWork(sc)) where {T}
@@ -229,8 +275,10 @@ function fit_pass(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, o::
     θ = copy(θ); θc = similar(θ)
     lin = nothing; n_trials = 0; n_accepted = 0; cost_start = NaN; cost = NaN
     t_lin = t_solve = t_trial = 0.0
+    gain_first = gain_last = NaN
     for l in 1:o.linearizations
-        t_lin += @elapsed lin = linearize(sc, θ, rt, work; o.R_fit, o.stamp_budget)
+        # synchronize so t_lin holds linearize's kernels, not t_solve (cg!'s first reduction waits for them anyway)
+        t_lin += @elapsed (lin = linearize(sc, θ, rt, work; o.R_fit, o.stamp_budget); KA.synchronize(be))
         cost = lin.cost
         l == 1 && (cost_start = cost)
         accepted = false
@@ -238,12 +286,14 @@ function fit_pass(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, o::
             t_solve += @elapsed begin
                 x = cg!(cgw, lin, λ, o.cg_iterations, be)
                 launch!(step_kernel!, be, N, θc, θ, x, lin.D, T(o.max_step))
+                pred = predicted_change(cgw, lin, θc, θ, be)
             end
             t_trial += @elapsed begin
                 render!(work.model, sc, θc, lin.fp)
                 cc = cost!(work.resid, sc, work.model, work.mask, work.part, work.bkg)
             end
             n_trials += 1
+            gain_last = (cc - cost) / pred; isnan(gain_first) && (gain_first = gain_last)
             if cc < cost
                 θ, θc = θc, θ
                 cost = cc
@@ -255,6 +305,6 @@ function fit_pass(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, o::
         end
         accepted || break
     end
-    stats = (; n_trials, n_accepted, cost_start, cost_end = cost, t_lin, t_solve, t_trial)
+    stats = (; n_trials, n_accepted, cost_start, cost_end = cost, gain_first, gain_last, t_lin, t_solve, t_trial)
     return (; θ, λ, lin, stats)
 end
