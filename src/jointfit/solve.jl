@@ -91,7 +91,9 @@ const CG_GROUP = 256
 end
 
 # x += α p, r -= α q (α = s[a] / s[2]) and part[g] = the group's Σ r²; with `init`, r = p = -g ./ D
-# instead (x untouched) and the same Σ r².
+# instead (x untouched) and the same Σ r².  Once CG has converged (p = 0, so pᵀ(H̃ + λI)p = 0) α is 0, not
+# 0/0: with heavy damping CG converges in a few of its fixed iterations, the residual underflows, and a
+# GPU that flushes subnormals to zero (Metal) turned the whole step into NaN.
 @kernel function cg_xr_kernel!(x, r, p, part, @Const(q), @Const(g0), @Const(D), @Const(s), a, n, init::Bool)
     i = @index(Global); li = @index(Local); g = @index(Group)
     sh = @localmem eltype(x) (CG_GROUP,)
@@ -101,7 +103,7 @@ end
             v = -g0[i] / D[i]
             r[i] = v; p[i] = v; d = v * v
         else
-            α = s[a] / s[2]
+            α = s[2] > 0 ? s[a] / s[2] : zero(eltype(x))
             x[i] += α * p[i]
             v = r[i] - α * q[i]
             r[i] = v; d = v * v
@@ -153,9 +155,11 @@ end
     li == 1 && (s[k] = sh[1] + sh[2])
 end
 
+# p = r + β p, β = |r_new|² / |r_old|² (0 once the residual is 0; see `cg_xr_kernel!`)
 @kernel function cg_p_kernel!(p, @Const(r), @Const(s), a, b)
     i = @index(Global)
-    p[i] = r[i] + (s[b] / s[a]) * p[i]
+    β = s[a] > 0 ? s[b] / s[a] : zero(eltype(p))
+    p[i] = r[i] + β * p[i]
 end
 
 "CG vectors, device scalars and the partial sums of the wide kernels, for `n = P N` unknowns."
