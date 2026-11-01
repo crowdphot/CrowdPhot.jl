@@ -35,7 +35,11 @@ See [Data quality flags](@ref roman_dq) below. With `bad_pixels = true`,
 flag, with [`bad_pixel_mask`](@ref); this is mostly needed for `romanisim`
 simulations, whose DQ arrays may miss defective pixels.
 `ramp_weights = :uniform` returns the uniformly weighted ramp fit instead of
-the optimally weighted one.
+the optimally weighted one. romancal's uniform fit keeps the cosmic rays the
+optimal fit removed, so on JUMP_DET pixels [`uniform_delta`](@ref) keeps the
+uniform value only where it is within a cosmic ray's worth of the optimal one
+(`uniform_jumps = :clip`, the default; `:keep` and `:data` keep or replace all
+of them).
 
 [`load_area`](@ref) reads a pixel area map (PAM) reference file the same way.
 
@@ -192,6 +196,7 @@ model = GriddedPSFModel(stamps, afr["meta"]["pixel_y"], afr["meta"]["pixel_x"])
 
 ```@docs
 load_l2
+uniform_delta
 load_area
 jansky_per_flux_unit
 DQ_FLAGS
