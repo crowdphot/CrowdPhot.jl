@@ -78,7 +78,7 @@ lazy(imgs, reads; fail = 0) = [JointImage(RangeOnly(im.data, reads; fail), Range
 end
 
 @testset "merging tile catalogs" begin
-    rows(k, u, v, depth) = (n = length(u); (; u, v, ra = u, dec = v, u_err = fill(0.1, n), v_err = fill(0.1, n), flux_A = ones(n), flux_err_A = fill(0.1, n),
+    rows(k, u, v, depth) = (n = length(u); (; u, v, ra = u, dec = v, u_err = fill(0.1, n), v_err = fill(0.1, n), uv_cov = fill(0.001, n), flux_A = ones(n), flux_err_A = fill(0.1, n),
                                            significance = fill(9.0, n), significance_A = fill(9.0, n), nimg = fill(2, n), pass_number = fill(1, n),
                                            tile = fill(k, n), depth))
     # the second tile's first source duplicates the first tile's second one (within sep), shallower in its own tile
@@ -211,7 +211,7 @@ end
     @test R.tiles[1].bands == [:A] && R.tiles[2].bands == [:A, :B] && R.tiles[3].bands == [:B, :A]
     @test R.tiles[1].images == [1, 4] && R.tiles[2].images == [1, 2, 3, 4] && R.tiles[3].images == [2, 3, 4]
     c = R.catalog
-    @test propertynames(c)[7:10] == (:flux_A, :flux_B, :flux_err_A, :flux_err_B)
+    @test propertynames(c)[8:11] == (:flux_A, :flux_B, :flux_err_A, :flux_err_B)
     l = c.tile .== 1; r = c.tile .== 3
     @test count(l) > 50 && count(r) > 50
     @test all(isnan, c.flux_B[l]) && all(isnan, c.significance_B[l]) && all(isfinite, c.flux_A[l])

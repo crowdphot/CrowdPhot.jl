@@ -270,7 +270,8 @@ _memory_estimate(sc::JointScene, N, np) = (is_cpu(sc.backend) ? 87 : 56) * lengt
 
 Joint multipass photometry of `images` (`JointImage`s) with source positions on `frame`.
 Returns `catalog`, a `StructArray` (a Tables.jl table) with columns `u, v` (positions on
-`frame`), `ra, dec`, `u_err, v_err`, then per band `b` (in `bands` order) `flux_b`, `flux_err_b`,
+`frame`), `ra, dec`, `u_err, v_err` and `uv_cov` (the u-v covariance, frame px², so the
+position's covariance is `[u_err² uv_cov; uv_cov v_err²]`), then per band `b` (in `bands` order) `flux_b`, `flux_err_b`,
 the joint final `significance` and per band `significance_b`, `nimg` (images with data) and
 `pass_number` (the pass that first detected the source); the `bands` order; the per-pass
 `history` (with PSF refinement, `refine` holds per PSF group the step's star counts, IRLS
@@ -475,17 +476,18 @@ function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, pr
         θh = θh[:, ok]; born = born[ok]
     end
     N = size(θh, 2); B = nbands(sc)
-    σ = fill(NaN, 2 + B, N); nimg = zeros(Int, N)
+    σ = fill(NaN, 2 + B, N); uv_cov = fill(NaN, N); nimg = zeros(Int, N)
     if N > 0
         lin = linearize(sc, to_device(be, T, θh), st.rt, st.work; f.R_fit, f.stamp_budget)
-        σ = Float64.(marginal_errors(HostH(lin); k = o.error_neighbors))
+        Σ = marginal_covariances(HostH(lin); k = o.error_neighbors)
+        σ = Float64.(marginal_errors(Σ)); uv_cov = Float64.(Σ[1, 2, :])
         nimg = Int.(Array(lin.nimg))
     end
     sb, joint = final_significance(θh, σ)
     radec = [grid_to_world(sc.frame, θh[1, s], θh[2, s]) for s in 1:N]
     # one column per band and quantity, named by band symbol
     perband(q, M) = NamedTuple{Tuple(Symbol(q, :_, b) for b in sc.bands)}(Tuple(M[:, k] for k in 1:B))
-    cols = merge((; u = θh[1, :], v = θh[2, :], ra = first.(radec), dec = last.(radec), u_err = σ[1, :], v_err = σ[2, :]),
+    cols = merge((; u = θh[1, :], v = θh[2, :], ra = first.(radec), dec = last.(radec), u_err = σ[1, :], v_err = σ[2, :], uv_cov),
                  perband(:flux, permutedims(θh[3:end, :])), perband(:flux_err, permutedims(σ[3:end, :])), (; significance = joint),
                  perband(:significance, sb), (; nimg, pass_number = born))
     return StructArray(cols), _products(st, θh, products, coadd_options), ok
