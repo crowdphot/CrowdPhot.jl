@@ -220,6 +220,17 @@ end
     @test dense_H(lin) ≈ Jd' * Jd rtol = 1e-7
 end
 
+@testset "CG past convergence" begin
+    # with H̃ = 0, CG solves λ x = -g ./ D in one iteration; the remaining fixed iterations meet p = 0 and must
+    # not divide 0 by 0 (a residual that underflowed did on Metal, which flushes subnormals to zero)
+    s = two_image_scene()
+    lin = J.linearize(s.sc, s.θ, s.rt, J.LinearizeWork(s.sc); R_fit = 3)
+    fill!(lin.Hd, 0); fill!(lin.Ho, 0)
+    P, N = size(lin.D)
+    x = J.cg!(J.CGWork(s.sc.backend, Float64, P * N, N), lin, 2.0, 10, s.sc.backend)
+    @test all(isfinite, x) && x ≈ -vec(lin.g ./ lin.D) ./ 2
+end
+
 @testset "noiseless convergence" begin
     s = two_image_scene(; model_rad = 3)     # fixed radii: the data are rendered with the fit's own boxes
     rng = StableRNG(2)
