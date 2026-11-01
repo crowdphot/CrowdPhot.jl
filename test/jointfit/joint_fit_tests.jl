@@ -218,6 +218,10 @@ end
     end
     @test vec(Array(lin.g)) ≈ Jd' * r0 rtol = 1e-7
     @test dense_H(lin) ≈ Jd' * Jd rtol = 1e-7
+    # a step much shorter than Gauss-Newton's (λ = 1e3): the gain ratio, actual / predicted cost change, is 1
+    r = J.fit_pass(s.sc, s.θ, s.rt, J.JointFitOptions(max_trials = 1), 1e3; work)
+    @test r.stats.gain_first ≈ 1 atol = 1e-3
+    @test r.stats.gain_last == r.stats.gain_first
 end
 
 @testset "CG past convergence" begin
