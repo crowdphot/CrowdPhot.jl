@@ -26,6 +26,7 @@ using ..Background: MeanBackground, MedianBackground, SExtractorBackground, MMMB
 
 export TanGrid, world_to_grid, grid_to_world, oversample, fits_wcs, PolyMap, JointImage, JointScene
 export JointDetector, JointFitOptions, JointLoopOptions, PSFRefineOptions, fit_joint_multipass, fit_joint_tiled, plan_tiles, coadd
+export NeighborList, pairs_within, cross_pairs, nearest_within
 
 include("frame.jl")
 include("polymap.jl")
@@ -33,6 +34,7 @@ include("launch.jl")
 include("psfs.jl")
 include("scene.jl")
 include("render.jl")
+include("neighbors.jl")
 include("linearize.jl")
 include("solve.jl")
 include("detect.jl")

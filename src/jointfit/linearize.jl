@@ -327,55 +327,35 @@ function pair_reach(sc::JointScene, R)
     return (2R + 1) * jmax * 1.01
 end
 
-# The pattern is built on the device (adapted from the solver study's `pattern_dev.jl`): a cell
-# grid of side `h` over the sources, a counting sort of sources into cells, a count and then a write
-# of each source's candidates in its 3x3 cells, and the transposed index.  Atomics make the slot
-# order run-dependent, so each row and each column segment is then insertion-sorted (they are a few
-# entries long): the result is deterministic and identical to a serial build, with sorted rows
-# (`hblock` relies on that).
+# The pattern is built on the device (adapted from the solver study's `pattern_dev.jl`): the cell
+# grid of `cell_grid` (neighbors.jl) over the sources, a count and then a write of each source's
+# candidates in its 3x3 cells, and the transposed index.  Atomics make the slot order run-dependent,
+# so each row and each column segment is then insertion-sorted (they are a few entries long): the
+# result is deterministic and identical to a serial build, with sorted rows (`hblock` relies on that).
 
-@inline function pair_cell(u, v, cg)
-    a = clamp(unsafe_trunc(Int32, floor((u - cg[1]) / cg[3])), Int32(0), Int32(cg[4]) - Int32(1))
-    b = clamp(unsafe_trunc(Int32, floor((v - cg[2]) / cg[3])), Int32(0), Int32(cg[5]) - Int32(1))
-    return a, b
-end
-@inline pair_cell_index(a, b, nu, nv) = ((0 <= a < nu) & (0 <= b < nv)) ? a + nu * b + Int32(1) : Int32(0)
 @inline is_pair(j, i, ui, vi, θ, h) = (j > i) && ((abs(θ[1, j] - ui) <= h) & (abs(θ[2, j] - vi) <= h))
 
-@kernel function cell_count_kernel!(cell, ccount, @Const(θ), cg)
-    i = @index(Global)
-    a, b = pair_cell(θ[1, i], θ[2, i], cg)
-    c = a + Int32(cg[4]) * b + Int32(1)
-    cell[i] = c
-    Atomix.@atomic ccount[c + 1] += Int32(1)
-end
-
-@kernel function cell_scatter_kernel!(order, cfill, @Const(cell), @Const(cstart))
-    i = @index(Global)
-    c = cell[i]
-    k = Atomix.@atomic cfill[c] += Int32(1)    # the post-increment value
-    order[cstart[c] + k - Int32(1)] = i
-end
-
 # Count (`write = false`) or write (`true`) source i's candidates j > i in its 3x3 cells.
-@kernel function pair_scan_kernel!(cnt, nbr, row, ccol, @Const(ptr), @Const(θ), @Const(cell), @Const(cstart), @Const(order), cg, write::Bool)
+@kernel function pair_scan_kernel!(cnt, nbr, row, ccol, @Const(ptr), @Const(θ), @Const(cell), @Const(cstart), @Const(order), cg, h, write::Bool)
     i = @index(Global)
-    ui = θ[1, i]; vi = θ[2, i]; h = cg[3]
+    ui = θ[1, i]; vi = θ[2, i]
     nu = Int32(cg[4]); nv = Int32(cg[5])
     c = cell[i] - Int32(1); a = c % nu; b = c ÷ nu
     n = Int32(0); k = write ? ptr[i] : Int32(0)
-    for db in Int32(-1):Int32(1), da in Int32(-1):Int32(1)
-        cc = pair_cell_index(a + da, b + db, nu, nv)
-        cc == 0 && continue
-        for q in cstart[cc]:(cstart[cc + 1] - Int32(1))
-            j = order[q]
-            is_pair(j, i, ui, vi, θ, h) || continue
-            if write
-                nbr[k] = j; row[k] = i
-                Atomix.@atomic ccol[j + 1] += Int32(1)
-                k += Int32(1)
-            else
-                n += Int32(1)
+    if c >= 0                                      # cell 0: a non-finite position, no pairs
+        for db in Int32(-1):Int32(1), da in Int32(-1):Int32(1)
+            cc = grid_cell_index(a + da, b + db, nu, nv)
+            cc == 0 && continue
+            for q in cstart[cc]:(cstart[cc + 1] - Int32(1))
+                j = order[q]
+                is_pair(j, i, ui, vi, θ, h) || continue
+                if write
+                    nbr[k] = j; row[k] = i
+                    Atomix.@atomic ccol[j + 1] += Int32(1)
+                    k += Int32(1)
+                else
+                    n += Int32(1)
+                end
             end
         end
     end
@@ -388,26 +368,6 @@ end
     k = Atomix.@atomic cfill[j] += Int32(1)
     cslot[cptr[j] + k - Int32(1)] = q
 end
-
-# Insertion sort of x[ptr[i] : ptr[i+1]-1] for each segment i.
-@kernel function segment_sort_kernel!(x, @Const(ptr))
-    i = @index(Global)
-    lo = ptr[i]; hi = ptr[i + 1] - Int32(1)
-    for p in (lo + Int32(1)):hi
-        v = x[p]; q = p - Int32(1)
-        while q >= lo && x[q] > v
-            x[q + 1] = x[q]; q -= Int32(1)
-        end
-        x[q + 1] = v
-    end
-end
-
-# Inclusive scan in x's element type, out of place (`cumsum` widens Int32 to Int64; Metal's
-# `cumsum!` compiles anew for every array length).
-_scan(x) = scan!(copy(x))
-
-# Counts written into x[2:end]; returns starts from 1: [1, 1 + x[2], 1 + x[2] + x[3], ...].
-_scan_from_one(x) = (fill!(view(x, 1:1), one(eltype(x))); _scan(x))
 
 """
     PairPattern(be, θ, h; ext = nothing) -> PairPattern
@@ -426,28 +386,14 @@ function PairPattern(be, θ::AbstractMatrix, h::Real; ext = nothing)
     return pair_fill(be, θ, c, np)
 end
 
-# Cells, the counting sort into cells and each row's pair count and start (`ptr`); no host read
-# beyond the bounding box when `ext` is not given.
+# The cell grid and each row's pair count and start (`ptr`); no host read beyond the bounding box
+# when `ext` is not given.
 function pair_count(be, θ::AbstractMatrix, h::Real, ext)
-    T = eltype(θ); N = size(θ, 2)
-    if ext === nothing
-        big = typemax(T); small = typemin(T)        # captured as values: a captured type is not a valid GPU kernel argument
-        lo(r) = mapreduce(x -> isfinite(x) ? x : big, min, view(θ, r, :); init = big)
-        hi(r) = mapreduce(x -> isfinite(x) ? x : small, max, view(θ, r, :); init = small)
-        u0, u1, v0, v1 = N > 0 ? (lo(1), hi(1), lo(2), hi(2)) : (zero(T), zero(T), zero(T), zero(T))
-        isfinite(u0) || (u0 = u1 = v0 = v1 = zero(T))
-    else
-        u0, v0 = T(0.5), T(0.5); u1, v1 = T(ext[1] + 0.5), T(ext[2] + 0.5)
-    end
-    nu = floor(Int, (u1 - u0) / h) + 1; nv = floor(Int, (v1 - v0) / h) + 1
-    cg = (T(u0), T(v0), T(h), T(nu), T(nv))
-    z(n) = KA.zeros(be, Int32, n)
-    cell = z(N); ccount = z(nu * nv + 1); cfill = z(nu * nv); order = z(N); cnt = z(N + 1)
-    launch!(cell_count_kernel!, be, N, cell, ccount, θ, cg)
-    cstart = _scan_from_one(ccount)
-    launch!(cell_scatter_kernel!, be, N, order, cfill, cell, cstart)
-    launch!(pair_scan_kernel!, be, N, cnt, cnt, cnt, cnt, cnt, θ, cell, cstart, order, cg, false)
-    return (; cell, cstart, order, cnt, cg, ptr = _scan_from_one(cnt))
+    N = size(θ, 2); hT = eltype(θ)(h)
+    g = cell_grid(be, θ, h, ext)
+    cnt = KA.zeros(be, Int32, N + 1)
+    launch!(pair_scan_kernel!, be, N, cnt, cnt, cnt, cnt, cnt, θ, g.cell, g.cstart, g.order, g.cg, hT, false)
+    return (; g.cell, g.cstart, g.order, g.cg, h = hT, cnt, ptr = _scan_from_one(cnt))
 end
 
 # The pair arrays for `np` pairs (read from `c.ptr[N + 1] - 1`), written, row-sorted and transposed.
@@ -455,7 +401,7 @@ function pair_fill(be, θ::AbstractMatrix, c, np::Integer)
     N = size(θ, 2)
     ccol = KA.zeros(be, Int32, N + 1); cfillc = KA.zeros(be, Int32, N)
     nbr = KA.allocate(be, Int32, np); row = KA.allocate(be, Int32, np); cslot = KA.allocate(be, Int32, np)
-    launch!(pair_scan_kernel!, be, N, c.cnt, nbr, row, ccol, c.ptr, θ, c.cell, c.cstart, c.order, c.cg, true)
+    launch!(pair_scan_kernel!, be, N, c.cnt, nbr, row, ccol, c.ptr, θ, c.cell, c.cstart, c.order, c.cg, c.h, true)
     launch!(segment_sort_kernel!, be, N, nbr, c.ptr)                         # rows: row[] is unaffected
     cptr = _scan_from_one(ccol)
     launch!(col_scatter_kernel!, be, np, cslot, cfillc, nbr, cptr)
