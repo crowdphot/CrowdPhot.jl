@@ -57,11 +57,13 @@ oversample(g::TanGrid, K::Integer) =
 """
     fits_wcs(g::TanGrid) -> Vector{Tuple{String, Any, String}}
 
-FITS WCS keywords `(keyword, value, comment)` for a matrix on `g` written as is: Julia's first
-index is FITS axis 1, so axis 1 runs north and axis 2 west, and the `CD` matrix has zero
-diagonal.  Pass them to a FITS writer as the header (with FITSIO loaded, `FITSHeader(g)` builds
-one).  The projection is exactly `g`'s gnomonic one; the celestial frame is whatever `to_sky`
-returned (FITS assumes ICRS when `RADESYS` is absent).
+FITS WCS keywords `(keyword, value, comment)` for a matrix `A` on `g` in the usual FITS layout:
+axis 1 is `g`'s column and axis 2 its row, so north is up and east left in a viewer.  FITS
+writers put Julia's first index on axis 1, so the data written is `permutedims(A)`, the inverse
+of reading an image into CrowdPhot's `(y, x)` convention with `permutedims(read(hdu))`.  With
+FITSIO loaded, `write(f, A, g)` writes both and `FITSHeader(g)` builds the header alone.  The
+projection is exactly `g`'s gnomonic one; the celestial frame is whatever `to_sky` returned
+(FITS assumes ICRS when `RADESYS` is absent).
 """
 function fits_wcs(g::TanGrid)
     s = g.scale / 3600
@@ -71,12 +73,12 @@ function fits_wcs(g::TanGrid)
         ("CTYPE2", "DEC--TAN", "gnomonic projection"),
         ("CRVAL1", g.ra0, "[deg] RA of the tangent point"),
         ("CRVAL2", g.dec0, "[deg] Dec of the tangent point"),
-        ("CRPIX1", g.cy, "axis-1 (row) pixel of the tangent point"),
-        ("CRPIX2", g.cx, "axis-2 (column) pixel of the tangent point"),
-        ("CD1_1", 0.0, "[deg/px] RA-like coordinate along axis 1"),
-        ("CD1_2", -s, "[deg/px] RA-like coordinate along axis 2 (east is -col)"),
-        ("CD2_1", s, "[deg/px] Dec-like coordinate along axis 1 (north is +row)"),
-        ("CD2_2", 0.0, "[deg/px] Dec-like coordinate along axis 2"),
+        ("CRPIX1", g.cx, "axis-1 (column) pixel of the tangent point"),
+        ("CRPIX2", g.cy, "axis-2 (row) pixel of the tangent point"),
+        ("CD1_1", -s, "[deg/px] RA-like coordinate along axis 1 (east is -col)"),
+        ("CD1_2", 0.0, "[deg/px] RA-like coordinate along axis 2"),
+        ("CD2_1", 0.0, "[deg/px] Dec-like coordinate along axis 1"),
+        ("CD2_2", s, "[deg/px] Dec-like coordinate along axis 2 (north is +row)"),
         ("CUNIT1", "deg", "units of CRVAL1 and CD1_j"),
         ("CUNIT2", "deg", "units of CRVAL2 and CD2_j")]
 end

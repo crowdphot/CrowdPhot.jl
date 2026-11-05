@@ -241,25 +241,31 @@ end
         @test 0.5 - 1e-9 <= r <= G.ny + 0.5 + 1e-9 && 0.5 - 1e-9 <= cc <= G.nx + 0.5 + 1e-9
     end
     @test TanGrid(c.images; scale = 0.05).scale == 0.05
-    # fits_wcs through the FITS TAN equations reproduces grid_to_world (axis 1 = row)
+    # fits_wcs through the FITS TAN equations reproduces grid_to_world (axis 1 = column)
     h = Dict(k => v for (k, v, _) in fits_wcs(G))
-    for (p1, p2) in ((1.0, 1.0), (G.ny, 3.0), (7.5, G.nx))
+    for (p1, p2) in ((1.0, 1.0), (3.0, G.ny), (G.nx, 7.5))
         ξ = deg2rad(h["CD1_1"] * (p1 - h["CRPIX1"]) + h["CD1_2"] * (p2 - h["CRPIX2"]))
         η = deg2rad(h["CD2_1"] * (p1 - h["CRPIX1"]) + h["CD2_2"] * (p2 - h["CRPIX2"]))
         δ0 = deg2rad(h["CRVAL2"])
         ra = h["CRVAL1"] + rad2deg(atan(ξ, cos(δ0) - η * sin(δ0)))
         dec = rad2deg(atan((sin(δ0) + η * cos(δ0)) * cos(deg2rad(ra - h["CRVAL1"])), cos(δ0) - η * sin(δ0)))
-        @test all(isapprox.((mod(ra, 360), dec), grid_to_world(G, p1, p2); atol = 1e-10))
+        @test all(isapprox.((mod(ra, 360), dec), grid_to_world(G, p2, p1); atol = 1e-10))
     end
-    # the FITSIO extension builds the header; a written file reads back
+    # write(f, A, g) puts the column on axis 1 with the header; permutedims(read(...)) reads A back
     hdr = FITSIO.FITSHeader(G)
-    @test hdr["CTYPE1"] == "RA---TAN" && hdr["CD2_1"] ≈ G.scale / 3600
+    @test hdr["CTYPE1"] == "RA---TAN" && hdr["CD1_1"] ≈ -G.scale / 3600 && hdr["CRPIX1"] == G.cx
+    g = TanGrid(G.ra0, G.dec0, G.scale, 7, 5, 3.2, 2.6)     # non-square: a transpose cannot pass
+    A = reshape(Float32.(1:35), 7, 5)
     mktempdir() do dir
         f = joinpath(dir, "coadd.fits")
-        FITSIO.FITS(f, "w") do io; write(io, rand(G.ny, G.nx); header = hdr); end
+        FITSIO.FITS(f, "w") do io
+            write(io, A, g; name = "SCI")
+            @test_throws "a 5 x 7 matrix is not on a 7 x 5 TanGrid" write(io, permutedims(A), g)
+        end
         FITSIO.FITS(f) do io
-            h2 = FITSIO.read_header(io[1])
-            @test h2["CRPIX1"] ≈ G.cy && h2["CRVAL2"] ≈ G.dec0 && size(read(io[1])) == (G.ny, G.nx)
+            h2 = FITSIO.read_header(io["SCI"])
+            @test (h2["NAXIS1"], h2["NAXIS2"]) == (5, 7) && h2["CRPIX1"] == 2.6 && h2["CRPIX2"] == 3.2
+            @test permutedims(read(io["SCI"])) == A
         end
     end
 end
