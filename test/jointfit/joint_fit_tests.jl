@@ -222,6 +222,9 @@ end
     r = J.fit_pass(s.sc, s.θ, s.rt, J.JointFitOptions(max_trials = 1), 1e3; work)
     @test r.stats.gain_first ≈ 1 atol = 1e-3
     @test r.stats.gain_last == r.stats.gain_first
+    # the flux cap is only a fallback for a rejected trial: an accepted first trial is the same with or without it
+    rc = J.fit_pass(s.sc, s.θ, s.rt, J.JointFitOptions(max_trials = 1, max_flux_step = 1e-3), 1e3; work)
+    @test rc.θ == r.θ && rc.stats.n_capped == 0 && r.stats.n_capped == 0
 end
 
 @testset "CG past convergence" begin
@@ -233,6 +236,22 @@ end
     P, N = size(lin.D)
     x = J.cg!(J.CGWork(s.sc.backend, Float64, P * N, N), lin, 2.0, 10, s.sc.backend)
     @test all(isfinite, x) && x ≈ -vec(lin.g ./ lin.D) ./ 2
+end
+
+@testset "flux step cap" begin
+    # two sources (u, v, two band fluxes): each band's step capped at 10σ (σ = 1/√hdiag: 1, and 5 for source 2's second band),
+    # positions as before (max_step), and no cap where a band has no data (hdiag = 0)
+    θ = [10.0 20.0; 10.0 20.0; 100.0 1.0; 50.0 -2.0]
+    x = vec([0.5 0.2; 0.0 0.0; 500.0 8.0; -80.0 -70.0])
+    D = ones(4, 2); hdiag = [1.0 1.0; 1.0 1.0; 1.0 1.0; 1.0 0.04]; θc = similar(θ)
+    J.launch!(J.step_kernel!, J.KA.CPU(), 2, θc, θ, x, D, 1.0, hdiag, 10.0)
+    @test θc ≈ [10.5 20.2; 10.0 20.0; 110.0 9.0; 40.0 -52.0]
+    J.launch!(J.step_kernel!, J.KA.CPU(), 2, θc, θ, x, D, 1.0, [1.0 1.0; 1.0 1.0; 0.0 1.0; 1.0 1.0], 10.0)
+    @test θc[3, 1] ≈ 600.0
+    J.launch!(J.step_kernel!, J.KA.CPU(), 2, θc, θ, x, D, 1.0, hdiag, Inf)
+    @test θc ≈ θ .+ reshape(x, 4, 2)
+    s = two_image_scene(); imgs, frame = s.imgs, s.frame
+    @test_throws "max_flux_step must be > 0, got 0.0" fit_joint_multipass(imgs, frame; options = JointLoopOptions(fit = J.JointFitOptions(max_flux_step = 0)))
 end
 
 @testset "grad_support = :model is the cost's gradient and own curvature" begin
