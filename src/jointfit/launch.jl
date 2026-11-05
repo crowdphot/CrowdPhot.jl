@@ -93,3 +93,23 @@ function scan!(x)
     end
     return x
 end
+
+# Insertion sort of x[ptr[i] : ptr[i+1]-1] for each segment i.
+@kernel function segment_sort_kernel!(x, @Const(ptr))
+    i = @index(Global)
+    lo = ptr[i]; hi = ptr[i + 1] - Int32(1)
+    for p in (lo + Int32(1)):hi
+        v = x[p]; q = p - Int32(1)
+        while q >= lo && x[q] > v
+            x[q + 1] = x[q]; q -= Int32(1)
+        end
+        x[q + 1] = v
+    end
+end
+
+# Inclusive scan in x's element type, out of place (`cumsum` widens Int32 to Int64; Metal's
+# `cumsum!` compiles anew for every array length).
+_scan(x) = scan!(copy(x))
+
+# Counts written into x[2:end]; returns starts from 1: [1, 1 + x[2], 1 + x[2] + x[3], ...].
+_scan_from_one(x) = (fill!(view(x, 1:1), one(eltype(x))); _scan(x))
