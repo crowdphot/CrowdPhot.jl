@@ -18,6 +18,14 @@ Fitter settings, mirroring the single-image simultaneous fitter's keywords.
 - `cg_iterations = 10`: CG iterations per solve (fixed; no early stop)
 - `max_trials = 8`, `λ_init = 1e-3`, `λ_up = 10`, `λ_down = 10`, `λ_min = 1e-12`, `λ_max = 1e12`: damping schedule
 - `max_step = 1.0`: per-source position step cap (frame pixels)
+- `max_flux_step = Inf`: a fallback for a rejected trial.  When the step raises the cost, the same
+  solve is tried again with each band flux's step capped at `max_flux_step` σ (σ = 1/√(the source's
+  own curvature in that band)) before λ rises; `Inf` (the default) never retries.  A few nearly
+  degenerate sources (a bright star and a detection 1-1.5 px from it, whose band fluxes swing
+  hundreds of σ against each other) otherwise make the whole step fail and raise the one λ for
+  every source, which then stays high from pass to pass.  Only as a fallback: always on, a 10σ cap
+  slows bright stars' flux corrections (hundreds of σ) to a crawl.  A cap relative to the flux does
+  not rescue the step (0.5 |f| is still hundreds of σ for a bright star).
 - `stamp_budget = 100_000_000`: bytes of derivative stamps held at once (images are batched, never
   fewer than one image's stamps).  It trades memory only: on simulated Roman stacks the
   linearization time was flat (within ~10%) from 17 MB to 1.07 GB.
@@ -41,6 +49,7 @@ Base.@kwdef struct JointFitOptions
     λ_min::Float64 = 1.0e-12
     λ_max::Float64 = 1.0e12
     max_step::Float64 = 1.0
+    max_flux_step::Float64 = Inf
     stamp_budget::Int = 100_000_000
     grad_support::Symbol = :fit
 end
@@ -246,8 +255,9 @@ function cg!(w::CGWork, lin::Linearization, λ, itmax, be)
     return w.x
 end
 
-# θc = θ + x ./ D, with each source's (u, v) step capped at `max_step`.
-@kernel function step_kernel!(θc, @Const(θ), @Const(x), @Const(D), max_step)
+# θc = θ + x ./ D, with each source's (u, v) step capped at `max_step` and each band flux's at `max_flux` σ,
+# σ = 1/√(own-block diagonal); `max_flux = Inf` leaves fluxes uncapped.
+@kernel function step_kernel!(θc, @Const(θ), @Const(x), @Const(D), max_step, @Const(hdiag), max_flux)
     s = @index(Global)
     P = size(θ, 1)
     b0 = (s - 1) * P
@@ -257,7 +267,12 @@ end
     θc[1, s] = θ[1, s] + d1 * sc
     θc[2, s] = θ[2, s] + d2 * sc
     for k in 3:P
-        θc[k, s] = θ[k, s] + x[b0 + k] / D[k, s]
+        df = x[b0 + k] / D[k, s]
+        if isfinite(max_flux)
+            lim = max_flux / sqrt(max(hdiag[k, s], zero(df)))   # σ = Inf without data: no cap
+            df = clamp(df, -lim, lim)
+        end
+        θc[k, s] = θ[k, s] + df
     end
 end
 
@@ -271,7 +286,8 @@ linearization.  Trial costs use the linearization's anchors, model radii and cos
 `lin` is the last linearization (H at the start of the last accepted step).  `stats` holds the
 first and last trial's gain ratio (actual / predicted cost change, [`predicted_change`](@ref); ~1
 where the linearization describes the cost, ≤ 0 for a rejected step whose predicted decrease did not
-happen) as `gain_first` and `gain_last` (NaN without trials).
+happen) as `gain_first` and `gain_last` (NaN without trials), and `n_capped`, the trials made with the
+flux cap (`max_flux_step`).
 """
 function fit_pass(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, o::JointFitOptions, λ::Real;
         n_new::Integer = 0, work::LinearizeWork = LinearizeWork(sc)) where {T}
@@ -279,7 +295,7 @@ function fit_pass(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, o::
     n_new > 0 && (λ = max(λ, o.λ_init))
     cgw = CGWork(be, T, P * N, N)
     θ = copy(θ); θc = similar(θ)
-    lin = nothing; n_trials = 0; n_accepted = 0; cost_start = NaN; cost = NaN
+    lin = nothing; n_trials = 0; n_accepted = 0; n_capped = 0; cost_start = NaN; cost = NaN
     t_lin = t_solve = t_trial = 0.0
     gain_first = gain_last = NaN
     for l in 1:o.linearizations
@@ -289,28 +305,33 @@ function fit_pass(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, o::
         l == 1 && (cost_start = cost)
         accepted = false
         for _ in 1:o.max_trials
-            t_solve += @elapsed begin
-                x = cg!(cgw, lin, λ, o.cg_iterations, be)
-                launch!(step_kernel!, be, N, θc, θ, x, lin.D, T(o.max_step))
-                pred = predicted_change(cgw, lin, θc, θ, be)
+            t_solve += @elapsed x = cg!(cgw, lin, λ, o.cg_iterations, be)
+            # the step as solved, then (with a finite `max_flux_step`) the same solve with its flux steps capped,
+            # before λ rises: a few nearly degenerate sources should not damp every source's step
+            for cap in (isinf(o.max_flux_step) ? (Inf,) : (Inf, o.max_flux_step))
+                t_solve += @elapsed begin
+                    launch!(step_kernel!, be, N, θc, θ, x, lin.D, T(o.max_step), lin.hdiag, T(cap))
+                    pred = predicted_change(cgw, lin, θc, θ, be)
+                end
+                t_trial += @elapsed begin
+                    render!(work.model, sc, θc, lin.fp)
+                    cc = cost!(work.resid, sc, work.model, work.mask, work.part, work.bkg)
+                end
+                n_trials += 1; isinf(cap) || (n_capped += 1)
+                gain_last = (cc - cost) / pred; isnan(gain_first) && (gain_first = gain_last)
+                if cc < cost
+                    θ, θc = θc, θ
+                    cost = cc
+                    λ = max(λ / o.λ_down, o.λ_min)
+                    accepted = true; n_accepted += 1
+                    break
+                end
             end
-            t_trial += @elapsed begin
-                render!(work.model, sc, θc, lin.fp)
-                cc = cost!(work.resid, sc, work.model, work.mask, work.part, work.bkg)
-            end
-            n_trials += 1
-            gain_last = (cc - cost) / pred; isnan(gain_first) && (gain_first = gain_last)
-            if cc < cost
-                θ, θc = θc, θ
-                cost = cc
-                λ = max(λ / o.λ_down, o.λ_min)
-                accepted = true; n_accepted += 1
-                break
-            end
+            accepted && break
             λ = min(λ * o.λ_up, o.λ_max)
         end
         accepted || break
     end
-    stats = (; n_trials, n_accepted, cost_start, cost_end = cost, gain_first, gain_last, t_lin, t_solve, t_trial)
+    stats = (; n_trials, n_accepted, n_capped, cost_start, cost_end = cost, gain_first, gain_last, t_lin, t_solve, t_trial)
     return (; θ, λ, lin, stats)
 end
