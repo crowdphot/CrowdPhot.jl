@@ -278,14 +278,14 @@ _memory_estimate(sc::JointScene, N, np) = (is_cpu(sc.backend) ? 87 : 56) * lengt
                                           (is_cpu(sc.backend) ? 0 : sizeof(eltype(sc)) * RENDER_WORDS + 4 * N * (nimages(sc) + 1))
 
 """
-    fit_joint_multipass(images, frame; backend = KernelAbstractions.CPU(), T = Float64,
+    fit_joint_multipass(images, frame; backend = KernelAbstractions.CPU(), T = Float64, product_eltype = Float32,
                         options = JointLoopOptions(), show_trace = false, products = ()) -> NamedTuple
 
 Joint multipass photometry of `images` (`JointImage`s) with source positions on `frame`.
 Returns `catalog`, a `StructArray` (a Tables.jl table) with columns `u, v` (positions on
 `frame`), `ra, dec`, `u_err, v_err` and `uv_cov` (the u-v covariance, frame px², so the
 position's covariance is `[u_err² uv_cov; uv_cov v_err²]`), then per band `b` (in `bands` order) `flux_b`, `flux_err_b`,
-the joint final `significance` and per band `significance_b`, `nimg` (images with data) and
+the joint final `significance` and per band `significance_b`, `nimg` (images with data, `Int32`) and
 `pass_number` (the pass that first detected the source); the `bands` order; the per-pass
 `history` (with PSF refinement, `refine` holds per PSF group the step's star counts, IRLS
 iterations, median χ²/dof of fitting and reserved stars, and their mean residual / flux by ring
@@ -297,9 +297,10 @@ star's `catalog` row), `group`, `band`, `reserve`, `rejected` (by the star-level
 (constrained the PSF to the end of the step), `snr`, and the star's `chi2` over its usable pixels
 at the solution with `dof` (pixels - 3).
 
-`products` lists the arrays to return, on the host in `T`, at the final catalog (the background
-and RMS are the terminal pass's, the ones the final fit used); `products.grid` is always the
-detection grid (`TanGrid`):
+`products` lists the arrays to return, on the host in `product_eltype` regardless of `T` (the image
+counts `:nimg` and `:coadd_nimg` in `Int32`), at the final catalog (the background and RMS are
+the terminal pass's, the ones the final fit used); `products.grid` is always the detection grid
+(`TanGrid`):
 - per image, one matrix per image in `images` order on its pixel grid: `:background`, `:rms`
   (the measured background RMS), `:model`, `:residual` (data - background - model);
 - detection maps, one matrix on `products.grid`: `:nu` (the calibrated joint significance),
@@ -317,7 +318,8 @@ detection grid (`TanGrid`):
   `clip_grow`, `clip_mu` and `clip_min_images` to `coadd`.
 """
 function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGrid; backend = KA.CPU(), T::Type{<:AbstractFloat} = Float64,
-        options::JointLoopOptions = JointLoopOptions(), show_trace::Bool = false, products = (), coadd_options::NamedTuple = (;))
+        product_eltype::Type{<:AbstractFloat} = Float32, options::JointLoopOptions = JointLoopOptions(), show_trace::Bool = false, products = (),
+        coadd_options::NamedTuple = (;))
     o = options
     products = _check_run_args(o, products, coadd_options)
     t_setup = @elapsed begin
@@ -401,7 +403,7 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         end
     end
     t_final = @elapsed begin
-        cat, prods, ok = _terminal_and_finalize(st, θh, born, λ, pass_run + 1, o, products, coadd_options)
+        cat, prods, ok = _terminal_and_finalize(st, θh, born, λ, pass_run + 1, o, products, coadd_options, product_eltype)
         psf_stars = _remap_psf_stars(psf_stars, ok)
     end
     # every result is on the host: return the device memory now, since a GPU array's is otherwise held
@@ -443,15 +445,16 @@ end
 const _IMAGE_PRODUCTS = (:background, :rms, :model, :residual)
 const _MAP_PRODUCTS = (:nu, :snm, :chi2, :nu_residual, :snm_residual, :chi2_residual, :nimg)
 
-"The requested `products` at the final catalog θh, plus the detection `grid`."
-function _products(st, θh, products, coadd_options)
+"The requested `products` at the final catalog θh, in `product_eltype` (counts `Int32`), plus the detection `grid`."
+function _products(st, θh, products, coadd_options, product_eltype)
     sc = st.sc; be = sc.backend; T = eltype(sc); model = st.work.model
     isempty(products) && return (; grid = st.jd.grid)
     θd = to_device(be, T, θh)
     size(θh, 2) > 0 ? render!(model, sc, θd, footprint(sc, θd, st.rt)) : fill!(model, zero(T))
     # the final residual raw - bkg - model and detection inverse variance, as each pass forms them
     launch!(post_background_kernel!, be, length(model), st.det_data, st.det_iv, sc.data, st.bkg, model, st.rms, sc.weight)
-    per_image(x) = (h = Array(x); [reshape(h[(sc.offsets[e] + 1):sc.offsets[e + 1]], sc.dims[e]) for e in 1:nimages(sc)])
+    host(x) = convert(Array{product_eltype}, Array(x))   # no copy when the fit's `T` is `product_eltype`
+    per_image(x) = (h = host(x); [reshape(h[(sc.offsets[e] + 1):sc.offsets[e + 1]], sc.dims[e]) for e in 1:nimages(sc)])
     vals = Dict{Symbol, Any}()
     for (p, x) in ((:background, st.bkg), (:rms, st.rms), (:model, model), (:residual, st.det_data))
         p in products && (vals[p] = per_image(x))
@@ -459,7 +462,7 @@ function _products(st, θh, products, coadd_options)
     want(names) = any(in(products), names)
     function maps!(data, suffix)
         m = joint_maps(st.jd, sc, data, st.det_iv)
-        vals[Symbol(:nu, suffix)] = Array(m.ν); vals[Symbol(:snm, suffix)] = Array(m.snm); vals[Symbol(:chi2, suffix)] = Array(m.χ2)
+        vals[Symbol(:nu, suffix)] = host(m.ν); vals[Symbol(:snm, suffix)] = host(m.snm); vals[Symbol(:chi2, suffix)] = host(m.χ2)
         vals[:nimg] = Array(m.nimg)
     end
     want((:nu_residual, :snm_residual, :chi2_residual)) && maps!(st.det_data, :_residual)
@@ -472,14 +475,14 @@ function _products(st, θh, products, coadd_options)
         # the scene's arrays and PolyMaps (frame -> image; the detection grid is K times finer)
         inp = (; data = sc.data, weight = sc.weight, bkg = st.bkg, rms = st.rms, model)
         C = _coadd(sc.dev, sc.footprints, sc.bands, st.jd.grid, st.jd.det.K, inp, cq; backend = be, T, coadd_options...)
-        for q in cq; vals[Symbol(:coadd_, q)] = C[q]; end
+        for q in cq; vals[Symbol(:coadd_, q)] = q === :nimg ? C[q] : map(host, C[q]); end   # per band
     end
     names = Tuple(p for p in (_IMAGE_PRODUCTS..., _MAP_PRODUCTS..., _COADD_PRODUCTS...) if p in products)
     return NamedTuple{(names..., :grid)}((map(p -> vals[p], names)..., st.jd.grid))
 end
 
 "The terminal pass (background, refit, no detection or pruning), finalize and the requested products; and the sources kept."
-function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, products, coadd_options)
+function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, products, coadd_options, product_eltype)
     sc = st.sc; be = sc.backend; T = eltype(sc); f = o.fit
     _backgrounds!(st, to_device(be, T, θh), pass, o)
     ok = trues(size(θh, 2))
@@ -491,12 +494,12 @@ function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, pr
         θh = θh[:, ok]; born = born[ok]
     end
     N = size(θh, 2); B = nbands(sc)
-    σ = fill(NaN, 2 + B, N); uv_cov = fill(NaN, N); nimg = zeros(Int, N)
+    σ = fill(NaN, 2 + B, N); uv_cov = fill(NaN, N); nimg = zeros(Int32, N)
     if N > 0
         lin = linearize(sc, to_device(be, T, θh), st.rt, st.work; f.R_fit, f.stamp_budget, f.grad_support)
         Σ = marginal_covariances(HostH(lin); k = o.error_neighbors)
         σ = Float64.(marginal_errors(Σ)); uv_cov = Float64.(Σ[1, 2, :])
-        nimg = Int.(Array(lin.nimg))
+        nimg = Array(lin.nimg)
     end
     sb, joint = final_significance(θh, σ)
     radec = [grid_to_world(sc.frame, θh[1, s], θh[2, s]) for s in 1:N]
@@ -505,5 +508,5 @@ function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, pr
     cols = merge((; u = θh[1, :], v = θh[2, :], ra = first.(radec), dec = last.(radec), u_err = σ[1, :], v_err = σ[2, :], uv_cov),
                  perband(:flux, permutedims(θh[3:end, :])), perband(:flux_err, permutedims(σ[3:end, :])), (; significance = joint),
                  perband(:significance, sb), (; nimg, pass_number = born))
-    return StructArray(cols), _products(st, θh, products, coadd_options), ok
+    return StructArray(cols), _products(st, θh, products, coadd_options, product_eltype), ok
 end

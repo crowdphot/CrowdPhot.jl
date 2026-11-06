@@ -794,8 +794,11 @@ end
                    band = im.band, flux_scale = im.flux_scale, psf_offset = im.psf_offset)
     end
     names = (:background, :rms, :model, :residual, :nu, :snm, :chi2, :nu_residual, :snm_residual, :chi2_residual, :nimg)
-    R = fit_joint_multipass(imgs, s.frame; products = reverse(names))
+    # in Float64, so the products can be checked against recomputation exactly
+    R = fit_joint_multipass(imgs, s.frame; products = reverse(names), product_eltype = Float64)
     p = R.products
+    @test eltype(p.nu) == Float64 && eltype(p.model[1]) == Float64 && eltype(p.nimg) == Int32
+    @test eltype(R.catalog.nimg) == Int32
     @test keys(p) == (names..., :grid)
     @test p.grid == J.oversample(s.frame, JointDetector().K)
     @test all(e -> size(p.model[e]) == size(imgs[e].data), eachindex(imgs))
@@ -834,6 +837,8 @@ end
                        :coadd_rms_aperture, :coadd_weight, :coadd_nimg, :grid)
     @test !haskey(fit_joint_multipass(imgs, s.frame; options = o1, products = (:coadd,)).products, :coadd_rms_aperture)
     @test keys(pc.coadd_data) == (:A, :B) && size(pc.coadd_data.A) == (pc.grid.ny, pc.grid.nx)
+    # by default the pixel products are Float32 whatever T; the counts Int32
+    @test eltype(pc.coadd_data.A) == Float32 && eltype(pc.model[1]) == Float32 && eltype(pc.coadd_nimg.A) == Int32
     C = coadd(imgs, pc.grid; quantities = (:data, :residual, :rms_aperture, :nimg), background = pc.background, rms = pc.rms, model = pc.model,
               pixfrac = 0.8)
     for (a, b) in ((C.data.B, pc.coadd_data.B), (C.residual.A, pc.coadd_residual.A), (C.rms_aperture.A, pc.coadd_rms_aperture.A))

@@ -304,7 +304,7 @@ end
         if cnt > 0
             ν[r, c] = a; snm[r, c] = b; χ2[r, c] = x
         end
-        nimg[r, c] = UInt8(min(cnt, 255))
+        nimg[r, c] = cnt
     end
 end
 
@@ -386,7 +386,7 @@ function joint_maps(jd::JointDetection, sc::JointScene{T}, data::AbstractVector,
     be = sc.backend; g = jd.grid
     ν = KA.allocate(be, T, g.ny, g.nx); snm = KA.allocate(be, T, g.ny, g.nx); χ2 = KA.allocate(be, T, g.ny, g.nx)
     fill!(ν, T(NaN)); fill!(snm, T(NaN)); fill!(χ2, T(NaN))
-    nimg = KA.zeros(be, UInt8, g.ny, g.nx)
+    nimg = KA.zeros(be, Int32, g.ny, g.nx)
     det = jd.det
     joint_maps_kernel!(be, is_cpu(be) ? (64, 1) : (16, 16))(ν, snm, χ2, nimg, data, iv, sc.dev, jd.banks, jd.tptr, jd.timg, jd.wf,
         T(det.K), jd.tile, jd.ntr, Val(det.level), Val(uses_chi(det)), T(det.μ), Val(nbands(sc)); ndrange = (g.ny, g.nx))
