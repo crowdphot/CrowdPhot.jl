@@ -270,5 +270,5 @@ end
     g = CircularGaussianPRF(y = 0, x = 0, fwhm = 2.0, flux = 1, bkg = 0)
     gi = [JointImage(im.data, im.weight, g, im.to_sky; band = :A) for im in f.imgs]
     @test_throws "psf_refine needs ImagePSF or GriddedPSFModel PSFs" fit_joint_multipass(gi, f.frame; options = o)
-    @test_throws "psf_refine is not supported by fit_joint_tiled" fit_joint_tiled(f.imgs, f.frame; options = o)
+    @test_throws "psf_refine is not supported by tiled fits" fit_joint_tiled(f.imgs, f.frame; options = o)
 end

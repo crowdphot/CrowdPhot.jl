@@ -269,13 +269,15 @@ function _prune_keep(θh, js, snr_min, separation)
     return keep, n_snr, n_close
 end
 
-# Rough peak memory (bytes) of a pass with N sources and np pairs: the per-pixel arrays at a constant per
-# image pixel (the measured Roman-field peak at 2000 px images less its source rows, so live arrays plus
-# uncollected garbage: 87 B on the CPU in Float64, 56 B on Metal; Float32 on the CPU is overestimated),
-# plus H (own and pair blocks) and its finalize host copy exactly, plus on GPUs the render's stamp
-# buffer and pair buckets, live during the fit's trial renders (the run's peak).
-_memory_estimate(sc::JointScene, N, np) = (is_cpu(sc.backend) ? 87 : 56) * length(sc.data) + 2 * nparams(sc)^2 * sizeof(eltype(sc)) * (N + np) +
-                                          (is_cpu(sc.backend) ? 0 : sizeof(eltype(sc)) * RENDER_WORDS + 4 * N * (nimages(sc) + 1))
+# Rough peak memory (bytes) of a pass over `npix` image pixels of `E` images in `B` bands with N sources and
+# np pairs: the per-pixel arrays at a constant per image pixel (the measured Roman-field peak at 2000 px
+# images less its source rows, so live arrays plus uncollected garbage: 87 B on the CPU in Float64, 56 B on
+# Metal; Float32 on the CPU is overestimated), plus H (own and pair blocks) and its finalize host copy
+# exactly, plus on GPUs the render's stamp buffer and pair buckets, live during the fit's trial renders
+# (the run's peak).  `plan_tiles` uses it before any scene exists.
+_memory_estimate(npix, E, B, N, np, backend, ::Type{T}) where {T} =
+    (is_cpu(backend) ? 87 : 56) * npix + 2 * (2 + B)^2 * sizeof(T) * (N + np) + (is_cpu(backend) ? 0 : sizeof(T) * RENDER_WORDS + 4 * N * (E + 1))
+_memory_estimate(sc::JointScene, N, np) = _memory_estimate(length(sc.data), nimages(sc), nbands(sc), N, np, sc.backend, eltype(sc))
 
 """
     fit_joint_multipass(images, frame; backend = KernelAbstractions.CPU(), T = Float64, product_eltype = Float32,
