@@ -34,6 +34,29 @@ function JointImage(data::AbstractMatrix, weight::AbstractMatrix, psf, to_sky; b
     return JointImage(data, weight, psf, to_sky, Symbol(band), Float64(flux_scale), Float64.(Tuple(psf_offset)))
 end
 
+"""
+    ImageFootprint(dims, to_sky; band, name)
+    ImageFootprint(im::JointImage, name)
+
+What planning a tiled fit needs of an image, without its pixels or PSF: its size `dims = (ny, nx)`,
+`to_sky(y, x) -> (ra, dec)` as a `JointImage`'s, its `band`, and the `name` a plan refers to it by.
+"""
+struct ImageFootprint{F}
+    dims::NTuple{2, Int}
+    to_sky::F
+    band::Symbol
+    name::String
+end
+
+function ImageFootprint(dims, to_sky; band, name)
+    all(>(0), dims) || throw(ArgumentError("image dims must be positive, got $dims"))
+    return ImageFootprint(NTuple{2, Int}(dims), to_sky, Symbol(band), String(name))
+end
+ImageFootprint(im::JointImage, name) = ImageFootprint(size(im.data), im.to_sky; im.band, name)
+
+# The footprints of `JointImage`s, named by their index.
+_footprints(images) = [ImageFootprint(im, string(e)) for (e, im) in enumerate(images)]
+
 # Rows of the per-image parameter matrix `ip`.
 const IP_U0, IP_V0, IP_INVS, IP_SCALE, IP_UMIN, IP_UMAX, IP_VMIN, IP_VMAX = 1:8
 const N_IP = 8
@@ -146,17 +169,19 @@ end
 """
     TanGrid(images; scale = nothing) -> TanGrid
 
-The north-up `TanGrid` just covering the pixel areas of `images` (`JointImage`s; `psf` may be
-`nothing`): tangent point at the mean direction of their boundaries, extent
-from those boundaries.  `scale` (arcsec per pixel) defaults to the median of the images' native
-scales at their centers; `oversample` refines the result.
+The north-up `TanGrid` just covering the pixel areas of `images` (`JointImage`s, whose `psf` may be
+`nothing`, or [`ImageFootprint`](@ref)s): tangent point at the mean direction of their boundaries,
+extent from those boundaries.  `scale` (arcsec per pixel) defaults to the median of the images'
+native scales at their centers; `oversample` refines the result.
 """
-function TanGrid(images::AbstractVector{<:JointImage}; scale = nothing)
-    isempty(images) && throw(ArgumentError("no images"))
-    edge = [im.to_sky(p...) for im in images for p in _edge_points(size(im.data))]
+TanGrid(images::AbstractVector{<:JointImage}; scale = nothing) = TanGrid(_footprints(images); scale)
+
+function TanGrid(footprints::AbstractVector{<:ImageFootprint}; scale = nothing)
+    isempty(footprints) && throw(ArgumentError("no images"))
+    edge = [fp.to_sky(p...) for fp in footprints for p in _edge_points(fp.dims)]
     m = reduce((a, b) -> a .+ b, ((cosd(d) * cosd(r), cosd(d) * sind(r), sind(d)) for (r, d) in edge))
     ra0 = mod(atand(m[2], m[1]), 360); dec0 = atand(m[3], hypot(m[1], m[2]))
-    s = scale === nothing ? median(_native_scale(im) for im in images) : Float64(scale)
+    s = scale === nothing ? median(_native_scale(fp) for fp in footprints) : Float64(scale)
     s > 0 || throw(ArgumentError("scale must be positive"))
     uv = [world_to_grid(TanGrid(ra0, dec0, s, 1, 1, 0.0, 0.0), p...) for p in edge]
     umin, umax = extrema(first, uv); vmin, vmax = extrema(last, uv)
@@ -164,10 +189,10 @@ function TanGrid(images::AbstractVector{<:JointImage}; scale = nothing)
 end
 
 # Pixel scale (arcsec, square root of the pixel's area) at the image center.
-function _native_scale(im)
-    y, x = (size(im.data) .+ 1) ./ 2
-    g1 = TanGrid(im.to_sky(y, x)..., 1.0, 1, 1, 0.0, 0.0)   # arcsec offsets about the center
-    a = world_to_grid(g1, im.to_sky(y + 1, x)...); b = world_to_grid(g1, im.to_sky(y, x + 1)...)
+function _native_scale(fp::ImageFootprint)
+    y, x = (fp.dims .+ 1) ./ 2
+    g1 = TanGrid(fp.to_sky(y, x)..., 1.0, 1, 1, 0.0, 0.0)   # arcsec offsets about the center
+    a = world_to_grid(g1, fp.to_sky(y + 1, x)...); b = world_to_grid(g1, fp.to_sky(y, x + 1)...)
     return sqrt(abs(a[1] * b[2] - a[2] * b[1]))
 end
 
