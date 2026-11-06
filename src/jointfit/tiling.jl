@@ -151,14 +151,10 @@ function _cutouts(images, t)
     return cuts, [t.cutouts[k].image for k in keep]
 end
 
-# Element type and empty value of an assembled product.
-_product_type(p, T) = p === :nimg ? UInt8 : p === :coadd_nimg ? Int32 : T
-_empty_value(S) = S <: AbstractFloat ? S(NaN) : zero(S)
-
 """
     fit_joint_tiled(images, frame; tile_size = $TILE_SIZE, overlap = :auto, backend = KernelAbstractions.CPU(),
-                    T = Float64, options = JointLoopOptions(), show_trace = false, products = (),
-                    coadd_options = (;), on_error = :continue) -> NamedTuple
+                    T = Float64, product_eltype = Float32, options = JointLoopOptions(), show_trace = false,
+                    products = (), coadd_options = (;), on_error = :continue) -> NamedTuple
 
 [`fit_joint_multipass`](@ref) on a frame of any size: the frame is split into tiles
 ([`plan_tiles`](@ref)), each fitted independently on cutouts of the images, one tile at a time,
@@ -199,8 +195,9 @@ A tile that throws (other than an interrupt) is recorded in `tiles` and the run 
 `on_error = :throw` rethrows.
 """
 function fit_joint_tiled(images::AbstractVector{<:JointImage}, frame::TanGrid; tile_size::Integer = TILE_SIZE, overlap = :auto,
-        backend = KA.CPU(), T::Type{<:AbstractFloat} = Float64, options::JointLoopOptions = JointLoopOptions(), show_trace::Bool = false,
-        products = (), coadd_options::NamedTuple = (;), on_error::Symbol = :continue)
+        backend = KA.CPU(), T::Type{<:AbstractFloat} = Float64, product_eltype::Type{<:AbstractFloat} = Float32,
+        options::JointLoopOptions = JointLoopOptions(), show_trace::Bool = false, products = (), coadd_options::NamedTuple = (;),
+        on_error::Symbol = :continue)
     on_error in (:continue, :throw) || throw(ArgumentError("on_error must be :continue or :throw"))
     o = options
     # each tile would refine its own copy of a detector's PSF, discontinuous at tile edges
@@ -212,7 +209,7 @@ function fit_joint_tiled(images::AbstractVector{<:JointImage}, frame::TanGrid; t
         _check_bands(bands)
         plan, lats = _plan_tiles(images, frame; tile_size, overlap, options)
         K = o.detector.K; grid = oversample(frame, K)
-        prods = _assembly(products, images, bands, grid, T)
+        prods = _assembly(products, images, bands, grid, product_eltype)
         cats = []; tiles = []
         for (k, t) in enumerate(plan.tiles)
             entry = (; status = :ok, exception = nothing, backtrace = nothing, history = NamedTuple[], converged = false, n_passes = 0,
@@ -224,7 +221,7 @@ function fit_joint_tiled(images::AbstractVector{<:JointImage}, frame::TanGrid; t
                 if isempty(cuts)
                     entry = merge(entry, (; status = :empty, converged = true))
                 else
-                    R = fit_joint_multipass(cuts, t.frame; backend, T, options, show_trace, products, coadd_options)
+                    R = fit_joint_multipass(cuts, t.frame; backend, T, product_eltype, options, show_trace, products, coadd_options)
                 end
             catch err
                 (err isa InterruptException || on_error === :throw) && rethrow()
@@ -275,7 +272,7 @@ function _merge_catalogs(cats, bands, ntiles, sep)
              :pass_number, :tile)
     # one allocation per column (Base's reduce(vcat, ::Vector{<:Vector}); with `init` it concatenates
     # pairwise); without tile rows, empty columns of the catalog's types
-    col(n) = isempty(cats) ? (n in (:tile, :nimg, :pass_number) ? Int[] : Float64[]) : reduce(vcat, [getproperty(c, n) for c in cats])
+    col(n) = isempty(cats) ? (n === :nimg ? Int32[] : n in (:tile, :pass_number) ? Int[] : Float64[]) : reduce(vcat, [getproperty(c, n) for c in cats])
     cols = NamedTuple{(names..., :depth)}(Tuple(col(n) for n in (names..., :depth)))
     keep = _dedup_keep(cols.u, cols.v, cols.tile, cols.depth, sep)
     n_dedup = [count(i -> !keep[i] && cols.tile[i] == k, eachindex(keep)) for k in 1:ntiles]
@@ -300,12 +297,13 @@ end
 
 # The full-size product arrays, filled with their empty value: per image on its pixel grid, on `grid`,
 # or per band on `grid`.
-function _assembly(products, images, bands, grid, T)
+function _assembly(products, images, bands, grid, product_eltype)
     out = Dict{Symbol, Any}()
     for p in products
-        S = _product_type(p, T)
-        full() = fill(_empty_value(S), grid.ny, grid.nx)
-        out[p] = p in _IMAGE_PRODUCTS ? [fill(_empty_value(S), size(im.data)) for im in images] :
+        # the image counts are Int32, empty as 0; the rest `product_eltype`, empty as NaN
+        e = p === :nimg || p === :coadd_nimg ? Int32(0) : product_eltype(NaN)
+        full() = fill(e, grid.ny, grid.nx)
+        out[p] = p in _IMAGE_PRODUCTS ? [fill(e, size(im.data)) for im in images] :
                  p in _MAP_PRODUCTS ? full() : NamedTuple{Tuple(bands)}(Tuple(full() for _ in bands))
     end
     return out
