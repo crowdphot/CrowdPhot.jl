@@ -16,6 +16,7 @@ import CrowdPhot
 @safetestset "Gridded PSF model" include("psf/gridded_psf_tests.jl")
 @safetestset "PSF autocorrelation" include("psf/autocorrelation_tests.jl")
 @safetestset "Roman" include("observatories/roman_tests.jl")
+@safetestset "Roman skycells" include("observatories/skycells_tests.jl")
 @safetestset "Simulation tests" include("simulation_test.jl")
 @safetestset "Background estimation" include("background_tests.jl")
 @safetestset "Centroids" include("centroids_tests.jl")

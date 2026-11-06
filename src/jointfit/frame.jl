@@ -6,8 +6,8 @@ pixel grid of `scale` arcsec per pixel, north up and east left; `(row, col)` are
 `(cy, cx)` is the grid position of the tangent point (default: the grid center).
 
 Joint-fit source positions live on one of these (the *fit frame*); the joint detector
-samples a finer one with the same tangent point.  A Roman skycell is a `TanGrid` with fixed
-parameters.
+samples a finer one with the same tangent point.  A Roman skycell has the opposite
+handedness (`+x` east; see `Roman.region_to_world`).
 """
 struct TanGrid
     ra0::Float64
@@ -37,12 +37,11 @@ end
 "`(ra, dec)` (degrees) of grid position `(row, col)`."
 function grid_to_world(g::TanGrid, row, col)
     η = (row - g.cy) * g.scale / ARCSEC_PER_RAD; ξ = -(col - g.cx) * g.scale / ARCSEC_PER_RAD
-    ρ = hypot(ξ, η); δ0 = deg2rad(g.dec0); sδ0, cδ0 = sincos(δ0)
-    ρ == 0 && return (g.ra0, g.dec0)
-    c = atan(ρ); sc, cc = sincos(c)
-    δ = asin(cc * sδ0 + η * sc * cδ0 / ρ)
-    α = atan(ξ * sc, ρ * cδ0 * cc - η * sδ0 * sc)
-    return (mod(g.ra0 + rad2deg(α), 360.0), rad2deg(δ))
+    ξ == 0 && η == 0 && return (g.ra0, g.dec0)
+    sδ0, cδ0 = sincos(deg2rad(g.dec0))
+    d = cδ0 - η * sδ0
+    # Dec by atan2, not asin: asin loses precision near ±90 deg (3 mas within 1e-4" of a pole), atan2 doesn't
+    return (mod(g.ra0 + rad2deg(atan(ξ, d)), 360.0), rad2deg(atan(sδ0 + η * cδ0, hypot(ξ, d))))
 end
 
 """

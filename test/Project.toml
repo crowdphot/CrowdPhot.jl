@@ -1,6 +1,7 @@
 [deps]
 ASDF = "686f71d1-807d-59a4-a860-28280ea06d7b"
 Bessels = "0e736298-9ec6-45e8-9647-e4fc86a2fe38"
+CRDSClient = "6458d4f6-0820-4bb1-bd52-c1d3c0bd6efc"
 ConstructionBase = "187b0558-2788-49d3-abe0-74a17ed4e7c9"
 CrowdPhot = "ad925fdb-984f-459a-854d-8ffe66f81286"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
@@ -25,6 +26,7 @@ CrowdPhot = {path = ".."}
 [compat]
 ASDF = "2.0.2"
 Bessels = "0.2"
+CRDSClient = "0.1"
 ConstructionBase = "1"
 Distributions = "0.25"
 Documenter = "0.26, 0.27, 1"
