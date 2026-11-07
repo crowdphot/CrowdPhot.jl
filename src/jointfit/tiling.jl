@@ -85,12 +85,18 @@ _box_dims(o::JointLoopOptions) = (b = _background_settings(o.background).box; b 
 """
     plan_tiles(images, frame; cores = nothing, tile_size = $TILE_SIZE, max_memory = Inf, density = nothing,
                overlap = :auto, options = JointLoopOptions(), products = (), coadd_options = (;),
-               product_eltype = Float32, backend = KernelAbstractions.CPU(), T = Float64) -> NamedTuple
+               product_eltype = Float32, exclude = (), backend = KernelAbstractions.CPU(), T = Float64) -> NamedTuple
 
 The tiles of a tiled fit ([`fit_joint_tiled`](@ref), or [`fit_tile`](@ref) per tile and
 [`merge_tiles`](@ref) per cell), from the images' sizes and `to_sky` only (no pixel is read): `images`
-are `JointImage`s or [`ImageFootprint`](@ref)s.  Returns
-`(; N, M, tile_size, overlap, bands, options, products, coadd_options, product_eltype, frame, cells, uncovered, tiles)`.
+are `JointImage`s or [`ImageFootprint`](@ref)s, with unique names.  Returns
+`(; N, M, tile_size, overlap, bands, options, products, coadd_options, product_eltype, frame, images, excluded, cells,
+uncovered, tiles)`.  [`write_plan`](@ref) writes it as a plan folder.
+
+`images` lists every image given, `(; name, dims, band)`, and cutouts refer to them by their index
+there, so a plan made from a list is fitted with that same list.  `exclude`, pairs `name => reason`,
+leaves those images out of every tile (found bad in a pre-pass, say), and `excluded` records them,
+`(; name, reason)`; `bands` and the `:auto` overlap are the kept images'.
 
 The *cells* are the regions whose sources are reported, each split into tiles: a tile is a core,
 whose sources it reports, padded by `overlap` frame px.
@@ -117,9 +123,9 @@ cell's tiles column-major; tiles no image reaches are left out) has
 - `frame`: the tile's `TanGrid` (same projection and scale, reference pixel shifted by `offset`);
 - `cell`: the index of its cell in `cells`;
 - `mem_est`: as above;
-- `cutouts`: per image reaching the padded tile, `(; image, name, rows, cols)`: its index in
-  `images` and its name (`"1"`, `"2"`, ... for `JointImage`s), and its pixels covering the tile,
-  snapped outward to the `bkg_box_size` grid.
+- `cutouts`: per image reaching the padded tile, `(; image, name, rows, cols)`: its index in the
+  plan's `images` and its name (`"1"`, `"2"`, ... for `JointImage`s), and its pixels covering the
+  tile, snapped outward to the `bkg_box_size` grid.
 `bands` are the images' bands in order of first appearance, the order of the catalog's columns.
 `options`, `products` (as [`fit_joint_multipass`](@ref) takes them, with `:coadd` expanded),
 `coadd_options` and `product_eltype` are the fit's: `fit_tile` and `merge_tiles` take them from the
@@ -136,12 +142,23 @@ plan_tiles(footprints::AbstractVector{<:ImageFootprint}, frame::TanGrid; kw...) 
 
 function _plan_tiles(fps, frame::TanGrid, psfs; cores = nothing, tile_size::Integer = TILE_SIZE, max_memory::Real = Inf, density = nothing,
         overlap = :auto, options::JointLoopOptions = JointLoopOptions(), products = (), coadd_options::NamedTuple = (;),
-        product_eltype::Type{<:AbstractFloat} = Float32, backend = KA.CPU(), T::Type{<:AbstractFloat} = Float64)
+        product_eltype::Type{<:AbstractFloat} = Float32, exclude = (), backend = KA.CPU(), T::Type{<:AbstractFloat} = Float64)
     isempty(fps) && throw(ArgumentError("no images"))
     prods = _check_run_args(options, products, coadd_options)
+    # the background and coadd options in their schemas' order and types, by the reader a plan file is read with,
+    # so the two can't differ
+    copts = _options_from(_COADD_OPTIONS, coadd_options, "coadd_options."; strict = true)
+    bkg = _options_from(_BACKGROUND_OPTIONS, options.background, "options.background."; strict = true)
+    options = JointLoopOptions(; (f => (f === :background ? bkg : getfield(options, f)) for f in fieldnames(JointLoopOptions))...)
     # a worker finds each cutout's file by its name, so two images sharing one would fit the wrong pixels
     imnames = [fp.name for fp in fps]
     allunique(imnames) || throw(ArgumentError("image names must be unique; repeated: $(join(repr.(unique(filter(n -> count(==(n), imnames) > 1, imnames))), ", "))"))
+    excluded = [(; name = String(first(x)), reason = String(last(x))) for x in exclude]
+    unknown = setdiff((x.name for x in excluded), imnames)
+    isempty(unknown) || throw(ArgumentError("exclude names images not in the list: $(join(repr.(unknown), ", "))"))
+    # the images planned with; cutouts still index the list given, so callers pass that list to fit_tile
+    keep = findall(n -> !any(x -> x.name == n, excluded), imnames)
+    isempty(keep) && throw(ArgumentError("every image is excluded"))
     tile_size > 0 || throw(ArgumentError("tile_size must be positive"))
     max_memory > 0 || throw(ArgumentError("max_memory must be positive"))
     isfinite(max_memory) && cores === nothing && throw(ArgumentError("max_memory splits given cores; the frame's even split (cores = nothing) is set by tile_size"))
@@ -151,7 +168,7 @@ function _plan_tiles(fps, frame::TanGrid, psfs; cores = nothing, tile_size::Inte
     options.psf_refine === nothing || throw(ArgumentError("psf_refine is not supported by tiled fits; refine with fit_joint_multipass"))
     (overlap === :auto || (overlap isa Integer && overlap >= 0)) ||
         throw(ArgumentError("overlap must be :auto or a non-negative integer, got $(repr(overlap))"))
-    oa = _auto_overlap(fps, psfs, frame, options)
+    oa = _auto_overlap(fps[keep], psfs === nothing ? nothing : psfs[keep], frame, options)
     overlap === :auto && oa === nothing &&
         throw(ArgumentError("overlap = :auto without PSFs (planning from ImageFootprints) needs a numeric options.fit.R_cap; or give an integer overlap"))
     o::Int = overlap === :auto ? oa : overlap
@@ -169,15 +186,16 @@ function _plan_tiles(fps, frame::TanGrid, psfs; cores = nothing, tile_size::Inte
                 throw(ArgumentError("cores $a and $b overlap: a source must have one owner"))
         end
     end
-    lats = Vector{Any}(undef, length(fps))
-    Threads.@threads for e in eachindex(fps)
+    lats = Vector{Any}(nothing, length(fps))                 # `nothing` for an excluded image
+    Threads.@threads for e in keep
         lats[e] = _pixel_lattice(fps[e], frame)
     end
     box = _box_dims(options)
     # source pairs in H: positions within linearize's pair_reach, here at worst (45 deg) rotation
-    reach = (2 * options.fit.R_fit + 1) * sqrt(2) * maximum(_native_scale(fp) for fp in fps) / frame.scale * 1.01
-    # the tile of core (cr, cc) in cell ic from footprints `es`, or `nothing` where none reaches it
-    function tile_at(cr, cc, ic, es = eachindex(fps))
+    reach = (2 * options.fit.R_fit + 1) * sqrt(2) * maximum(_native_scale(fps[e]) for e in keep) / frame.scale * 1.01
+    # the tile of core (cr, cc) in cell ic from footprints `es`, or `nothing` where none reaches it (no default for
+    # `es`: a second method would make `tile_at` reassigned, boxing it in split_cell)
+    function tile_at(cr, cc, ic, es)
         # the even split's padding stops at the frame; given cores' rings go past it wherever images reach,
         # since sources just outside a core affect those inside
         pr, pc = cores === nothing ? (_grow(cr, o, frame.ny), _grow(cc, o, frame.nx)) : ((first(cr) - o):(last(cr) + o), (first(cc) - o):(last(cc) + o))
@@ -189,7 +207,7 @@ function _plan_tiles(fps, frame::TanGrid, psfs; cores = nothing, tile_size::Inte
         end
         isempty(cutouts) && return nothing
         offset = (first(pr) - 1, first(pc) - 1)
-        tf = TanGrid(frame.ra0, frame.dec0, frame.scale, length(pr), length(pc), frame.cy - offset[1], frame.cx - offset[2])
+        tf = _tile_frame(frame, (pr, pc), offset)
         ρ = density === nothing ? 0.0 : density isa Function ? density((first(pr) + last(pr)) / 2, (first(pc) + last(pc)) / 2) : density
         ns = ρ * length(pr) * length(pc)
         mem_est = _memory_estimate(sum(c -> length(c.rows) * length(c.cols), cutouts), length(cutouts), length(unique(fps[c.image].band for c in cutouts)),
@@ -202,7 +220,7 @@ function _plan_tiles(fps, frame::TanGrid, psfs; cores = nothing, tile_size::Inte
         h, w = length(cr), length(cc)
         nmax = (max(1, fld(h, max(o, 1))), max(1, fld(w, max(o, 1))))
         # the footprints reaching the cell's padded box, which contains every part's
-        es = [e for e in eachindex(fps) if _cutout_box(lats[e], (first(cr) - o - 0.5, last(cr) + o + 0.5, first(cc) - o - 0.5, last(cc) + o + 0.5), box, fps[e].dims) !== nothing]
+        es = [e for e in keep if _cutout_box(lats[e], (first(cr) - o - 0.5, last(cr) + o + 0.5, first(cc) - o - 0.5, last(cc) + o + 0.5), box, fps[e].dims) !== nothing]
         # the tiles of the cell's core split into n1 x n2 near-equal parts, less those no image reaches
         parts(n1, n2) = filter(!isnothing, [tile_at((first(cr) - 1) .+ _part(h, n1, k), (first(cc) - 1) .+ _part(w, n2, l), ic, es) for l in 1:n2 for k in 1:n1])
         fail(why) = throw(ArgumentError("cell $ic ($cr, $cc): no split into parts at least the overlap ($o px) across has every tile within max_memory = $max_memory bytes$why"))
@@ -230,7 +248,7 @@ function _plan_tiles(fps, frame::TanGrid, psfs; cores = nothing, tile_size::Inte
     tiles = []
     if cores === nothing
         for l in 1:M, k in 1:N
-            t = tile_at(_part(frame.ny, N, k), _part(frame.nx, M, l), 1)
+            t = tile_at(_part(frame.ny, N, k), _part(frame.nx, M, l), 1, keep)
             t === nothing || push!(tiles, t)
         end
     else
@@ -239,10 +257,15 @@ function _plan_tiles(fps, frame::TanGrid, psfs; cores = nothing, tile_size::Inte
         end
     end
     uncovered = [ic for ic in eachindex(cells) if !any(t -> t.cell == ic, tiles)]
-    plan = (; N, M, tile_size = cores === nothing ? Int(tile_size) : nothing, overlap = o, bands = unique(fp.band for fp in fps), options,
-            products = prods, coadd_options, product_eltype, frame, cells, uncovered, tiles = [t for t in tiles])
+    images = [(; fp.name, fp.dims, fp.band) for fp in fps]
+    plan = (; N, M, tile_size = cores === nothing ? Int(tile_size) : nothing, overlap = o, bands = unique(fps[e].band for e in keep), options,
+            products = prods, coadd_options = copts, product_eltype, frame, images, excluded, cells, uncovered, tiles = [t for t in tiles])
     return plan, lats
 end
+
+# A tile's `TanGrid`: the frame's projection and scale, its reference pixel shifted by the tile's offset
+# (also how a plan file's reader rebuilds it, exactly).
+_tile_frame(frame, (pr, pc), offset) = TanGrid(frame.ra0, frame.dec0, frame.scale, length(pr), length(pc), frame.cy - offset[1], frame.cx - offset[2])
 
 # The tile's cutouts as `JointImage`s and their parent indices: one range read of each parent's
 # `weight` and `data` (the lazy-input contract), leaving out cutouts without a positive finite weight.
@@ -333,7 +356,7 @@ function fit_joint_tiled(images::AbstractVector{<:JointImage}, frame::TanGrid; t
             end
             if R !== nothing
                 # the catalog only: the products are copied into the full arrays now, so no tile's stay in memory
-                push!(results, (; R.catalog, R.tile))
+                push!(results, (; R.catalog, R.tile, R.hash))
                 _assemble!(prods, R.products, t, R.images, lats, K, (0, 0))
                 entry = merge(entry, (; R.history, R.converged, n_passes = length(R.history), R.bands, R.images, R.t_cutout, R.t_setup, R.t_final))
             end
@@ -370,7 +393,9 @@ fitted), `t_cutout` (the reads' time) and `catalog` replaced by the tile's whole
 plan's frame: every source the fit kept, over the padded tile, in `fit_joint_multipass`'s columns for
 the plan's `bands` (`NaN` for a band the tile lacks), `u, v` on the frame, plus `tile` and `depth`,
 the signed distance (frame px) of the source inside the tile's core, negative in the ring.  The
-products are the tile's own, on its padded tile.  [`merge_tiles`](@ref) merges a cell's tiles.
+products are the tile's own, on its padded tile.  `hash` is the tile's identity hash when the plan
+was read from a plan folder ([`read_job`](@ref)), else `nothing`; a runner saving results must keep
+it, since [`merge_tiles`](@ref) finds such a result's tile by it.  `merge_tiles` merges a cell's tiles.
 """
 function fit_tile(plan, k::Integer, images::Union{AbstractVector{<:JointImage}, AbstractDict{<:Integer, <:JointImage}}; backend = KA.CPU(),
         T::Type{<:AbstractFloat} = Float64, show_trace::Bool = false)
@@ -382,15 +407,25 @@ function fit_tile(plan, k::Integer, images::Union{AbstractVector{<:JointImage}, 
     t_cutout = @elapsed (cuts, idx) = _cutouts(images, t)
     isempty(cuts) && return nothing
     R = fit_joint_multipass(cuts, t.frame; backend, T, plan.product_eltype, options = plan.options, show_trace, plan.products, plan.coadd_options)
-    return merge(R, (; catalog = _tile_rows(R.catalog, t, plan.bands, k), tile = k, images = idx, t_cutout))
+    return merge(R, (; catalog = _tile_rows(R.catalog, t, plan.bands, k), tile = k, hash = hasproperty(t, :hash) ? t.hash : nothing, images = idx, t_cutout))
 end
 
 """
     merge_tiles(plan, c, results) -> (; catalog, n_dedup, products, cell, tiles, absent)
 
 Cell `c` of `plan` from its tiles' [`fit_tile`](@ref) `results`: any of them, in any order; `nothing`
-(an empty tile's result) is skipped, and a result from another cell throws.  A source belongs to the
-tile whose core contains its final position.  Each tile contributes
+(an empty tile's result) is skipped, and a result from another cell throws.
+
+Which tile a result is: for a plan read from a plan folder ([`read_plan`](@ref)), the cell's tile
+with the result's identity `hash`, whatever number it was fitted as (so a result reused after a
+re-plan finds its tile, renumbered); a hash matching none of the cell's tiles throws.  The hash
+covers image names, not contents, so a matched result can be stale if an image changed under the
+same name (see [`write_plan`](@ref)).  For an
+in-memory plan, the result's `tile` number.  Results and plan must agree: results fitted from a
+plan folder are merged with `read_plan`'s plan, in-memory ones with their in-memory plan, else
+this throws.
+
+A source belongs to the tile whose core contains its final position.  Each tile contributes
 - the rows its core grown by `ε = plan.options.min_separation` contains, and
 - of the rows outside every tile's grown core (around the cell, in the tiles' rings), those whose
   distance to its core is within `ε` of the distance to the nearest core (as in the cell, a source
@@ -418,31 +453,50 @@ function merge_tiles(plan, c::Integer, results)
     grid = oversample(TanGrid(f.ra0, f.dec0, f.scale, length(cell[1]), length(cell[2]), f.cy - off[1], f.cx - off[2]), K)
     names = Tuple(p for p in plan.products if p in _MAP_PRODUCTS || p in _COADD_PRODUCTS)
     prods = _assembly(names, (), plan.bands, grid, plan.product_eltype)
-    isempty(names) || foreach(r -> _assemble!(prods, r.products, plan.tiles[r.tile], nothing, nothing, K, K .* off), rs)
+    # each at the tile it was resolved to, which for a reused result is not its stored number
+    isempty(names) || foreach(((r, k),) -> _assemble!(prods, r.products, plan.tiles[k], nothing, nothing, K, K .* off), zip(rs, m.resolved))
     return (; m.catalog, m.n_dedup, products = NamedTuple{(names..., :grid)}((map(p -> prods[p], names)..., grid)), m.cell, m.tiles, m.absent)
 end
 
-# merge_tiles' catalog of cell c from results `rs` (no `nothing`s): `(; catalog, n_dedup, cell, tiles, absent)`.
+# merge_tiles' catalog of cell c from results `rs` (no `nothing`s): `(; catalog, n_dedup, cell, tiles, absent, resolved)`,
+# `resolved` the plan tile each result is (by hash for a plan read from a folder, else by number).
 function _merge_cell(plan, c, rs)
     ε = plan.options.min_separation
     1 <= c <= length(plan.cells) || throw(ArgumentError("cell $c is not one of the plan's $(length(plan.cells))"))
-    ks = [r.tile for r in rs]
-    allunique(ks) || throw(ArgumentError("tiles $(unique(filter(k -> count(==(k), ks) > 1, ks))) appear more than once in `results`"))
-    other = filter(k -> plan.tiles[k].cell != c, ks)
-    isempty(other) || throw(ArgumentError("results for tiles $other belong to other cells than cell $c: merge each cell separately"))
-    cell = plan.cells[c]
     tiles = [k for (k, t) in enumerate(plan.tiles) if t.cell == c]
+    hashed = any(t -> hasproperty(t, :hash), plan.tiles)
+    # a result saved without the field is unhashed, as one with `hash = nothing`
+    hash_of(r) = hasproperty(r, :hash) ? r.hash : nothing
+    for r in rs
+        (hash_of(r) !== nothing) == hashed || throw(ArgumentError(hashed ?
+            "the result fitted as tile $(r.tile) has no hash, but the plan was read from a plan folder: merge in-memory results with their in-memory plan" :
+            "the result fitted as tile $(r.tile) was fitted from a plan folder: merge it with read_plan's plan"))
+    end
+    if hashed
+        byhash = Dict(plan.tiles[k].hash => k for k in tiles)
+        ks = [get(byhash, hash_of(r), 0) for r in rs]
+        stray = [r.tile for (r, k) in zip(rs, ks) if k == 0]
+        isempty(stray) || throw(ArgumentError("no tile of cell $c has the hash of the results fitted as tiles $stray: fitted for another plan, or for another cell"))
+    else
+        ks = [r.tile for r in rs]
+        other = filter(k -> !(1 <= k <= length(plan.tiles)) || plan.tiles[k].cell != c, ks)
+        isempty(other) || throw(ArgumentError("results for tiles $other belong to other cells than cell $c: merge each cell separately"))
+    end
+    allunique(ks) || throw(ArgumentError("tiles $(unique(filter(k -> count(==(k), ks) > 1, ks))) have more than one result"))
+    cell = plan.cells[c]
     peers = [plan.tiles[k].core for k in tiles]   # every tile of the cell, fitted or not
     grown((cr, cc), u, v) = (first(cr) - 0.5 - ε <= u < last(cr) + 0.5 + ε) & (first(cc) - 0.5 - ε <= v < last(cc) + 0.5 + ε)
     cats = map(sortperm(ks)) do i
         r = rs[i].catalog; core = plan.tiles[ks[i]].core
+        # a reused result's rows carry the number it was fitted as
+        rs[i].tile == ks[i] || (r = StructArray(merge(StructArrays.components(r), (; tile = fill(ks[i], length(r))))))
         r[[grown(core, r.u[j], r.v[j]) ||
            (!any(p -> grown(p, r.u[j], r.v[j]), peers) && _depth(core, r.u[j], r.v[j]) >= maximum(p -> _depth(p, r.u[j], r.v[j]), peers) - ε)
            for j in eachindex(r.u)]]
     end
     cat, n_dedup = _merge_catalogs(cats, plan.bands, length(plan.tiles), ε)
     catalog = StructArray(merge(StructArrays.components(cat), (; depth = [_depth(cell, cat.u[j], cat.v[j]) for j in eachindex(cat.u)])))
-    return (; catalog, n_dedup, cell = c, tiles, absent = setdiff(tiles, ks))
+    return (; catalog, n_dedup, cell = c, tiles, absent = setdiff(tiles, ks), resolved = ks)
 end
 
 # Signed distance (frame px) of (u, v) inside the frame rectangle (rows, cols), negative outside.

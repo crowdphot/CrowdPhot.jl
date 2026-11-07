@@ -15,6 +15,8 @@ const KA = KernelAbstractions
 using SpecialFunctions: erf, erfc, gamma_inc_inv
 using StaticArrays: SMatrix, SVector, MVector
 using StructArrays: StructArrays, StructArray
+using SHA: sha256
+import TOML
 using LinearAlgebra: opnorm, dot, svd, Diagonal
 import Random
 using Statistics: median
@@ -26,7 +28,7 @@ using ..Background: MeanBackground, MedianBackground, SExtractorBackground, MMMB
 
 export TanGrid, world_to_grid, grid_to_world, oversample, fits_wcs, PolyMap, JointImage, JointScene
 export JointDetector, JointFitOptions, JointLoopOptions, PSFRefineOptions, fit_joint_multipass, fit_joint_tiled, plan_tiles, coadd
-export ImageFootprint, fit_tile, merge_tiles
+export ImageFootprint, fit_tile, merge_tiles, write_plan, read_plan, read_job
 export NeighborList, pairs_within, cross_pairs, nearest_within
 
 include("frame.jl")
@@ -45,5 +47,6 @@ include("psfrefine.jl")
 include("loop.jl")
 include("coadd.jl")
 include("tiling.jl")
+include("planfile.jl")
 
 end # module Joint
