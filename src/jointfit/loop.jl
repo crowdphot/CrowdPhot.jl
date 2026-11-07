@@ -82,11 +82,18 @@ Base.@kwdef struct JointLoopOptions
     psf_refine::Union{Nothing, PSFRefineOptions} = nothing
 end
 
+# The `background` keywords and the types a plan reads them as.  `bkg_kws` lists the keywords of `Background2D`
+# and `background2d!` a plan can hold: an ordinary fit passes any through (a `mask`, say), but a tiled one only
+# these, as a plan file must (the per-image arrays wouldn't fit the cutouts anyway).
+const _BKG_KWS = (; fill_value = Float64, filter_size = Union{Int, NTuple{2, Int}}, exclude_percentile = Float64,
+                   sigma = Union{Nothing, Float64, NTuple{2, Float64}}, maxiters = Int)
+const _BACKGROUND_OPTIONS = (; bkg_box_size = Union{Int, NTuple{2, Int}}, bkg_estimator = CrowdPhot.Background.AbstractBackgroundEstimator,
+                              bkg_rms_estimator = CrowdPhot.Background.AbstractBackgroundRMSEstimator, bkg_kws = _BKG_KWS)
+
 # The resolved background keywords, with the single-image loop's defaults.
-const _BACKGROUND_KEYS = (:bkg_box_size, :bkg_estimator, :bkg_rms_estimator, :bkg_kws)
 function _background_settings(kw::NamedTuple)
-    bad = setdiff(keys(kw), _BACKGROUND_KEYS)
-    isempty(bad) || throw(ArgumentError("unsupported joint background keyword(s) $(join(bad, ", ")); accepted: $(join(_BACKGROUND_KEYS, ", "))"))
+    bad = setdiff(keys(kw), keys(_BACKGROUND_OPTIONS))
+    isempty(bad) || throw(ArgumentError("unsupported joint background keyword(s) $(join(bad, ", ")); accepted: $(join(keys(_BACKGROUND_OPTIONS), ", "))"))
     return (; box = get(kw, :bkg_box_size, 20), estimator = get(kw, :bkg_estimator, CrowdPhot.SExtractorBackground()),
               rms_estimator = get(kw, :bkg_rms_estimator, CrowdPhot.MADStdRMS()), kws = get(kw, :bkg_kws, (;)))
 end
@@ -417,6 +424,10 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
     return (; catalog = cat, bands = sc.bands, history, converged, products = prods, psfs = st.psfs, psf_stars, t_setup, t_final)
 end
 
+# The `coadd_options` `fit_joint_multipass` passes to `coadd`, with the types a plan file reads them as.
+const _COADD_OPTIONS = (; pixfrac = Float64, units = Symbol, weight = Symbol, clip = Union{Nothing, Float64}, clip_grow = Int, clip_mu = Float64,
+                         clip_min_images = Int)
+
 "Checks of `fit_joint_multipass`'s arguments that need no data; `products` with `:coadd` expanded."
 function _check_run_args(o::JointLoopOptions, products, coadd_options)
     o.accept in (:nu, :snm) || throw(ArgumentError("accept must be :nu or :snm"))
@@ -427,7 +438,7 @@ function _check_run_args(o::JointLoopOptions, products, coadd_options)
     avail = (_IMAGE_PRODUCTS..., _MAP_PRODUCTS..., _COADD_PRODUCTS...)
     bad = setdiff(products, avail)
     isempty(bad) || throw(ArgumentError("unknown products $(join(bad, ", ")); available: $(join(avail, ", ")), coadd"))
-    okc = (:pixfrac, :units, :weight, :clip, :clip_grow, :clip_mu, :clip_min_images)
+    okc = keys(_COADD_OPTIONS)
     badc = setdiff(keys(coadd_options), okc)
     isempty(badc) || throw(ArgumentError("unsupported coadd_options $(join(badc, ", ")); accepted: $(join(okc, ", "))"))
     !uses_chi(o.detector) && any(in(products), (:chi2, :chi2_residual)) &&

@@ -2,7 +2,7 @@ using CrowdPhot
 using CrowdPhot.Joint
 using CrowdPhot.PSF: CircularGaussianPRF
 using StableRNGs: StableRNG
-using Statistics: median
+using Statistics: median, std
 using Test
 
 const J = CrowdPhot.Joint
@@ -35,6 +35,9 @@ function tiling_field(specs; n = 300, seed = 7, density = 1 / 150, sky = 30.0)
 end
 
 const DITHERS = [(0.0, [40.0, 45.0], :A, 2.0), (12.0, [50.0, 30.0], :A, 2.0), (35.0, [60.0, 40.0], :B, 2.6), (60.0, [45.0, 55.0], :B, 2.6)]
+
+"A background estimator from outside CrowdPhot.Background, which a plan file can't name."
+struct NotOursBackground <: CrowdPhot.Background.AbstractBackgroundEstimator end
 
 "A parent array allowing only range reads (counted); read number `fail` throws."
 struct RangeOnly{T, M <: AbstractMatrix{T}} <: AbstractMatrix{T}
@@ -94,6 +97,7 @@ end
     o = JointLoopOptions()
     plan = (; options = o, bands = [:A], products = (), product_eltype = Float32, frame = TanGrid(0.0, 0.0, 0.1, 100, 100), cells = [(1:100, 1:100)],
             tiles = [(; core = (1:50, 1:100), cell = 1), (; core = (51:100, 1:100), cell = 1)])
+    # results without a `hash` field, as an in-memory plan's may be
     tr(k, u, v) = (; tile = k, catalog = J.StructArray(rows(k, [u], [v], [J._depth(plan.tiles[k].core, u, v)])))
     for (u1, u2) in ((100.6, 100.4), (100.4, 100.6), (100.6, 100.6))
         @test length(merge_tiles(plan, 1, [tr(1, u1, -49.5), tr(2, u2, -49.5)]).catalog) == 1
@@ -213,7 +217,7 @@ end
         m = merge_tiles(p, 1, res)
         @test isequal(m.catalog, R.catalog) && m.n_dedup == [t.n_dedup for t in R.tiles]
         @test (m.cell, m.tiles, m.absent) == (1, [1, 2, 3, 4], Int[]) && keys(m.products) == (:grid,)
-        @test_throws "tiles [3] appear more than once" merge_tiles(p, 1, [res[1], res[1]])
+        @test_throws "tiles [3] have more than one result" merge_tiles(p, 1, [res[1], res[1]])
         @test_throws "cell 2 is not one of the plan's 1" merge_tiles(p, 2, res)
         # `nothing` (an empty tile) is skipped, and tiles given no result are absent: their cores stay empty but
         # for the margin `min_separation` their neighbors report, though tile 3's ring reaches into core 1
@@ -417,4 +421,221 @@ end
     imgs = [f.imgs[1:3]; JointImage(f.imgs[4].data, w, f.imgs[4].psf, f.imgs[4].to_sky; band = :A)]
     Rm = fit_joint_tiled(imgs, f.frame; tile_size = 380, options = JointLoopOptions(max_iter = 1))
     @test [t.images for t in Rm.tiles] == [[1], [1, 2, 3, 4], [2, 3, 4]]
+end
+
+@testset "plan folders" begin
+    f = tiling_field(DITHERS)
+    o3 = JointLoopOptions(max_iter = 3, min_growth = 0)
+    fps = [ImageFootprint(im, "img$e") for (e, im) in enumerate(f.imgs)]
+    ny, nx = f.frame.ny, f.frame.nx
+
+    @testset "options as TOML" begin
+        o = JointLoopOptions(detect_sigma = 4.0, blend_threshold = nothing, band_weights = Dict(:A => 2.0, :B => 0.5), discard_passes = 2,
+                             detector = JointDetector(K = 4), fit = JointFitOptions(R_cap = 30, model_rad = 2.5),
+                             background = (; bkg_estimator = CrowdPhot.MMMBackground(median_factor = 3.5, mean_factor = 2.0), bkg_box_size = (20, 30),
+                                           bkg_rms_estimator = CrowdPhot.MADStdRMS()))
+        d = J.TOML.parse(sprint(io -> J.TOML.print(io, J._toml(o); sorted = true)))
+        # every field is written: nothing as "nothing", estimators by name (with their fields when they have some)
+        @test Set(keys(d)) == Set(string.(fieldnames(JointLoopOptions))) && d["blend_threshold"] == "nothing" && d["psf_refine"] == "nothing"
+        @test d["fit"]["max_flux_step"] == Inf && d["fit"]["R_cap"] == 30 && d["accept"] == "nu" && d["band_weights"] == Dict("A" => 2.0, "B" => 0.5)
+        @test d["background"]["bkg_rms_estimator"] == "MADStdRMS" && d["background"]["bkg_estimator"] == Dict("type" => "MMMBackground", "median_factor" => 3.5, "mean_factor" => 2.0)
+        r = J._options_from(JointLoopOptions, d, "options."; strict = true)
+        @test J._toml(r) == J._toml(o) && r.blend_threshold === nothing && r.psf_refine === nothing && r.fit.model_rad === 2.5 && r.fit.R_cap === 30
+        @test r.accept === :nu && r.detector.K == 4 && r.band_weights == o.band_weights && r.background.bkg_estimator == o.background.bkg_estimator
+        @test keys(r.background) == (:bkg_box_size, :bkg_estimator, :bkg_rms_estimator) && r.background.bkg_box_size === (20, 30)
+        # a plan records every field, so a missing one is an error; a user's configuration takes the default
+        d2 = deepcopy(d); delete!(d2, "dedup"); delete!(d2["fit"], "R_fit")
+        @test_throws "option options.dedup is missing" J._options_from(JointLoopOptions, d2, "options."; strict = true)
+        r2 = J._options_from(JointLoopOptions, d2, "options."; strict = false)
+        @test r2.dedup == JointLoopOptions().dedup && r2.fit.R_fit == JointFitOptions().R_fit && r2.detect_sigma == 4.0
+        d3 = deepcopy(d); d3["fit"]["bogus"] = 1
+        @test_throws "unknown option options.fit.bogus" J._options_from(JointLoopOptions, d3, "options."; strict = true)
+        d4 = deepcopy(d); d4["detect_sigma"] = "five"
+        @test_throws "option options.detect_sigma: \"five\" is not a Float64" J._options_from(JointLoopOptions, d4, "options."; strict = true)
+        # estimators: only CrowdPhot.Background's, of the right kind
+        for (v, msg) in (("NoSuchBackground", "\"NoSuchBackground\" is not one of CrowdPhot.Background's AbstractBackgroundEstimators"),
+                         ("MADStdRMS", "\"MADStdRMS\" is not one of CrowdPhot.Background's AbstractBackgroundEstimators"),
+                         (Dict("median_factor" => 3), "an estimator is a name, or a table with `type`"))
+            d5 = deepcopy(d); d5["background"]["bkg_estimator"] = v
+            @test_throws msg J._options_from(JointLoopOptions, d5, "options."; strict = true)
+        end
+        @test_throws "a plan can name only CrowdPhot.Background's estimators" J._toml(JointLoopOptions(background = (; bkg_estimator = NotOursBackground())))
+        # background keywords and estimator fields read by their schema: `nothing` and tuples survive, estimator
+        # fields are Float64, and plan_tiles normalizes the same way, so a plan matches its file
+        bo = JointLoopOptions(background = (; bkg_estimator = CrowdPhot.MMMBackground(median_factor = 3.5f0, mean_factor = 2.0f0),
+                                             bkg_kws = (; sigma = nothing, filter_size = (3, 5), maxiters = 4)))
+        db = J.TOML.parse(sprint(io -> J.TOML.print(io, J._toml(bo); sorted = true)))
+        rb = J._options_from(JointLoopOptions, db, "options."; strict = true).background
+        @test rb.bkg_kws === (; filter_size = (3, 5), sigma = nothing, maxiters = 4)
+        @test rb.bkg_estimator === CrowdPhot.MMMBackground(median_factor = 3.5, mean_factor = 2.0)
+        @test plan_tiles(fps, f.frame; overlap = 80, options = bo).options.background === rb
+        @test J._options_from(J._BKG_KWS, (; sigma = 3, filter_size = [3, 3]), "k."; strict = true) === (; filter_size = (3, 3), sigma = 3.0)
+        @test J._options_from(J._BKG_KWS, (; sigma = (2, 5)), "k."; strict = true) === (; sigma = (2.0, 5.0))
+        @test_throws "option k.sigma: (1, 2, 3) is not a" J._options_from(J._BKG_KWS, (; sigma = (1, 2, 3)), "k."; strict = true)
+        @test_throws "unknown option options.background.bkg_kws.mask" plan_tiles(fps, f.frame; overlap = 80,
+                                                                                 options = JointLoopOptions(background = (; bkg_kws = (; mask = trues(2, 2)))))
+        # another module's estimator, or a function, is kept in memory (only write_plan refuses it)
+        @test plan_tiles(fps, f.frame; overlap = 80, options = JointLoopOptions(background = (; bkg_estimator = NotOursBackground()))).options.background.bkg_estimator === NotOursBackground()
+        pf = plan_tiles(fps, f.frame; overlap = 80, options = JointLoopOptions(background = (; bkg_estimator = median, bkg_rms_estimator = std)))
+        @test pf.options.background.bkg_estimator === median && pf.options.background.bkg_rms_estimator === std
+        @test_throws "a plan file can't hold a" write_plan(joinpath(mktempdir(), "fn"), pf)
+        # the schema's keywords are ones Background2D and background2d! take
+        @test any(m -> keys(J._BKG_KWS) ⊆ Base.kwarg_decl(m), methods(CrowdPhot.Background2D)) && keys(J._BKG_KWS) ⊆ Base.kwarg_decl(only(methods(J.background2d!)))
+    end
+
+    @testset "exclusions" begin
+        p = plan_tiles(fps, f.frame; tile_size = 330, overlap = 80, exclude = ["img2" => "F146 exposure 1: bad"])
+        @test [im.name for im in p.images] == ["img1", "img2", "img3", "img4"] && p.excluded == [(; name = "img2", reason = "F146 exposure 1: bad")]
+        @test p.images[1] == (; name = "img1", dims = (300, 300), band = :A)
+        # cutouts index the list given, and the excluded image is in none
+        @test all(c -> c.name != "img2" && c.image != 2 && p.images[c.image].name == c.name, (c for t in p.tiles for c in t.cutouts))
+        @test_throws "exclude names images not in the list: \"img9\"" plan_tiles(fps, f.frame; overlap = 80, exclude = ["img9" => "x"])
+        @test_throws "every image is excluded" plan_tiles(fps, f.frame; overlap = 80, exclude = [fp.name => "x" for fp in fps])
+        # a plan made from JointImages with an exclusion is fitted with the same list: the same tile as a plan
+        # made without that image
+        pe = plan_tiles(f.imgs, f.frame; tile_size = 330, options = o3, exclude = ["2" => "bad"])
+        ps = plan_tiles(f.imgs[[1, 3, 4]], f.frame; tile_size = 330, options = o3)
+        @test [c.image for c in pe.tiles[1].cutouts] == [1, 3, 4] && [c.name for c in pe.tiles[1].cutouts] == ["1", "3", "4"]
+        @test [(t.core, t.padded) for t in pe.tiles] == [(t.core, t.padded) for t in ps.tiles] && pe.bands == ps.bands && pe.overlap == ps.overlap
+        re = fit_tile(pe, 1, f.imgs)
+        @test re.images == [1, 3, 4] && isequal(re.catalog, fit_tile(ps, 1, f.imgs[[1, 3, 4]]).catalog)
+    end
+
+    @testset "write, read back, refuse edits" begin
+        root = mktempdir()
+        cores = [(1:(ny ÷ 2), 1:nx), ((ny ÷ 2 + 1):ny, 1:nx), ((ny + 500):(ny + 520), 1:20)]
+        p = plan_tiles(fps, f.frame; cores, overlap = 80, options = o3, products = (:nu, :coadd), coadd_options = (; clip = 3, pixfrac = 0.8),
+                       product_eltype = Float64, exclude = ["img4" => "a test"])
+        # coadd_options in their canonical order and types, as the file reads them back; a value of the wrong type
+        # is an error naming the option
+        @test p.coadd_options === (; pixfrac = 0.8, clip = 3.0) && p.uncovered == [3]
+        @test_throws "option coadd_options.clip: \"3\" is not a" plan_tiles(fps, f.frame; overlap = 80, coadd_options = (; clip = "3"))
+        @test_throws "option coadd_options.clip_grow: 1.5 is not a Int64" plan_tiles(fps, f.frame; overlap = 80, coadd_options = (; clip_grow = 1.5))
+        dir = joinpath(root, "plan")
+        h = write_plan(dir, p; shard_size = 1)
+        @test readdir(dir) == ["jobs.toml", "plan.toml", "tiles"] && readdir(joinpath(dir, "tiles")) == ["shard_$k.toml" for k in eachindex(p.tiles)]
+        @test readdir(root) == ["plan"]                    # the temporary folder was renamed into place
+        # the folder's permissions are any folder's (the umask's), not a private temporary folder's
+        plain = joinpath(mktempdir(), "plain"); mkdir(plain)
+        @test stat(dir).mode & 0o777 == stat(plain).mode & 0o777
+        rp = read_plan(dir)
+        @test rp.hash == h && (rp.N, rp.M, rp.tile_size, rp.overlap) == (p.N, p.M, p.tile_size, p.overlap)
+        @test (rp.bands, rp.products, rp.coadd_options, rp.product_eltype, rp.frame) == (p.bands, p.products, p.coadd_options, p.product_eltype, p.frame)
+        @test (rp.images, rp.excluded, rp.cells, rp.uncovered) == (p.images, p.excluded, p.cells, p.uncovered) && J._toml(rp.options) == J._toml(p.options)
+        # the index's tiles are the plan's without cutouts, frames exact, with each one's shard and hash
+        @test [Base.structdiff(t, NamedTuple{(:shard, :hash)}) for t in rp.tiles] == [Base.structdiff(t, NamedTuple{(:cutouts,)}) for t in p.tiles]
+        @test [t.shard for t in rp.tiles] == collect(eachindex(p.tiles)) && allunique(t.hash for t in rp.tiles)
+        # one job per cell, read from its shards alone: the tiles exactly as planned, and the images they use
+        jobs = [read_job(dir, j) for j in eachindex(p.cells)]
+        @test [jb.cells for jb in jobs] == [[1], [2], [3]] && all(jb -> jb.plan_hash == h, jobs) && isempty(jobs[3].tiles)
+        @test sort(vcat([collect(keys(jb.tiles)) for jb in jobs]...)) == collect(eachindex(p.tiles))
+        @test all(jb -> all(k -> Base.structdiff(jb.tiles[k], NamedTuple{(:hash,)}) == p.tiles[k] && jb.tiles[k].hash == rp.tiles[k].hash &&
+                                 p.tiles[k].cell == only(jb.cells), keys(jb.tiles)), jobs)
+        @test all(jb -> all(e -> jb.images[e] == p.images[e], keys(jb.images)), jobs) && !isempty(jobs[1].images)
+        @test J._toml(jobs[3].options) == J._toml(p.options) && jobs[3].product_eltype === Float64 && jobs[3].products == p.products
+        @test_throws "has jobs 1 to 3, not 4" read_job(dir, 4)
+        @test_throws "exists: a plan folder is written once" write_plan(dir, p)
+        # what read_plan or read_job returns can't be written back: they don't keep every tile's cutouts
+        @test_throws "write_plan needs plan_tiles' result" write_plan(joinpath(mktempdir(), "again"), rp)
+        @test_throws "write_plan needs plan_tiles' result" write_plan(joinpath(mktempdir(), "again"), jobs[1])
+        # a path with a trailing separator is the same folder, its temporary folder beside it and gone
+        slashed = mktempdir()
+        write_plan(joinpath(slashed, "plan") * "/", p; shard_size = 1)          # as `dir` was: the shards are in the hash
+        @test readdir(slashed) == ["plan"] && read_plan(joinpath(slashed, "plan")).hash == h
+        # any edit to a file is refused by its hash: the index's plan table or a tile's core, a job's tiles, a shard's
+        # cutout, its image index (img1 and img2 have the same size and band), or its plan table
+        copied(name) = (d = joinpath(root, name); cp(dir, d); d)
+        edit!(file, pat) = write(file, replace(read(file, String), pat; count = 1))
+        shard1(d) = joinpath(d, "tiles", "shard_1.toml")
+        for (name, file, pat, reader, msg) in (("index_plan", "plan.toml", "overlap = 80" => "overlap = 81", read_plan, "plan.toml doesn't match its hash"),
+                                               ("index_core", "plan.toml", r"core = \[\[\d+" => "core = [[41", read_plan, "plan.toml doesn't match its hash"),
+                                               ("job_tiles", "jobs.toml", r"tiles = \[\d+\]" => "tiles = [2]", d -> read_job(d, 1), "jobs.toml doesn't match its hash"),
+                                               ("cutout_rows", shard1, r"rows = \[\d+" => "rows = [2", d -> read_job(d, 1), "shard_1.toml doesn't match its hash"),
+                                               ("cutout_image", shard1, r"^(\s*)image = 1$"m => s"\1image = 2", d -> read_job(d, 1), "shard_1.toml doesn't match its hash"),
+                                               ("shard_plan", shard1, "max_iter = 3" => "max_iter = 4", d -> read_job(d, 1), "shard_1.toml doesn't match its hash"))
+            bad = copied(name); edit!(file isa String ? joinpath(bad, file) : file(bad), pat)
+            @test_throws msg reader(bad)
+        end
+        # a shard rewritten consistently (its hash recomputed) is still refused: the tile's identity hash, which takes
+        # each cutout's image through the image table, or the plan table against the job file's
+        rehash!(file) = (d = J.TOML.parsefile(file); d["hash"] = J._content_hash(d); open(io -> J.TOML.print(io, d; sorted = true), file, "w"))
+        for (name, pat, msg) in (("rehashed_rows", r"rows = \[\d+" => "rows = [2", "tile 1 doesn't match its hash"),
+                                 ("rehashed_image", r"^(\s*)image = 1$"m => s"\1image = 2", "tile 1 doesn't match its hash"),
+                                 ("rehashed_plan", "max_iter = 3" => "max_iter = 4", "plan table differs from"))
+            bad = copied(name); edit!(shard1(bad), pat); rehash!(shard1(bad))
+            @test_throws msg read_job(bad, 1)
+        end
+        @test any(c -> c.image == 1, p.tiles[1].cutouts) && p.images[1].dims == p.images[2].dims && p.images[1].band == p.images[2].band
+        bad = copied("other_version"); edit!(joinpath(bad, "plan.toml"), r"^version = 1$"m => "version = 2")
+        @test_throws "has plan version 2; this CrowdPhot reads version 1" read_plan(bad)
+        other = joinpath(root, "other_plan")
+        write_plan(other, plan_tiles(fps, f.frame; cores, overlap = 80, options = JointLoopOptions(max_iter = 2)); shard_size = 1)
+        bad = copied("foreign_shard"); cp(joinpath(other, "tiles", "shard_1.toml"), joinpath(bad, "tiles", "shard_1.toml"); force = true)
+        @test_throws "belongs to plan" read_job(bad, 1)
+    end
+
+    @testset "a job's tiles through fit_tile and merge_tiles" begin
+        p = plan_tiles(f.imgs, f.frame; tile_size = 330, options = o3)
+        R = fit_joint_tiled(f.imgs, f.frame; tile_size = 330, options = o3)
+        dir = joinpath(mktempdir(), "even")
+        write_plan(dir, p; shard_size = 3)
+        jb = read_job(dir, 1)
+        @test sort(collect(keys(jb.tiles))) == 1:4 && sort(unique(rp_t.shard for rp_t in read_plan(dir).tiles)) == [1, 2]
+        # a unit loads each image its cutouts use by name (here the JointImages, named by their index)
+        parents = Dict(e => f.imgs[parse(Int, im.name)] for (e, im) in jb.images)
+        res = [fit_tile(jb, k, parents) for k in sort(collect(keys(jb.tiles)))]
+        m = merge_tiles(read_plan(dir), 1, res)
+        @test isequal(m.catalog, R.catalog) && m.n_dedup == [t.n_dedup for t in R.tiles] && isempty(m.absent)
+        @test all(r -> r.hash == read_plan(dir).tiles[r.tile].hash, res)
+        # results and plan must agree: a plan folder's results with read_plan's plan, in-memory ones with theirs
+        @test_throws "was fitted from a plan folder: merge it with read_plan's plan" merge_tiles(p, 1, res)
+        r0 = fit_tile(p, 1, f.imgs)
+        @test r0.hash === nothing
+        @test_throws "has no hash, but the plan was read from a plan folder" merge_tiles(read_plan(dir), 1, [r0])
+        # a result saved without the field at all gets the same message
+        @test_throws "has no hash, but the plan was read from a plan folder" merge_tiles(read_plan(dir), 1, [Base.structdiff(res[1], NamedTuple{(:hash,)})])
+    end
+
+    @testset "results found by their hash after a re-plan renumbers the tiles" begin
+        root = mktempdir()
+        top = (1:(ny ÷ 2), 1:nx); bottom = ((ny ÷ 2 + 1):ny, 1:nx)
+        # the same two cells, in the other order: the top cell is tile 1 in one plan, tile 2 in the other
+        d1 = joinpath(root, "top_first"); d2 = joinpath(root, "top_second")
+        write_plan(d1, plan_tiles(fps, f.frame; cores = [top, bottom], overlap = 80, options = o3, products = (:nu,)))
+        write_plan(d2, plan_tiles(fps, f.frame; cores = [bottom, top], overlap = 80, options = o3, products = (:nu,)))
+        p1 = read_plan(d1); p2 = read_plan(d2)
+        @test p1.tiles[1].hash == p2.tiles[2].hash && p1.tiles[1].core == p2.tiles[2].core
+        fitjob(d, k) = (jb = read_job(d, k); fit_tile(jb, k, Dict(e => f.imgs[e] for e in keys(jb.images))))
+        old = fitjob(d1, 1); fresh = fitjob(d2, 2)
+        @test old.tile == 1 && all(==(1), old.catalog.tile)
+        # the old result merges into the new plan as its tile 2, its rows renumbered and its products in place
+        m = merge_tiles(p2, 2, [old]); mf = merge_tiles(p2, 2, [fresh])
+        @test isequal(m.catalog, mf.catalog) && all(==(2), m.catalog.tile) && isequal(m.products.nu, mf.products.nu) && isempty(m.absent)
+        # a hash no tile of the cell has (the old top result in the new bottom cell), and two results for one tile
+        @test_throws "no tile of cell 1 has the hash of the results fitted as tiles [1]" merge_tiles(p2, 1, [old])
+        @test_throws "tiles [2] have more than one result" merge_tiles(p2, 2, [fresh, old])
+    end
+
+    @testset "re-planning without an image keeps the hashes of the tiles it doesn't touch" begin
+        specs = [(0.0, [40.0, 40.0], :A, 2.0), (0.0, [40.0, 520.0], :B, 2.6), (5.0, [45.0, 515.0], :B, 2.6), (0.0, [40.0, 240.0], :A, 2.0)]
+        g = tiling_field(specs; seed = 11)
+        gfps = [ImageFootprint(im, "img$e") for (e, im) in enumerate(g.imgs)]
+        pa = plan_tiles(gfps, g.frame; tile_size = 380, overlap = 80)
+        pb = plan_tiles(gfps, g.frame; tile_size = 380, overlap = 80, exclude = ["img2" => "a test"])
+        @test !any(c -> c.name == "img2", pa.tiles[1].cutouts) && any(c -> c.name == "img2", pa.tiles[3].cutouts)
+        root = mktempdir()
+        da = joinpath(root, "with_img2"); db = joinpath(root, "without_img2")
+        write_plan(da, pa); write_plan(db, pb)
+        ra = read_plan(da); rb = read_plan(db)
+        # the left tile, which never used img2, is unchanged with the same hash; the right one changes
+        @test pa.tiles[1] == pb.tiles[1] && pa.tiles[3] != pb.tiles[3]
+        @test ra.tiles[1].hash == rb.tiles[1].hash && ra.tiles[3].hash != rb.tiles[3].hash && ra.hash != rb.hash
+        # the identity hash ignores image indices: img2 removed from the list itself shifts img4 to index 3, and
+        # the left tile keeps its hash (the bands, and so the plan table, are unchanged: img3 is still the first B)
+        pc = plan_tiles(gfps[[1, 3, 4]], g.frame; tile_size = 380, overlap = 80)
+        @test pc.bands == pa.bands && only(c.image for c in pc.tiles[1].cutouts if c.name == "img4") == 3
+        @test only(c.image for c in pa.tiles[1].cutouts if c.name == "img4") == 4
+        dc = joinpath(root, "list_without_img2"); write_plan(dc, pc)
+        @test read_plan(dc).tiles[1].hash == ra.tiles[1].hash
+    end
 end
