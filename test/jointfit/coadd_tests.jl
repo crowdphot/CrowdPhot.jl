@@ -68,6 +68,13 @@ end
     k = isfinite.(R.data.A)
     @test eltype(R32.data.A) == Float32 && maximum(abs.(R32.data.A[k] .- R.data.A[k])) < 1e-3 * maximum(abs, R.data.A[k])
 
+    # flux_scale: values divided by it and inverse variances times its square, so the band's common units
+    # (data 20 at flux_scale 2 is 10, with variance 4 / 2² = 1); in data units the mean was 12
+    g1 = TanGrid(COADD_RA0, COADD_DEC0, 0.1, 10, 10)
+    ims = [JointImage(fill(10s, 10, 10), fill(1 / s^2, 10, 10), nothing, (y, x) -> grid_to_world(g1, y, x); band = :A, flux_scale = s) for s in (1.0, 2.0)]
+    R = coadd(ims, g1; quantities = (:data, :weight), weight = :input)
+    @test all(≈(10; rtol = 1e-9), R.data.A) && all(≈(2; rtol = 1e-9), R.weight.A)
+
     # drop overlaps at full-detector pixel coordinates: in Float32 the area once vanished in the
     # shoelace sum's cancellation there (a full-frame Roman coadd lost 8% of its pixels)
     for (y, x) in (Float64.(Float32.((3.3, 7.7))), Float64.(Float32.((4000.3, 4087.7))))   # inputs both precisions hold exactly
