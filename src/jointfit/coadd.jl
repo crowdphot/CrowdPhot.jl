@@ -128,7 +128,9 @@ function _coadd(dev, footprints, bands, grid::TanGrid, K, inp, quantities; weigh
     vals = Tuple(q for q in (:data, :background, :model, :residual) if q in quantities)
     Kt = T(K); p = T(pixfrac); wm = Val(weight)
     ω = units === :flux ? nothing : (T(grid.cy), T(grid.cx), T((grid.scale / ARCSEC_PER_RAD)^2), T(grid.scale^2))
-    gs = is_cpu(backend) ? (64, 1) : (16, 16)
+    # one node per CPU workgroup: KA 0.10's CPU backend (PoCL) runs a group's items as one vectorized loop,
+    # ~13x slower for these per-node loops over images and drops; KA 0.9's is no slower
+    gs = is_cpu(backend) ? (1, 1) : (16, 16)
     alloc(want, S) = want ? KA.allocate(backend, S, ny, nx) : nothing
     # :rms_aperture: each band's total weight map, and G per input pixel of the band (offsets within it)
     want_ap = :rms_aperture in quantities
