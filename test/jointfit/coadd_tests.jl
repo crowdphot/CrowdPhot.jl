@@ -244,6 +244,18 @@ end
     @test isequal(coadd(S.ims, S.g; kw(S)..., clip = 4).data.A, plain.data.A)
     @test any(coadd(S.ims, S.g; kw(S)..., clip = 4, clip_min_images = 3).nimg.A .< plain.nimg.A)
     @test_throws "clip_min_images must be at least 3" coadd(S.ims, S.g; clip = 4, clip_min_images = 2)
+
+    # the rejection's per-node scratch stays off the heap: clipping allocates its mask and a launch more
+    # than the plain coadd (~20 KB here), not scratch per node (~8 MB).  Two warm-up rounds compile every
+    # kernel variant first (KernelAbstractions 0.10 compiles an unchecked one on a second launch).  Not
+    # checked on KernelAbstractions 0.9 with --check-bounds=yes: the forced bounds checks move the scratch
+    # of its native-Julia CPU kernels to the heap (~3.5 MB here), which only happens under test.
+    S = clip_stack(8, 24, 40; seed = 27)
+    clipped(c) = coadd(S.ims, S.g; kw(S)..., clip = c)
+    for _ in 1:2; clipped(nothing); clipped(4); end
+    if !(Base.JLOptions().check_bounds == 1 && pkgversion(CrowdPhot.Joint.KA) < v"0.10")
+        @test minimum(@allocated(clipped(4)) for _ in 1:3) - minimum(@allocated(clipped(nothing)) for _ in 1:3) < 1_000_000
+    end
 end
 
 @testset "TanGrid(images), fits_wcs and FITSIO" begin

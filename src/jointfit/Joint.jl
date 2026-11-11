@@ -13,7 +13,7 @@ import Atomix
 using KernelAbstractions
 const KA = KernelAbstractions
 using SpecialFunctions: erf, erfc, gamma_inc_inv
-using StaticArrays: SMatrix, SVector, MVector
+using StaticArrays: SMatrix, SVector
 using StructArrays: StructArrays, StructArray
 using SHA: sha256
 import TOML
