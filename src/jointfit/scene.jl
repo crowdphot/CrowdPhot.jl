@@ -6,7 +6,7 @@ One exposure (or detector cutout) of a joint fit, on the host.
 - `data`: the image (background is estimated and subtracted per pass).
 - `weight`: the full per-pixel inverse variance, which must include the sources' Poisson
   variance as well as the background and detector noise (e.g. `1 / ERR²` from a pipeline error
-  array); `0` masks a pixel.  The fit's χ² and the coadd's outlier test rely on it.
+  array); `0` masks a pixel, as do a non-finite weight or datum.  The fit's χ² and the coadd's outlier test rely on it.
 - `psf`: unit-flux PRF in this image's pixel frame (`CircularGaussianPRF`, `ImagePSF`, or
   `GriddedPSFModel` of `ImagePSF` nodes).
 - `to_sky(y, x) -> (ra, dec)`: degrees, for 1-based pixel centers; the only thing needed from
@@ -84,7 +84,8 @@ Adapt.@adapt_structure DeviceImages
 The images of a joint fit resident on `backend` with element type `T`: data, weights, one
 [`PolyMap`](@ref) per image onto `frame`, device PSFs, and band indices (bands are numbered in
 order of first appearance).  Source parameters are a `P x N` matrix on the same backend, rows
-`(u, v, f_1 .. f_B)`, with `(u, v)` on `frame` and `P = 2 + B`.
+`(u, v, f_1 .. f_B)`, with `(u, v)` on `frame` and `P = 2 + B`.  A non-finite datum is stored as 0,
+and a pixel without a finite datum and a finite positive weight with weight 0.
 """
 struct JointScene{T, B, V <: AbstractVector{T}, D <: DeviceImages}
     backend::B
@@ -109,8 +110,22 @@ function JointScene(images::AbstractVector{<:JointImage}, frame::TanGrid; backen
     g = _image_geometry(images, frame, backend, T; degree, max_degree, margin, tol)
     psf = device_psf(backend, T, [im.psf for im in images], [im.psf_offset for im in images])
     dev = DeviceImages(g.dev.ip, g.dev.cy, g.dev.cx, g.dev.dims, g.dev.band, g.dev.degree, psf)
-    return JointScene(backend, frame, g.bands, g.dims, g.offsets, g.maps, g.footprints, _flat(backend, T, im -> im.data, images),
-                      _flat(backend, T, im -> im.weight, images), dev)
+    data = _flat(backend, T, im -> im.data, images); weight = _flat(backend, T, im -> im.weight, images)
+    launch!(clean_kernel!, backend, length(data), data, weight)
+    return JointScene(backend, frame, g.bands, g.dims, g.offsets, g.maps, g.footprints, data, weight, dev)
+end
+
+# The one guard on the fit's inputs, as `pass_weights` in the single-image fitter: a non-finite datum
+# becomes 0, and a pixel without a finite datum and a finite positive weight gets weight 0 (after
+# conversion to T, so Float32 overflow counts).  The kernels mask on `w > 0` alone, so one NaN datum or
+# Inf weight (1 / ERR² with ERR = 0) left in would make the whole scene's cost non-finite and every step rejected.
+@kernel function clean_kernel!(data, weight)
+    i = @index(Global)
+    @inbounds begin
+        d = data[i]; w = weight[i]
+        okd = isfinite(d)
+        data[i] = ifelse(okd, d, zero(d)); weight[i] = ifelse(okd & isfinite(w) & (w > zero(w)), w, zero(w))
+    end
 end
 
 # `f(x)` of every `x` concatenated into one flat array on `backend`, each copied straight into its

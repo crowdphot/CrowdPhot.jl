@@ -237,6 +237,19 @@ end
     @test_throws "reserve_frac must be in [0, 1)" J._refine_setup(s.sc, [im.psf for im in f.imgs], PSFRefineOptions(reserve_frac = 1.0), 3)
 end
 
+@testset "psf_refine phases and plain ImagePSFs" begin
+    # an even-sized stamp's default origin is a half-integer: neighboring samples must still fall in
+    # consecutive phases (rounding each offset once paired them, emptying phases at os = 4)
+    for os in (3, 4)
+        g = refine_state(refine_field(; ref = gauss_node(2.2; os, n = 60), N = 10)).g
+        @test all(r -> g.rph[r + 1] == mod(g.rph[r], os) + 1, 1:(g.nw - 1)) && all(c -> g.cph[c + 1] == mod(g.cph[c], os) + 1, 1:(g.nw - 1))
+    end
+    # plain ImagePSFs (a concretely typed Vector{ImagePSF} in the run) take their refined GriddedPSFModels
+    f = refine_field(; ref = gauss_node(2.2), N = 40, sky = 20.0, noise = sqrt(20.0))
+    R = fit_joint_multipass(f.imgs, f.frame; options = JointLoopOptions(max_iter = 2, psf_refine = PSFRefineOptions(window = 3)))
+    @test all(p -> p isa GriddedPSFModel, R.psfs) && !isempty(R.catalog)
+end
+
 @testset "fit_joint_multipass with psf_refine" begin
     ref = gridded(2.2); truth = gridded(2.3)
     f = refine_field(; ref, truth, N = 60, sky = 20.0, noise = sqrt(20.0))

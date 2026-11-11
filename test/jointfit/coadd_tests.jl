@@ -223,6 +223,13 @@ end
     near = [hypot(r - 14.5, c - 15.5) <= 6 for r in 1:28, c in 1:28]
     @test sum(nrej(0.003)[near]) < sum(r0[near]) / 2
 
+    # a deep Float32 stack near 1e4: the bisection's tolerance (σ / 20 of the median, 4e-5) is below one
+    # ulp (1e-3) there, so it must stop on adjacent floats (it once looped forever); values a few ulps apart
+    g1 = TanGrid(COADD_RA0, COADD_DEC0, 0.1, 4, 4)
+    ims = [JointImage(fill(1e4 + 1e-3 * (k % 5), 4, 4), fill(1e4, 4, 4), nothing, (y, x) -> grid_to_world(g1, y, x); band = :A) for k in 1:257]
+    C = coadd(ims, g1; T = Float32, weight = :input, clip = 4, clip_mu = 0, background = [zeros(4, 4) for _ in 1:257], quantities = (:nimg,))
+    @test all(==(257), C.nimg.A)
+
     # 4 images, below clip_min_images: nothing is clipped, however large the outlier
     S = clip_stack(4, 24, 40; seed = 25)
     S.data[2][5:6, 7:8] .+= 5000

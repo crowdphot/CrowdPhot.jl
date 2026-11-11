@@ -31,7 +31,8 @@
   discarded.  Helps prevent spurious detections in the wings of bright stars.
 - `band_weights = Dict()`: detection weights per band (missing bands weigh 1)
 - `min_separation = 1.0`: new peaks within this of a catalog or discarded source are dropped
-  (discarded: pruned in a pass after the first, whose background still holds the stars' light)
+  (discarded: pruned in a pass after the first, whose background still holds the stars' light);
+  `0` drops none
 - `discard_passes = nothing`: how many passes a discarded source blocks re-detection for
   (`nothing`: the rest of the run; `0`: never).  The log stops a spurious peak from being
   re-detected and pruned in every pass, but also keeps out real stars pruned while a bright
@@ -160,15 +161,17 @@ function _backgrounds!(st, θ, pass, o::JointLoopOptions)
             background2d!(v(st.bkg), v(st.rms), v(st.tmp), b.box; kw...)
         end
     else
-        mh = Array(model)
+        # the scene's cleaned arrays (JointScene's guard), not the raw images; no copy on the CPU backend
+        host(x) = x isa Array ? x : Array(x)
+        mh = host(model); dh = host(sc.data); wh = host(sc.weight)
         bk = Vector{Matrix{T}}(undef, E); rm = similar(bk)
         Threads.@threads :dynamic for e in 1:E
-            im = st.images[e]; w = im.weight
-            m = reshape(view(mh, sc.offsets[e] + 1:sc.offsets[e + 1]), sc.dims[e])
+            v(x) = reshape(view(x, sc.offsets[e] + 1:sc.offsets[e + 1]), sc.dims[e])
+            w = v(wh)
             opts = (; bkg_box_size = b.box, bkg_coarse_passes = 0, bkg_rms_box_size = b.box,
-                      bkg_estimator = b.estimator, bkg_rms_estimator = b.rms_estimator, bkg_kws = b.kws, bkg_mask = map(x -> !(isfinite(x) && x > 0), w),
+                      bkg_estimator = b.estimator, bkg_rms_estimator = b.rms_estimator, bkg_kws = b.kws, bkg_mask = map(x -> !(x > 0), w),
                       coverage_mask = nothing, fixed_inv_var = w)
-            r = CrowdPhot.estimate_background_multipass(im.data, m, pass, opts)
+            r = CrowdPhot.estimate_background_multipass(v(dh), v(mh), pass, opts)
             bk[e] = r.background; rm[e] = r.rms
         end
         copyto!(st.bkg, reduce(vcat, vec.(bk))); copyto!(st.rms, reduce(vcat, vec.(rm)))
@@ -184,11 +187,13 @@ end
 _without_level(jd::JointDetection) = (d = jd.det;
     JointDetection(JointDetector(d.method, d.rap, d.rchi, false, d.μ, d.mf_half, d.Q, d.K, d.psf_regions), jd.grid, jd.banks, jd.tptr, jd.timg, jd.wf, jd.tile, jd.ntr))
 
-# Uniform-bucket index answering "is there a point within `sep`?"
-_sep_index(sep) = (; sep, cells = Dict{NTuple{2, Int}, Vector{NTuple{2, Float64}}}())
-_sep_add!(ix, u, v) = push!(get!(() -> NTuple{2, Float64}[], ix.cells, (floor(Int, u / ix.sep), floor(Int, v / ix.sep))), (u, v))
+# Uniform-bucket index answering "is there a point within `sep`?" (strictly, so `sep = 0` finds none).
+# The buckets only need to be at least `sep` wide for the 3x3 scan to cover it; at least 1 px, as
+# `find_peaks`' dedup grid, so a zero or tiny `sep` gives no infinite or overflowing bucket keys.
+_sep_index(sep) = (; sep, cs = max(Float64(sep), 1.0), cells = Dict{NTuple{2, Int}, Vector{NTuple{2, Float64}}}())
+_sep_add!(ix, u, v) = push!(get!(() -> NTuple{2, Float64}[], ix.cells, (floor(Int, u / ix.cs), floor(Int, v / ix.cs))), (u, v))
 function _sep_hit(ix, u, v)
-    cu = floor(Int, u / ix.sep); cv = floor(Int, v / ix.sep)
+    cu = floor(Int, u / ix.cs); cv = floor(Int, v / ix.cs)
     for a in -1:1, b in -1:1, p in get(ix.cells, (cu + a, cv + b), NTuple{2, Float64}[])
         (p[1] - u)^2 + (p[2] - v)^2 < ix.sep^2 && return true
     end
@@ -300,7 +305,7 @@ the joint final `significance` and per band `significance_b`, `nimg` (images wit
 iterations, median χ²/dof of fitting and reserved stars, and their mean residual / flux by ring
 and S/N bin), whose `mem_est` is a rough peak memory in bytes (a warning is logged once on the CPU
 or an Apple GPU if it exceeds half of `Sys.total_memory()`); whether the stopping rule fired
-(`converged`); `products`; with PSF refinement, the refined `psfs` and `psf_stars`, a
+(`converged`; also when a pass ends with an empty catalog); `products`; with PSF refinement, the refined `psfs` and `psf_stars`, a
 `StructArray` with one row per (star, PSF group) of the last refinement's step: `row` (the
 star's `catalog` row), `group`, `band`, `reserve`, `rejected` (by the star-level test or `max_masked`), `fit`
 (constrained the PSF to the end of the step), `snr`, and the star's `chi2` over its usable pixels
@@ -311,7 +316,7 @@ counts `:nimg` and `:coadd_nimg` in `Int32`), at the final catalog (the backgrou
 the terminal pass's, the ones the final fit used); `products.grid` is always the detection grid
 (`TanGrid`):
 - per image, one matrix per image in `images` order on its pixel grid: `:background`, `:rms`
-  (the measured background RMS), `:model`, `:residual` (data - background - model);
+  (the measured background RMS), `:model`, `:residual` (data - background - model; `NaN` where the fit a weight of 0);
 - detection maps, one matrix on `products.grid`: `:nu` (the calibrated joint significance),
   `:snm` (`ν / √(χ²_red + 0.25)`, the statistic peaks are found on), `:chi2` (`χ²_red`), each
   computed on data - background, the same three with suffix `_residual` computed on the final
@@ -366,13 +371,20 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
         θh = hcat(θh, vcat(dn.u', dn.v', dn.flux)); append!(born, fill(pass, length(dn.u)))
         append!(resv, rrng === nothing ? falses(length(dn.u)) : rand(rrng, length(dn.u)) .< o.psf_refine.reserve_frac)
         n_new = length(dn.u)
-        isempty(born) && (push!(history, (; pass, dn.n_peaks, n_new = 0, n_catalog = 0)); continue)
+        # an empty catalog leaves the model blank, so every later pass would repeat this one exactly: done
+        # (an empty field or tile is a result, not an error)
+        if isempty(born)
+            push!(history, (; pass, dn.n_peaks, n_new = 0, n_catalog = 0))
+            converged = true
+            break
+        end
         t_fit = @elapsed r = fit_pass(sc, to_device(backend, T, θh), rt, f, λ; n_new, work = st.work)
         mem_est = _memory_estimate(sc, size(r.θ, 2), size(r.lin.Ho, 3))
         θh = Float64.(Array(r.θ)); λ = r.λ
         hd = Array(r.lin.hdiag)
         js = _flux_significance(θh, hd)
         js[Array(r.lin.nimg) .== 0] .= NaN
+        free!(r.lin)                               # its host reads above have synchronized
         keep, n_snr, n_close = _prune_keep(θh, js, o.prune_snr_min, o.prune_separation)
         # pass 1 fits against a background that still holds every star's light, so its prunes include
         # real faint stars; logging them would block their re-detection for the rest of the run (on
@@ -405,6 +417,11 @@ function fit_joint_multipass(images::AbstractVector{<:JointImage}, frame::TanGri
                         "build $(round(r.t_build, digits = 3)) s, solve $(round(r.t_solve, digits = 3)) s")
             end
         end
+        # everything pruned: as an empty detection, the next pass would repeat this one
+        if isempty(born)
+            converged = true
+            break
+        end
         # growth after passes 1 and 2 is always large, so the rule starts at pass 3
         if pass >= 3 && o.min_growth > 0 && n_surv <= o.min_growth * length(born)
             converged = true
@@ -432,6 +449,8 @@ const _COADD_OPTIONS = (; pixfrac = Float64, units = Symbol, weight = Symbol, cl
 function _check_run_args(o::JointLoopOptions, products, coadd_options)
     o.accept in (:nu, :snm) || throw(ArgumentError("accept must be :nu or :snm"))
     o.discard_passes === nothing || o.discard_passes >= 0 || throw(ArgumentError("discard_passes must be nothing or >= 0, got $(o.discard_passes)"))
+    o.min_separation >= 0 && o.prune_separation >= 0 ||
+        throw(ArgumentError("min_separation and prune_separation must be >= 0 (0 turns the check off), got $(o.min_separation) and $(o.prune_separation)"))
     o.fit.grad_support in (:fit, :model) || throw(ArgumentError("grad_support must be :fit or :model, got :$(o.fit.grad_support)"))
     o.fit.max_flux_step > 0 || throw(ArgumentError("max_flux_step must be > 0, got $(o.fit.max_flux_step)"))
     products = Tuple(unique(Iterators.flatten(p === :coadd ? _COADD_DEFAULT : (p,) for p in products)))
@@ -472,6 +491,10 @@ function _products(st, θh, products, coadd_options, product_eltype)
     for (p, x) in ((:background, st.bkg), (:rms, st.rms), (:model, model), (:residual, st.det_data))
         p in products && (vals[p] = per_image(x))
     end
+    if haskey(vals, :residual)  # NaN where the fit had weight 0, as a viewer should show it
+        w = Array(sc.weight)
+        for (e, r) in enumerate(vals[:residual]); r[view(w, (sc.offsets[e] + 1):sc.offsets[e + 1]) .== 0] .= NaN; end
+    end
     want(names) = any(in(products), names)
     function maps!(data, suffix)
         m = joint_maps(st.jd, sc, data, st.det_iv)
@@ -503,6 +526,7 @@ function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, pr
         r = fit_pass(sc, to_device(be, T, θh), st.rt, f, λ; work = st.work)
         θh = Float64.(Array(r.θ))
         js = _flux_significance(θh, Array(r.lin.hdiag))
+        free!(r.lin)
         ok = [all(isfinite, view(θh, :, s)) && isfinite(js[s]) && js[s] > 0 for s in axes(θh, 2)]
         θh = θh[:, ok]; born = born[ok]
     end
@@ -513,6 +537,7 @@ function _terminal_and_finalize(st, θh, born, λ, pass, o::JointLoopOptions, pr
         Σ = marginal_covariances(HostH(lin); k = o.error_neighbors)
         σ = Float64.(marginal_errors(Σ)); uv_cov = Float64.(Σ[1, 2, :])
         nimg = Array(lin.nimg)
+        free!(lin)
     end
     sb, joint = final_significance(θh, σ)
     radec = [grid_to_world(sc.frame, θh[1, s], θh[2, s]) for s in 1:N]

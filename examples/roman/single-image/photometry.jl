@@ -78,8 +78,7 @@ function main(l2_path::AbstractString;
         # --- fitting ---
         fit_rad::Real = 5,              # fitting box half-width, in pixels
         max_iter::Integer = 3,          # maximum detection passes
-        min_iter::Integer = 1,          # minimum detection passes
-        few_sources::Integer = 100,     # pass finding fewer than this ends the run
+        min_growth::Real = 0.01,        # a pass growing the catalog by less than this fraction ends the run
         λ_init::Real = 1.0e-3,          # initial Levenberg-Marquardt damping
         max_step::Real = 1.0,           # maximum centroid step per iteration, in pixels
         show_trace::Bool = true,        # show informative output
@@ -130,12 +129,12 @@ function main(l2_path::AbstractString;
         fit_all_stars_simultaneous_multipass(img.data, psf, fit_rad;
             inv_var, coverage_mask, kernel_rad, detect_sigma, bkg_box_size,
             blend_threshold, blend_threshold_initial, blend_passes,
-            max_iter, min_iter, few_sources, λ_init, max_step, show_trace)
+            max_iter, min_growth, λ_init, max_step, show_trace)
     else
         fit_all_stars_multipass(img.data, psf, fit_rad;
             inv_var, coverage_mask, kernel_rad, detect_sigma, bkg_box_size,
             blend_threshold, blend_threshold_initial, blend_passes,
-            max_iter, min_iter, few_sources, λ_init, max_step, show_trace)
+            max_iter, min_growth, λ_init, max_step, show_trace)
     end
 
     println("Fit ", length(mp.phot.y), " sources")

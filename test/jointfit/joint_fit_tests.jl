@@ -407,6 +407,8 @@ end
     @test (@allocated J.render!(model, s.sc, θ, fp)) < 200_000
     work = J.LinearizeWork(s.sc)
     lin = J.linearize(s.sc, θ, s.rt, work; R_fit = 3)
+    # KA 0.10's PoCL CPU backend compiles a kernel's unchecked variant on its second launch with a partial workgroup
+    J.linearize(s.sc, θ, s.rt, work; R_fit = 3)
     # dominated by the H blocks it returns
     @test (@allocated J.linearize(s.sc, θ, s.rt, work; R_fit = 3)) < 3 * (sizeof(lin.Ho) + sizeof(lin.Hd)) + 5_000_000
 end
@@ -783,6 +785,44 @@ end
     for kw in ((; bkg_coarse_passes = 1), (; bkg_rms_box_size = 40), (; bkg_box = 30))
         @test_throws "unsupported joint background keyword(s) $(only(keys(kw)))" fit_joint_multipass(imgs, s.frame; options = JointLoopOptions(background = kw))
     end
+end
+
+@testset "JointScene masks non-finite data and weights" begin
+    s = two_image_scene()
+    rng = StableRNG(53)
+    J.render!(s.sc.data, s.sc, s.θ, J.footprint(s.sc, s.θ, s.rt))
+    with(im; data = im.data, weight = im.weight) = JointImage(data, weight, im.psf, im.to_sky; band = im.band, flux_scale = im.flux_scale, psf_offset = im.psf_offset)
+    set(a, k, v) = (b = copy(a); b[k] = v; b)
+    imgs = [with(im; data = J.image_view(s.sc, s.sc.data, e) .+ 30 .+ sqrt(30) .* randn(rng, s.sc.dims[e]), weight = fill(1 / 30, s.sc.dims[e]))
+            for (e, im) in enumerate(s.imgs)]
+    # on each image's brightest pixel (inside a fit stamp): a NaN datum at a positive weight, and an Inf weight
+    # (1 / ERR² with ERR = 0); each once made the scene's cost non-finite, so no step was accepted
+    k = [argmax(im.data) for im in imgs]
+    bad = [with(imgs[1]; data = set(imgs[1].data, k[1], NaN)), with(imgs[2]; weight = set(imgs[2].weight, k[2], Inf))]
+    masked = [with(im; weight = set(im.weight, k[e], 0.0)) for (e, im) in enumerate(imgs)]
+    sc = JointScene(bad, s.frame)
+    @test all(isfinite, sc.data) && all(w -> isfinite(w) && w >= 0, sc.weight) && count(iszero, sc.weight) == 2
+    # the same fit as zero weights there, with the device background and the host fallback (which reads the scene's arrays)
+    for device_background in (true, false)
+        o = JointLoopOptions(; device_background)
+        a = fit_joint_multipass(bad, s.frame; options = o); b = fit_joint_multipass(masked, s.frame; options = o)
+        @test all(h -> h.n_accepted > 0, a.history)
+        @test a.catalog.u == b.catalog.u && a.catalog.flux_A == b.catalog.flux_A && a.catalog.flux_B == b.catalog.flux_B
+    end
+    # the residual product is NaN exactly where the fit had no data: a zero weight, or the guard's
+    R = fit_joint_multipass(bad, s.frame; options = JointLoopOptions(max_iter = 1), products = (:residual,))
+    @test all(e -> isequal(isnan.(R.products.residual[e]), J.image_view(sc, sc.weight, e) .== 0), 1:2)
+end
+
+@testset "an empty field stops after one pass" begin
+    s = two_image_scene()
+    rng = StableRNG(54)
+    # sky noise only: nothing to fit, so the model stays blank and every later pass would repeat the first
+    blank = [JointImage(30 .+ sqrt(30) .* randn(rng, s.sc.dims[e]), fill(1 / 30, s.sc.dims[e]), im.psf, im.to_sky; band = im.band,
+                        flux_scale = im.flux_scale, psf_offset = im.psf_offset) for (e, im) in enumerate(s.imgs)]
+    R = fit_joint_multipass(blank, s.frame; options = JointLoopOptions(max_iter = 5), products = (:residual,))
+    @test isempty(R.catalog) && R.converged && length(R.history) == 1 && R.history[1].n_new == 0
+    @test all(r -> all(isfinite, r), R.products.residual)
 end
 
 @testset "fit_joint_multipass products" begin

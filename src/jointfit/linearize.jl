@@ -431,6 +431,11 @@ struct Linearization{M, A3, MI, VI, PP}
     nimg::VI
 end
 
+# Every device array of `lin`, returned now: a GPU array's memory is otherwise held until the GC finalizes it,
+# which host memory pressure barely drives (a no-op on the CPU).  Only after a synchronization (any host read).
+free!(lin::Linearization) = foreach(KA.unsafe_free!, (lin.g, lin.D, lin.hdiag, lin.Hd, lin.Ho, lin.nimg, lin.fp.ay, lin.fp.ax, lin.fp.mR,
+                                                     lin.pat.ptr, lin.pat.nbr, lin.pat.row, lin.pat.cptr, lin.pat.cslot))
+
 @kernel function equilibrate_own_kernel!(D, hdiag, Hd)
     s = @index(Global)
     T = eltype(D)
@@ -533,5 +538,8 @@ function linearize(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, wo
     launch!(equilibrate_pair_kernel!, be, pat.np, Ho, D, pat.row, pat.nbr)
     nimg = KA.allocate(be, Int32, N)
     launch!(nimg_kernel!, be, N, nimg, si.pidx)
+    # the stamps (up to stamp_budget) and indices are scratch: a GPU array's memory is otherwise held until the GC finalizes it
+    KA.synchronize(be)
+    foreach(KA.unsafe_free!, (V, cn, stage, stc.el, stc.counts, si.pidx, si.src, si.img))
     return Linearization(g, D, hdiag, Hd, Ho, pat, cost, fp, nimg)
 end

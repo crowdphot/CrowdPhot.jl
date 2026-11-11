@@ -393,6 +393,7 @@ end
         tol = sqrt(vm) / 20
         while hi - lo > tol                   # smallest x with weight at or below it >= Wsum / 2
             mid = (lo + hi) / 2; below = zero(T)
+            lo < mid < hi || break            # adjacent floats: tol is below hi's spacing, so the loop would not end
             @inbounds for k in tptr[t]:(tptr[t + 1] - 1)
                 e = timg[k]
                 d.band[e] == band || continue
