@@ -351,10 +351,7 @@ end
                                       ::Val{NF}) where {NF}
     r, c = @index(Global, NTuple)
     T = typeof(p)
-    # per-item scratch: KernelAbstractions' CPU `@private` is one heap MArray of NF x groupsize per
-    # workgroup per call (for persistence across @synchronize, unused here); a non-escaping MVector
-    # stays on the stack (CPU) or in private memory (GPU)
-    xs = MVector{NF, T}(undef); vs = MVector{NF, T}(undef); rks = MVector{NF, Int32}(undef)
+    xs = @private typeof(p) (NF,); vs = @private typeof(p) (NF,); rks = @private Int32 (NF,)
     @inbounds for wd in axes(M, 1)
         M[wd, r, c] = zero(UInt64)
     end
@@ -373,8 +370,6 @@ end
         Wsum += 1 / v; lo = min(lo, x); hi = max(hi, x)
     end
     vm = T(π / 2) / Wsum                       # variance of the weighted median
-    # @inbounds: a bounds check's BoundsError would capture the MVectors, so they would escape to the
-    # heap, which GPU kernels cannot do
     @inbounds if n >= nmin && n <= NF
         for i in 2:n                          # insertion sort by residual
             xi = xs[i]; vi = vs[i]; ri = rks[i]; j = i - 1
