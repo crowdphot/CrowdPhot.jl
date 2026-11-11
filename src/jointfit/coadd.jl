@@ -41,12 +41,13 @@ All requested quantities but `:rms_aperture` come from one pass per band over th
 Pixels without data are `NaN` (`0` in `:nimg`).
 
 Each input pixel is a square drop `pixfrac` times its side; `a` is its overlap with an output
-pixel and `A` its area, both in output pixels.  Values are converted to flux per output pixel
-(`units = :flux`: the value times the output pixel's area in input pixels, so a source's sum
-over the coadd is its flux in the input units) or to flux per arcsec² (`:surface_brightness`).
-`w'` is the inverse variance of the converted value: `w / f²`, `f` the output pixel's area in
-input pixels and `w` = `1 / rms²` (`weight = :rms`) or the images' own weights (`weight =
-:input`).  The images' `weight` arrays must be full inverse variances, including the sources'
+pixel and `A` its area, both in output pixels.  Values are converted to the band's common flux
+units (divided by the image's `flux_scale`) per output pixel (`units = :flux`: also times the
+output pixel's area in input pixels, so a source's sum over the coadd is its band flux) or per
+arcsec² (`:surface_brightness`).  `w'` is the inverse variance of the converted value:
+`w / (f / g)²`, `f` the output pixel's area in input pixels, `g` the image's `flux_scale` and
+`w` = `1 / rms²` (`weight = :rms`) or the images' own weights (`weight = :input`).  The images'
+`weight` arrays must be full inverse variances, including the sources'
 Poisson variance (see [`JointImage`](@ref)); for the same reason they make poor averaging weights:
 weights that depend on the signal bias bright sources and make the coadd's PSF depend on
 brightness, which is why `weight = :rms`, background-only and smooth on the mesh scale, is the
@@ -257,6 +258,7 @@ end
     z = zero(T); S = map(_ -> z, Q)
     gm, f, ny, off, hp, i0, i1, j0, j1 = _node_drops(d, e, r, c, K, p)
     A = p * p / f
+    fu = f / @inbounds(d.ip[IP_SCALE, e])      # area and the image's flux_scale: data units to the band's common units
     go = G === nothing ? 0 : Int(@inbounds goff[e])
     W = V = VA = z
     for j in j0:j1, i in i0:i1
@@ -266,10 +268,10 @@ end
         ai = _overlap(gm..., T(i) - hp, T(i) + hp, T(j) - hp, T(j) + hp)
         ai > 0 || continue
         a = ai / f
-        aw = a * wk / (f * f)
+        aw = a * wk / (fu * fu)
         W += aw; V += a * aw
         # a closure over the reassigned S would box it, which GPU kernels cannot compile
-        S = map((s, v) -> s + aw * f * v, S, vals)
+        S = map((s, v) -> s + aw * fu * v, S, vals)
         G === nothing || (VA += aw / A * (@inbounds G[go + kl])^2)
     end
     return W, S, V, VA
