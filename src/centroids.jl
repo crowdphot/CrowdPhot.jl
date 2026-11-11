@@ -204,7 +204,7 @@ function _centroid_poly3(image::AbstractMatrix, inv_var::AbstractMatrix; backgro
         C = cholesky(Symmetric(Nmat))
         SMatrix{6,6,FT}(inv(C))
     catch err
-        err isa PosDefException || rethrow()
+        err isa Union{PosDefException, SingularException} || rethrow()   # a zero pivot passes cholesky and fails in inv
         nan = FT(NaN)
         nan3 = @SMatrix [nan nan nan; nan nan nan; nan nan nan]
         nan2 = @SMatrix [nan nan; nan nan]
