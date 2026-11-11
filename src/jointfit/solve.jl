@@ -52,6 +52,8 @@ Base.@kwdef struct JointFitOptions
     max_flux_step::Float64 = Inf
     stamp_budget::Int = 100_000_000
     grad_support::Symbol = :fit
+    # an integer model_rad (3, not only 3.0): Union{Symbol, Float64} has no conversion from Int
+    JointFitOptions(R_fit, model_rad, rest...) = new(R_fit, model_rad isa Real ? Float64(model_rad) : model_rad, rest...)
 end
 
 @inline loadblock(H, q, ::Val{P}) where {P} = SMatrix{P, P}(ntuple(k -> H[(q - 1) * P * P + k], Val(P * P)))
@@ -299,6 +301,8 @@ function fit_pass(sc::JointScene{T}, θ::AbstractMatrix{T}, rt::RadiusTable, o::
     t_lin = t_solve = t_trial = 0.0
     gain_first = gain_last = NaN
     for l in 1:o.linearizations
+        # the previous linearization before its replacement is allocated; the trial's cost read has synchronized
+        lin === nothing || free!(lin)
         # synchronize so t_lin holds linearize's kernels, not t_solve (cg!'s first reduction waits for them anyway)
         t_lin += @elapsed (lin = linearize(sc, θ, rt, work; o.R_fit, o.stamp_budget, o.grad_support); KA.synchronize(be))
         cost = lin.cost

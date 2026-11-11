@@ -61,7 +61,9 @@ refined PSFs (`psfs`).  Not supported by `fit_joint_tiled`.
   positions and fluxes free but never constrain the PSF, for validation (`psf_stars`).
   Recommended 0.1-0.2 when validating on data without truth: the reserved stars' χ²/dof in the
   run history is a held-out check of the PSF.  At 0.15 the catalog changes were within the
-  scatter between settings on test data
+  scatter between settings on test data.  A round's reserved χ² is against the PSF before that
+  round's update (their PSF coefficients are zero in its step), so it lags the fitting stars' by one
+  round, which matters only while a round still changes the PSF much
 - `gauge = :moment`: what the correction leaves unchanged on every phase sub-lattice of the window,
   (the sum is always preserved). `:moment`: the first moments (the window's center of light). `:derivative`:
   the projections onto the reference's shift modes ∂P0/∂x, ∂P0/∂y (of the group's mean
@@ -161,7 +163,9 @@ function _refine_group_setup(sc, g, imgs, band, nodes, window, o::PSFRefineOptio
     # sum and first moments (or shift-mode projections) of each phase sub-lattice (samples whose offsets
     # from the origin agree mod s)
     gq = zeros(3, ns); ra = zeros(Int32, sy); ca = zeros(Int32, sx)
-    phy(r) = mod(round(Int, r0 + r - 1 - oyf), sy); phx(c) = mod(round(Int, c0 + c - 1 - oxf), sx)
+    # round the origin, not the offset: a half-integer origin (an even-sized ImagePSF's default) puts every
+    # offset on a .5, where round-half-even pairs neighboring samples into one phase and empties others
+    phy(r) = mod(r0 + r - 1 - round(Int, oyf), sy); phx(c) = mod(c0 + c - 1 - round(Int, oxf), sx)
     # shift modes: central differences of the mean reference, the Catmull-Rom interpolant's slopes at the nodes
     P0 = o.gauge === :derivative ? sum(nd -> Float64.(nd.data), g.psfs) / N : nothing
     P0at(r, c) = P0[clamp(r0 + r - 1, 1, nd1), clamp(c0 + c - 1, 1, nd2)]
@@ -238,7 +242,7 @@ end
     y = pos[1, k]; x = pos[2, k]; yu = jac[1, k]; xu = jac[2, k]; yv = jac[3, k]; xv = jac[4, k]
     # node corners and weights, as rf_entry_kernel! placed them, with the weights' derivatives (which
     # d/du and d/dv include, as psf_value_grad does): recomputed here, cheaper than carrying them
-    kk, w, dwy, dwx = psf_context(d.psf, e, y, x)
+    c = psf_context(d.psf, e, y, x); kk, w, _, _ = c
     for bb in 1:4, a in 1:4, m in 1:4
         A[((bb - 1) * 4 + a - 1) * 4 + m, k] = f * w[m] * cv[a] * cu[bb]
     end
@@ -250,13 +254,8 @@ end
             continue
         end
         i = eay[k] + Int32((p - 1) % P) - R; j = eax[k] + Int32((p - 1) ÷ P) - R
-        val = zero(T); dv = zero(T); du = zero(T); wy = zero(T); wx = zero(T); sx = one(T); sy = one(T)
-        for m in 1:4
-            iszero(w[m]) && continue
-            vm, dvm, dum, sxm, sym = node_value_grad(d.psf.nodes, d.psf.par, kk[m], i, j, y, x)
-            val += w[m] * vm; dv += w[m] * dvm; du += w[m] * dum; wy += dwy[m] * vm; wx += dwx[m] * vm; sx = sxm; sy = sym
-        end
-        Py = f * (wy - sy * dv); Px = f * (wx - sx * du)
+        val, dY, dX = psf_value_grad(d.psf, c, i, j, y, x)   # the render's value and derivatives, so S matches the fitter's Jacobian
+        Py = f * dY; Px = f * dX
         S[1, f0] = Py * yu + Px * xu; S[2, f0] = Py * yv + Px * xv; S[3, f0] = fs * val
     end
 end
@@ -988,7 +987,8 @@ function _refine_problem(st, g, θd, snr, ay, ax, mR, o::PSFRefineOptions; reser
     srowh = Array(dd.srow); nin = zeros(Int, ns_); nok = zeros(Int, ns_)
     for k in 1:n
         P = Int(bP[ebatch[k]]); R = (P - 1) ÷ 2; ny, nx = sc.dims[eimg[k]]
-        nin[eloc[k]] += (min(eay[k] + R, ny) - max(eay[k] - R, 1) + 1) * (min(eax[k] + R, nx) - max(eax[k] - R, 1) + 1)
+        # clamped per axis: a stamp off the image (its model footprint still reaching in) has no pixels in it
+        nin[eloc[k]] += max(0, min(eay[k] + R, ny) - max(eay[k] - R, 1) + 1) * max(0, min(eax[k] + R, nx) - max(eax[k] - R, 1) + 1)
         nok[eloc[k]] += count(>(0), view(srowh, soff[k] .+ (1:P * P)))
     end
     masked = nok .< (1 - o.max_masked) .* nin
@@ -1349,8 +1349,9 @@ function _refine!(st, groups, θh, hd, lo; reserve = nothing)
     end
     for i in eachindex(Hf); Hf[i] > 0 && (Δθ[i] = gf[i] / Hf[i]); end
     # the PSF-dependent pieces: radius table, detection banks, wing template (the device nodes are already updated)
-    psfs = copy(st.psfs)
-    for g in groups, e in g.images; psfs[e] = g.hpsf; end
+    # a new vector, not setindex!: a run of plain ImagePSFs has a Vector{ImagePSF}, which cannot hold the GriddedPSFModels
+    hp = Dict(e => g.hpsf for g in groups for e in g.images)
+    psfs = [get(hp, e, p) for (e, p) in enumerate(st.psfs)]
     f = lo.fit
     rt = RadiusTable(sc, psfs, [im.weight for im in st.images]; model_rad = f.model_rad, nsigma = f.model_rad_nsigma, f.R_fit, f.R_cap)
     bk = st.jd.banks

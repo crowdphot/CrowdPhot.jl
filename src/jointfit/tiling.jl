@@ -40,7 +40,8 @@ function _pixel_lattice(fp::ImageFootprint, frame; step = 32)
     ny, nx = fp.dims
     ys = unique([1:step:ny; ny]); xs = unique([1:step:nx; nx])
     uv = [world_to_grid(frame, fp.to_sky(y, x)...) for y in ys, x in xs]
-    return (; ys, xs, u = first.(uv), v = last.(uv))
+    u = first.(uv); v = last.(uv)
+    return (; ys, xs, u, v, ub = extrema(u), vb = extrema(v))     # the bounds: `_cutout_box`'s early reject
 end
 
 # Lattice interval of `y` in sorted `ys` and the interpolation weight.
@@ -54,6 +55,8 @@ end
 # corners' bounding box meets it, snapped outward to the background box grid `(bh, bw)` (boxes
 # from pixel 1, so the cutout's mesh boxes are the image's), or `nothing`.
 function _cutout_box(lat, (u1, u2, v1, v2), (bh, bw), (ny, nx))
+    # an image nowhere near the rectangle, without the cell scan (planning tests every tile against every image)
+    (lat.ub[2] < u1 || lat.ub[1] > u2 || lat.vb[2] < v1 || lat.vb[1] > v2) && return nothing
     r0 = c0 = typemax(Int); r1 = c1 = 0
     nr, nc = length(lat.ys), length(lat.xs)
     for j in 1:max(1, nc - 1), i in 1:max(1, nr - 1)
@@ -267,13 +270,17 @@ end
 # (also how a plan file's reader rebuilds it, exactly).
 _tile_frame(frame, (pr, pc), offset) = TanGrid(frame.ra0, frame.dec0, frame.scale, length(pr), length(pc), frame.cy - offset[1], frame.cx - offset[2])
 
+# Cutout `c`'s parent: by name in a dictionary, by plan index in a vector.
+_parent(images::AbstractDict, c) = images[c.name]
+_parent(images::AbstractVector, c) = images[c.image]
+
 # The tile's cutouts as `JointImage`s and their parent indices: one range read of each parent's
 # `weight` and `data` (the lazy-input contract), leaving out cutouts without a positive finite weight.
 function _cutouts(images, t)
-    ws = [images[c.image].weight[c.rows, c.cols] for c in t.cutouts]
+    ws = [_parent(images, c).weight[c.rows, c.cols] for c in t.cutouts]
     keep = findall(w -> any(x -> isfinite(x) && x > 0, w), ws)
     cuts = map(keep) do k
-        c = t.cutouts[k]; im = images[c.image]
+        c = t.cutouts[k]; im = _parent(images, c)
         r0, c0 = first(c.rows) - 1, first(c.cols) - 1
         sky = let f = im.to_sky; (i, j) -> f(i + r0, j + c0); end
         JointImage(im.data[c.rows, c.cols], ws[k], im.psf, sky; im.band, im.flux_scale, psf_offset = im.psf_offset .+ (r0, c0))
@@ -381,9 +388,10 @@ end
 
 Tile `k` of `plan` (a [`plan_tiles`](@ref) result) fitted by [`fit_joint_multipass`](@ref) with the
 plan's `options`, `products`, `coadd_options` and `product_eltype`, on cutouts of its parent
-`images`: the plan's images as `JointImage`s, a vector or a dictionary holding at least the tile's
-parents, keyed by their index in the plan (a cutout entry's
-`image`; its `name` says which file it is).  Each parent is read once as `data[rows, cols]` and
+`images`: the plan's images as `JointImage`s, either a vector of every image the plan was made from
+(excluded ones included, in the plan's order; only for a [`plan_tiles`](@ref) plan) or a dictionary
+holding at least the tile's parents keyed by their names in the plan (a cutout entry's `name`), as a
+unit of a plan folder ([`read_job`](@ref)) loads them.  Each parent is read once as `data[rows, cols]` and
 `weight[rows, cols]`, so a parent may be a lazy range reader of a file; cutouts with no positive
 finite weight are left out, and with none left the result is `nothing`.  Tiles are independent, so
 they may run in any order and in separate processes.
@@ -397,12 +405,27 @@ products are the tile's own, on its padded tile.  `hash` is the tile's identity 
 was read from a plan folder ([`read_job`](@ref)), else `nothing`; a runner saving results must keep
 it, since [`merge_tiles`](@ref) finds such a result's tile by it.  `merge_tiles` merges a cell's tiles.
 """
-function fit_tile(plan, k::Integer, images::Union{AbstractVector{<:JointImage}, AbstractDict{<:Integer, <:JointImage}}; backend = KA.CPU(),
+function fit_tile(plan, k::Integer, images::Union{AbstractVector{<:JointImage}, AbstractDict{<:Any, <:JointImage}}; backend = KA.CPU(),
         T::Type{<:AbstractFloat} = Float64, show_trace::Bool = false)
     t = plan.tiles[k]
+    if images isa AbstractDict
+        keytype(images) <: AbstractString ||
+            throw(ArgumentError("key `images` by image name (a cutout entry's `name`), not by $(keytype(images))"))
+    else
+        # cutouts index the images the plan was made from, excluded ones included: a list with those dropped
+        # would shift every later index onto the wrong image, silently.  A plan folder's job lists only its
+        # tiles' images, so there is no length to check a vector against: its images go by name.
+        plan.images isa AbstractVector ||
+            throw(ArgumentError("a plan folder's job (read_job) lists only its tiles' images: pass them as a dictionary keyed by name"))
+        length(images) == length(plan.images) ||
+            throw(ArgumentError("`images` holds $(length(images)) images, the plan $(length(plan.images)): pass every image it was made from, excluded ones included"))
+    end
     for c in t.cutouts
-        (images isa AbstractDict ? haskey(images, c.image) : checkbounds(Bool, images, c.image)) ||
+        (images isa AbstractDict ? haskey(images, c.name) : checkbounds(Bool, images, c.image)) ||
             throw(ArgumentError("tile $k needs image $(c.image) ($(repr(c.name))), which `images` lacks"))
+        im = _parent(images, c); pim = plan.images[c.image]
+        (size(im.data) == pim.dims && im.band == pim.band) ||
+            throw(ArgumentError("tile $k's image $(c.image) ($(repr(c.name))) is $(size(im.data)), band $(im.band); the plan has $(pim.dims), band $(pim.band)"))
     end
     t_cutout = @elapsed (cuts, idx) = _cutouts(images, t)
     isempty(cuts) && return nothing

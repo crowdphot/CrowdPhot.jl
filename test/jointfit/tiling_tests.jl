@@ -227,12 +227,16 @@ end
         @test count(>(5), indepth(1, res[1].catalog)) > 10
         @test all(k -> all(<=(o3.min_separation), indepth(k, m2.catalog)), (1, 2))
         @test isequal(m2.catalog, merge_tiles(p, 1, res[[1, 3]]).catalog)
-        # the parents may be just the tile's, keyed by their index in the plan (as a worker loads them by name)
-        parents = Dict(c.image => f.imgs[c.image] for c in p.tiles[3].cutouts)
+        # the parents may be just the tile's, keyed by name (as a worker loads them); results still name them by plan index
+        parents = Dict(c.name => f.imgs[c.image] for c in p.tiles[3].cutouts)
         r3 = fit_tile(p, 3, parents)
         @test isequal(r3.catalog, res[1].catalog) && r3.images == res[1].images == [c.image for c in p.tiles[3].cutouts] && r3.t_cutout > 0
-        missing_one = Dict(c.image => f.imgs[c.image] for c in p.tiles[3].cutouts[2:end])
+        missing_one = Dict(c.name => f.imgs[c.image] for c in p.tiles[3].cutouts[2:end])
         @test_throws "tile 3 needs image $(p.tiles[3].cutouts[1].image)" fit_tile(p, 3, missing_one)
+        # keyed by plan index, a dictionary is refused: an index is only meaningful against the plan's full list
+        @test_throws "key `images` by image name" fit_tile(p, 3, Dict(c.image => f.imgs[c.image] for c in p.tiles[3].cutouts))
+        # a vector must be the plan's whole list: one without an image would shift every later index
+        @test_throws "pass every image it was made from" fit_tile(p, 3, f.imgs[2:end])
         # a tile whose every cutout is masked has no result
         masked = [JointImage(im.data, zero(im.weight), im.psf, im.to_sky; im.band) for im in f.imgs]
         @test fit_tile(p, 3, masked) === nothing
@@ -582,8 +586,13 @@ end
         jb = read_job(dir, 1)
         @test sort(collect(keys(jb.tiles))) == 1:4 && sort(unique(rp_t.shard for rp_t in read_plan(dir).tiles)) == [1, 2]
         # a unit loads each image its cutouts use by name (here the JointImages, named by their index)
-        parents = Dict(e => f.imgs[parse(Int, im.name)] for (e, im) in jb.images)
+        parents = Dict(im.name => f.imgs[parse(Int, im.name)] for im in values(jb.images))
         res = [fit_tile(jb, k, parents) for k in sort(collect(keys(jb.tiles)))]
+        # a job lists only its tiles' images, so a vector can't be checked against the plan's list: refused,
+        # even the full list (a filtered one would shift every later index onto the wrong image, silently)
+        @test_throws "pass them as a dictionary keyed by name" fit_tile(jb, first(keys(jb.tiles)), f.imgs)
+        # names are matched exactly: the images of a dictionary keyed by other names are missing
+        @test_throws "which `images` lacks" fit_tile(jb, first(keys(jb.tiles)), Dict("x" * n => im for (n, im) in parents))
         m = merge_tiles(read_plan(dir), 1, res)
         @test isequal(m.catalog, R.catalog) && m.n_dedup == [t.n_dedup for t in R.tiles] && isempty(m.absent)
         @test all(r -> r.hash == read_plan(dir).tiles[r.tile].hash, res)
@@ -605,7 +614,7 @@ end
         write_plan(d2, plan_tiles(fps, f.frame; cores = [bottom, top], overlap = 80, options = o3, products = (:nu,)))
         p1 = read_plan(d1); p2 = read_plan(d2)
         @test p1.tiles[1].hash == p2.tiles[2].hash && p1.tiles[1].core == p2.tiles[2].core
-        fitjob(d, k) = (jb = read_job(d, k); fit_tile(jb, k, Dict(e => f.imgs[e] for e in keys(jb.images))))
+        fitjob(d, k) = (jb = read_job(d, k); fit_tile(jb, k, Dict(im.name => f.imgs[e] for (e, im) in jb.images)))
         old = fitjob(d1, 1); fresh = fitjob(d2, 2)
         @test old.tile == 1 && all(==(1), old.catalog.tile)
         # the old result merges into the new plan as its tile 2, its rows renumbered and its products in place
