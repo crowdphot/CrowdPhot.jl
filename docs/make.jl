@@ -29,6 +29,7 @@ makedocs(;
         "Home" => "index.md",
         "Getting Started" => [
             "Pixel Coordinate Conventions" => "pixel_conventions.md",
+            "Reproducibility" => "reproducibility.md",
         ],
         "Tutorials" => [
             "HST ACS DRC" => "tutorials/HST-DRC.md",

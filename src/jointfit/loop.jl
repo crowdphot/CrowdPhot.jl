@@ -296,6 +296,9 @@ _memory_estimate(sc::JointScene, N, np) = _memory_estimate(length(sc.data), nima
                         options = JointLoopOptions(), show_trace = false, products = ()) -> NamedTuple
 
 Joint multipass photometry of `images` (`JointImage`s) with source positions on `frame`.
+Results are reproducible run to run and across thread counts; `backend`, `T` and package versions change
+them at the rounding level, which the multipass loop can grow into catalog differences (see
+"Reproducibility" in the documentation).
 Returns `catalog`, a `StructArray` (a Tables.jl table) with columns `u, v` (positions on
 `frame`), `ra, dec`, `u_err, v_err` and `uv_cov` (the u-v covariance, frame px², so the
 position's covariance is `[u_err² uv_cov; uv_cov v_err²]`), then per band `b` (in `bands` order) `flux_b`, `flux_err_b`,
