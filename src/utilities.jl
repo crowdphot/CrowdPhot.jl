@@ -1,6 +1,7 @@
 # The mad, mad!, mean_and_std functions are reproduced from StatsBase.jl and are licensed under the MIT License.
 
-Base.@irrational mad_constant 1.4826022185056018 big"""
+# not `mad_constant`: StatsBase <= 0.34.12 defines Irrational{:mad_constant} too, whose methods would collide with ours
+Base.@irrational _mad_constant 1.4826022185056018 big"""
 1.482602218505601860547076529360423431326703202590312896536266275245674447622701
 """
 
@@ -49,7 +50,7 @@ function mad!(x::AbstractArray;
         Base.depwarn("keyword argument `constant` is deprecated, use `normalize` instead or apply the multiplication directly", :mad)
         m * constant
     elseif normalize
-        m * mad_constant
+        m * _mad_constant
     else
         m
     end
