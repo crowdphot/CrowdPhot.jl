@@ -97,6 +97,8 @@ end
     for p in (1.0, 0.5)
         R = coadd(ims, g; quantities = (:rms, :rms_aperture), weight = :input, pixfrac = p)
         @test all(≈(fh(p / 0.5); rtol = 0.01), (R.rms_aperture.A ./ R.rms.A)[11:30, 11:30])
+        # no float atomics: a repeat is bit-identical
+        @test isequal(R, coadd(ims, g; quantities = (:rms, :rms_aperture), weight = :input, pixfrac = p))
     end
     # :rms is the per-pixel noise: Monte Carlo over noise realizations of three rolled images with
     # different weights

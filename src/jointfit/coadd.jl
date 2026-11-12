@@ -141,7 +141,13 @@ function _coadd(dev, footprints, bands, grid::TanGrid, K, inp, quantities; weigh
         goff[e] = nb[bandh[e]]; nb[bandh[e]] += Int(dims[1, e]) * Int(dims[2, e])
     end
     G = want_ap ? KA.allocate(backend, T, maximum(nb)) : nothing
-    goff = to_device(backend, goff)
+    goffh = goff; goff = to_device(backend, goff)
+    # G's input tiles, 8 x 8 on the CPU and 4 x 4 on GPUs (fastest on Metal): nt per image, gnty per tile column
+    GT = is_cpu(backend) ? 8 : 4; gt = Val(GT)
+    gnty = Int32[cld(Int(dims[1, e]), GT) for e in eachindex(bandh)]
+    nt = [Int(gnty[e]) * cld(Int(dims[2, e]), GT) for e in eachindex(bandh)]
+    gtoffh = Int32.(cumsum([0; nt]))
+    gnty = to_device(backend, gnty); gtoff = to_device(backend, gtoffh)
     cl = nothing
     if clip !== nothing
         # rejections per pixel as bit masks over each band's images (by their rank in the band)
@@ -154,9 +160,13 @@ function _coadd(dev, footprints, bands, grid::TanGrid, K, inp, quantities; weigh
         outs = ntuple(_ -> KA.allocate(backend, T, ny, nx), length(vals))
         rm = alloc(:rms in quantities, T); ra = alloc(want_ap, T); wt = alloc(:weight in quantities, T); ni = alloc(:nimg in quantities, Int32)
         if want_ap
-            coadd_weight_kernel!(backend, gs)(Wm, dev, inp, Int32(b), Kt, p, tptr, timg, tile, ntr, wm; ndrange = nd)
-            fill!(G, zero(T))
-            coadd_g_kernel!(backend, gs)(G, dev, inp, Int32(b), Kt, p, tptr, timg, tile, ntr, Wm, goff, wm; ndrange = nd)
+            # empty node boxes (r min, r max, c min, c max) of every image's input tiles
+            box = to_device(backend, repeat(Int32[typemax(Int32), typemin(Int32), typemax(Int32), typemin(Int32)], 1, Int(gtoffh[end])))
+            coadd_weight_kernel!(backend, gs)(Wm, box, dev, inp, Int32(b), Kt, p, tptr, timg, tile, ntr, wm, gnty, gtoff, gt; ndrange = nd)
+            gk! = coadd_g_kernel!(backend, is_cpu(backend) ? 1 : 32)
+            for e in eachindex(bandh)
+                bandh[e] == b && nt[e] > 0 && gk!(G, dev, inp, Int32(e), Kt, p, box, Wm, gnty, gtoff, goffh[e], wm, gt; ndrange = nt[e])
+            end
         end
         cl === nothing || coadd_reject_kernel!(backend, gs)(cl.M, dev, inp, cl.rank, Int32(b), Kt, p, tptr, timg, tile, ntr, cl.k2, cl.mu,
                                                            cl.nmin, wm, Val(_clip_fast(backend)); ndrange = nd)
@@ -251,7 +261,8 @@ end
     return (y, x, ya, xa, yb, xb), f, ny, Int(d.dims[3, e]), hp, i0, i1, j0, j1
 end
 
-# One image's drizzle sums at node (r, c): W = Σ a w', S_q = Σ a w' v_q (v = value times f, flux per
+# One image's drizzle sums at node (r, c), and the input rows i0:i1 and columns j0:j1 its drops can
+# reach: W = Σ a w', S_q = Σ a w' v_q (v = value times f, flux per
 # output pixel), V = Σ a² w', with a the overlap and A the drop area in output pixels, f the
 # output pixel's area in input pixels and w' = w / f²; and, given the band's G (per input pixel
 # of the band, at offset goff[e]), VA = Σ (a / A) w' G²: each drop's contribution to the variance
@@ -276,7 +287,7 @@ end
         S = map((s, v) -> s + aw * fu * v, S, vals)
         G === nothing || (VA += aw / A * (@inbounds G[go + kl])^2)
     end
-    return W, S, V, VA
+    return W, S, V, VA, i0, i1, j0, j1
 end
 
 # Images per band at one pixel whose clipping statistics fit the rejection kernel's per-item
@@ -304,8 +315,9 @@ end
     return false
 end
 
-# Per node, the band's total weight W (for :rms_aperture's G).
-@kernel function coadd_weight_kernel!(Wt, d, inp, band, K, p, @Const(tptr), @Const(timg), tile, ntr, wm)
+# Per node, the band's total weight W (for :rms_aperture's G), and the node added to the boxes of the
+# input tiles its drops reach.
+@kernel function coadd_weight_kernel!(Wt, box, d, inp, band, K, p, @Const(tptr), @Const(timg), tile, ntr, wm, @Const(gnty), @Const(gtoff), ::Val{GT}) where {GT}
     r, c = @index(Global, NTuple)
     T = eltype(Wt)
     t = cld(r, tile) + (cld(c, tile) - 1) * ntr
@@ -313,32 +325,58 @@ end
     @inbounds for k in tptr[t]:(tptr[t + 1] - 1)
         e = timg[k]
         d.band[e] == band || continue
-        W += _drop_sums(d, e, T(r), T(c), K, p, inp, wm, Val(()), Val(false), nothing, nothing)[1]
+        We, _, _, _, i0, i1, j0, j1 = _drop_sums(d, e, T(r), T(c), K, p, inp, wm, Val(()), Val(false), nothing, nothing)
+        W += We
+        (i0 <= i1 && j0 <= j1) || continue
+        for tx in ((j0 - 1) ÷ GT):((j1 - 1) ÷ GT), ty in ((i0 - 1) ÷ GT):((i1 - 1) ÷ GT)
+            g = Int(gtoff[e]) + tx * Int(gnty[e]) + ty + 1
+            Atomix.@atomic box[1, g] min Int32(r)
+            Atomix.@atomic box[2, g] max Int32(r)
+            Atomix.@atomic box[3, g] min Int32(c)
+            Atomix.@atomic box[4, g] max Int32(c)
+        end
     end
     @inbounds Wt[r, c] = W
 end
 
-# Per node, G[i] += a / W for every drop i overlapping it: each input pixel's Σ a / W over the
-# output pixels its drop covers, from the same overlaps as W (atomic: nodes share drops).
-@kernel function coadd_g_kernel!(G, d, inp, band, K, p, @Const(tptr), @Const(timg), tile, ntr, @Const(Wm), @Const(goff), wm)
-    r, c = @index(Global, NTuple)
+# G at each input pixel, Σ a / W over the output nodes whose drops overlap it, without atomic float
+# sums (their order varies, so :rms_aperture would not be reproducible).  The input pixels are in
+# GT x GT tiles; the weight pass records each tile's box of the grid nodes that reach it (atomic integer
+# min and max, which give the same box in any order), and one work item per tile walks its box in raster
+# order, so every pixel sums in the same order: each node's geometry is evaluated once and a / W added,
+# in private memory, at the tile's pixels within the node's drops' reach.
+@kernel function coadd_g_kernel!(G, d, inp, e, K, p, @Const(box), @Const(Wm), @Const(gnty), @Const(gtoff), go, wm, ::Val{GT}) where {GT}
+    t = @index(Global)
+    acc = @private eltype(Wm) (GT * GT,); okp = @private Bool (GT * GT,)
     T = eltype(Wm)
-    t = cld(r, tile) + (cld(c, tile) - 1) * ntr
-    W = @inbounds Wm[r, c]
-    if W > 0
-        @inbounds for k in tptr[t]:(tptr[t + 1] - 1)
-            e = timg[k]
-            d.band[e] == band || continue
-            go = Int(goff[e])
-            gm, f, ny, off, hp, i0, i1, j0, j1 = _node_drops(d, e, T(r), T(c), K, p)
-            for j in j0:j1, i in i0:i1
-                kl = (j - 1) * ny + i
-                ok, _, _ = _in_pixel(inp, off + kl, wm, Val(()), Val(false))
-                ok || continue
-                a = _overlap(gm..., T(i) - hp, T(i) + hp, T(j) - hp, T(j) + hp) / f
-                a > 0 && (Atomix.@atomic G[go + kl] += a / W)
-            end
+    ny = Int(d.dims[1, e]); nx = Int(d.dims[2, e]); off = Int(d.dims[3, e])
+    ty0 = Int((t - 1) % gnty[e]) * GT; tx0 = Int((t - 1) ÷ gnty[e]) * GT
+    for m in 1:(GT * GT)
+        i = ty0 + (m - 1) % GT + 1; j = tx0 + (m - 1) ÷ GT + 1
+        ok = false
+        if i <= ny && j <= nx
+            ok, _, _ = _in_pixel(inp, off + (j - 1) * ny + i, wm, Val(()), Val(false))
         end
+        okp[m] = ok; acc[m] = zero(T)
+    end
+    g = Int(gtoff[e]) + t
+    r0 = Int(box[1, g]); nr = Int(box[2, g]) - r0 + 1; c0 = Int(box[3, g]); nc = Int(box[4, g]) - c0 + 1
+    hp = p / 2
+    for q in 1:(nr > 0 ? nr * nc : 0)       # an empty box (typemax, typemin) has nr < 0
+        r = r0 + (q - 1) % nr; c = c0 + (q - 1) ÷ nr
+        w = Wm[r, c]
+        w > 0 || continue
+        gm, f, _, _, _, i0, i1, j0, j1 = _node_drops(d, e, T(r), T(c), K, p)
+        for j in max(j0, tx0 + 1):min(j1, tx0 + GT), i in max(i0, ty0 + 1):min(i1, ty0 + GT)
+            m = (j - tx0 - 1) * GT + (i - ty0)
+            okp[m] || continue
+            a = _overlap(gm..., T(i) - hp, T(i) + hp, T(j) - hp, T(j) + hp) / f
+            a > 0 && (acc[m] += a / w)
+        end
+    end
+    for m in 1:(GT * GT)
+        i = ty0 + (m - 1) % GT + 1; j = tx0 + (m - 1) ÷ GT + 1
+        (i <= ny && j <= nx) && (G[go + (j - 1) * ny + i] = acc[m])
     end
 end
 
