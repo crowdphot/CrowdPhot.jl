@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Background Estimation · CrowdPhot.jl</title><meta name="title" content="Background Estimation · CrowdPhot.jl"/><meta property="og:title" content="Background Estimation · CrowdPhot.jl"/><meta property="twitter:title" content="Background Estimation · CrowdPhot.jl"/><meta name="description" content="Documentation for CrowdPhot.jl."/><meta property="og:description" content="Documentation for CrowdPhot.jl."/><meta property="twitter:description" content="Documentation for CrowdPhot.jl."/><script data-outdated-warner src="../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL=".."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../assets/documenter.js"></script><script src="../search_index.js"></script><script src="../siteinfo.js"></script><script src="../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../assets/themeswap.js"></script><link href="../assets/documentercitations/citations-hover.css" rel="stylesheet" type="text/css"/><link href="../assets/documentercitations/citations.css" rel="stylesheet" type="text/css"/><script src="../assets/documentercitations/citations-data.js"></script><script src="../assets/documentercitations/citations-hover.js"></script><script src="../assets/documentercitations/citations-backlinks.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../">CrowdPhot.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../">Home</a></li><li><span class="tocitem">Getting Started</span><ul><li><a class="tocitem" href="../pixel_conventions/">Pixel Coordinate Conventions</a></li></ul></li><li><span class="tocitem">Tutorials</span><ul><li><a class="tocitem" href="../tutorials/HST-DRC/">HST ACS DRC</a></li></ul></li><li class="is-active"><a class="tocitem" href>Background Estimation</a><ul class="internal"><li><a class="tocitem" href="#Location-and-RMS-estimators"><span>Location and RMS estimators</span></a></li><li><a class="tocitem" href="#Scalar-background-estimation"><span>Scalar background estimation</span></a></li><li><a class="tocitem" href="#Spatially-varying-background-with-Background2D"><span>Spatially varying background with Background2D</span></a></li><li><a class="tocitem" href="#API-reference"><span>API reference</span></a></li></ul></li><li><a class="tocitem" href="../detection/">Detection</a></li><li><a class="tocitem" href="../morphology/">Centroid Refinement and Morphology</a></li><li><span class="tocitem">PSFs</span><ul><li><a class="tocitem" href="../psf/psf_api/">PSF API</a></li><li><a class="tocitem" href="../psf/parametric_models/">Parametric PSF Models</a></li><li><input class="collapse-toggle" id="menuitem-7-3" type="checkbox"/><label class="tocitem" for="menuitem-7-3"><span class="docs-label">Effective PSF Models</span><i class="docs-chevron"></i></label><ul class="collapsed"><li><a class="tocitem" href="../psf/empirical/epsf_overview/">ePSF Overview</a></li><li><a class="tocitem" href="../psf/empirical/image_psf/">ImagePSF</a></li></ul></li><li><input class="collapse-toggle" id="menuitem-7-4" type="checkbox"/><label class="tocitem" for="menuitem-7-4"><span class="docs-label">Spatially Varying PSF Models</span><i class="docs-chevron"></i></label><ul class="collapsed"><li><a class="tocitem" href="../psf/variable/gridded_psf/">GriddedPSFModel</a></li><li><a class="tocitem" href="../psf/variable/roman_crds_epsf/">Roman CRDS ePSF</a></li></ul></li><li><a class="tocitem" href="../psf/picking/">Picking PSF Stars</a></li></ul></li><li><span class="tocitem">Photometry</span><ul><li><a class="tocitem" href="../photometry/psf_fitting/">PSF Fitting Photometry</a></li><li><a class="tocitem" href="../photometry/curve_of_growth/">Curves of Growth</a></li></ul></li><li><a class="tocitem" href="../lm_fitter/">Levenberg-Marquardt Fitter</a></li><li><a class="tocitem" href="../simulation/">Simulation</a></li><li><a class="tocitem" href="../utilities/">Utilities</a></li><li><a class="tocitem" href="../doc_index/">Index</a></li><li><a class="tocitem" href="../refs/">References</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li class="is-active"><a href>Background Estimation</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Background Estimation</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/crowdphot/CrowdPhot.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/crowdphot/CrowdPhot.jl/blob/main/docs/src/background.md" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="bkg"><a class="docs-heading-anchor" href="#bkg">Background Estimation</a><a id="bkg-1"></a><a class="docs-heading-anchor-permalink" href="#bkg" title="Permalink"></a></h1><p>NOTICE: Our background estimation module is adapted from <a href="https://juliaastro.org/BackgroundMeshes/stable/">BackgroundMeshes.jl</a>.</p><p>Accurate sky-background subtraction is a prerequisite for reliable photometry. In a typical optical or near-infrared image, the sky background arises from a combination of airglow, zodiacal light, scattered moonlight, and detector bias; it is spatially smooth on scales of tens to hundreds of pixels but can vary across an image at the few-percent level.  Point sources, extended objects, and cosmic-ray hits are local enhancements that must be distinguished from — and excluded from — the background estimate.</p><p><code>CrowdPhot.Background</code> provides two complementary interfaces:</p><table><tr><th style="text-align: right">Interface</th><th style="text-align: right">When to use</th></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.estimate_background"><code>estimate_background</code></a></td><td style="text-align: right">Single scalar estimate for the whole image (or a cutout)</td></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.Background2D"><code>Background2D</code></a></td><td style="text-align: right">Spatially varying map over a mesh grid</td></tr></table><p>Both interfaces accept a mask that marks pixels to skip (saturated stars, bad pixels, diffraction spikes, etc.) and support iterative sigma clipping to suppress residual source contamination. The mask is <strong><code>true</code></strong> for pixels that should be <strong>skipped</strong>.</p><h2 id="Location-and-RMS-estimators"><a class="docs-heading-anchor" href="#Location-and-RMS-estimators">Location and RMS estimators</a><a id="Location-and-RMS-estimators-1"></a><a class="docs-heading-anchor-permalink" href="#Location-and-RMS-estimators" title="Permalink"></a></h2><p>All estimation algorithms are encapsulated in small callable structs.  Choosing an estimator amounts to trading off noise robustness, sensitivity to source contamination, and computational cost.</p><h3 id="Location-estimators"><a class="docs-heading-anchor" href="#Location-estimators">Location estimators</a><a id="Location-estimators-1"></a><a class="docs-heading-anchor-permalink" href="#Location-estimators" title="Permalink"></a></h3><table><tr><th style="text-align: right">Estimator</th><th style="text-align: right">Description</th></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.MeanBackground"><code>MeanBackground</code></a></td><td style="text-align: right">Arithmetic mean — efficient but sensitive to bright sources</td></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.MedianBackground"><code>MedianBackground</code></a></td><td style="text-align: right">Sample median — resistant to outliers up to ~50 % contamination</td></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.SExtractorBackground"><code>SExtractorBackground</code></a></td><td style="text-align: right">Mode approximation <code>2.5 × median − 1.5 × mean</code>; falls back to the median when the distribution is strongly skewed</td></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.MMMBackground"><code>MMMBackground</code></a></td><td style="text-align: right">DAOPHOT-style <code>3 × median − 2 × mean</code>; assumes positive skew from sources</td></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.BiweightLocationBackground"><code>BiweightLocationBackground</code></a></td><td style="text-align: right">Tukey biweight location; highly robust but requires a good starting median</td></tr></table><p><strong>Recommendation:</strong> <code>SExtractorBackground</code> (the default) is a good general choice.  Consider <code>BiweightLocationBackground</code> when your images contain a high source density and you use a mask to cover the brightest stars.</p><h3 id="RMS-(scatter)-estimators"><a class="docs-heading-anchor" href="#RMS-(scatter)-estimators">RMS (scatter) estimators</a><a id="RMS-(scatter)-estimators-1"></a><a class="docs-heading-anchor-permalink" href="#RMS-(scatter)-estimators" title="Permalink"></a></h3><table><tr><th style="text-align: right">Estimator</th><th style="text-align: right">Description</th></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.StdRMS"><code>StdRMS</code></a></td><td style="text-align: right">Population standard deviation (default)</td></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.MADStdRMS"><code>MADStdRMS</code></a></td><td style="text-align: right">normalized median absolute deviation <code>1.4826 × MAD</code>; robust to ~50 % outliers</td></tr><tr><td style="text-align: right"><a href="#CrowdPhot.Background.BiweightScaleRMS"><code>BiweightScaleRMS</code></a></td><td style="text-align: right">Biweight midvariance; most robust, slightly higher variance than MAD</td></tr></table><p><strong>Recommendation:</strong> <code>StdRMS</code> works well when sigma clipping has already removed source contamination.  Use <code>MADStdRMS</code> or <code>BiweightScaleRMS</code> for a more independent robustness guarantee.</p><p>The RMS is computed <strong>around the estimated background location</strong>, not around an independently recomputed mean.  For example, when paired with <code>SExtractorBackground</code>, the scatter is measured around the mode-like estimate <code>2.5 × median − 1.5 × mean</code> rather than the sample mean, so source contamination does not inflate the RMS through the centering value.</p><h3 id="Sigma-clipping"><a class="docs-heading-anchor" href="#Sigma-clipping">Sigma clipping</a><a id="Sigma-clipping-1"></a><a class="docs-heading-anchor-permalink" href="#Sigma-clipping" title="Permalink"></a></h3><p>Both <a href="#CrowdPhot.Background.estimate_background"><code>estimate_background</code></a> and <a href="#CrowdPhot.Background.Background2D"><code>Background2D</code></a> support iterative sigma clipping to suppress residual source contamination before the background estimator runs.  The clipping algorithm is:</p><ol><li>Compute the median <span>$m$</span> and standard deviation <span>$s$</span> of the pixel values in the region (or box, for <a href="#CrowdPhot.Background.Background2D"><code>Background2D</code></a>).</li><li>Reject pixels with values outside <span>$[m - \sigma s, \; m + \sigma s]$</span>.</li><li>Recompute <span>$m$</span> and <span>$s$</span> from the surviving pixels.</li><li>Repeat steps 2–3 until no more pixels are rejected, or until <code>maxiters</code> iterations (default 10) have been performed.</li></ol><p>The clipping uses <strong>median and standard deviation</strong> as its internal location and scale measures — it does <strong>not</strong> invoke the configured background estimator (e.g., <code>SExtractorBackground</code>) during the clipping loop.  Only after clipping converges is the background estimator applied once to the surviving pixels.</p><p>Non-finite (<code>NaN</code>, <code>Inf</code>) and masked pixels are excluded before clipping begins.  Pass a scalar <code>sigma</code> for symmetric clipping (the default); for asymmetric clipping, pass a length-2 tuple or vector like <code>sigma = (5.0, 2.0)</code>; in this case, a pixel with value <code>x</code> will be clipped if <code>x ≤ median - 5 * std</code> or <code>x ≥ median + 2 * std</code>, so the high-value tail of the pixel distribution is being clipped more strongly than the low-value side. Set <code>sigma = nothing</code> to disable clipping entirely.</p><h2 id="Scalar-background-estimation"><a class="docs-heading-anchor" href="#Scalar-background-estimation">Scalar background estimation</a><a id="Scalar-background-estimation-1"></a><a class="docs-heading-anchor-permalink" href="#Scalar-background-estimation" title="Permalink"></a></h2><p>For small images or cutouts where a single background level is sufficient, use <a href="#CrowdPhot.Background.estimate_background"><code>estimate_background</code></a>:</p><pre><code class="language-julia hljs">using CrowdPhot.Background
+
+r = estimate_background(image)
+println(r.bkg)      # background level
+println(r.bkg_rms)  # background scatter</code></pre><p>The default pipeline is: exclude non-finite pixels → apply 3σ iterative sigma clipping → estimate with <code>SExtractorBackground</code> and <code>StdRMS</code>.</p><h3 id="Example:-scalar-estimation-with-a-mask"><a class="docs-heading-anchor" href="#Example:-scalar-estimation-with-a-mask">Example: scalar estimation with a mask</a><a id="Example:-scalar-estimation-with-a-mask-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-scalar-estimation-with-a-mask" title="Permalink"></a></h3><pre><code class="language-julia hljs">using CrowdPhot, CrowdPhot.Background, StableRNGs, Statistics, CairoMakie
+
+rng = StableRNG(1)
+# 128×128 image: flat sky at 200 ADU with 30 Gaussian stars
+img = make_gaussians_image(200, (128, 128); rng, background = 200.0,
+    border = 0, read_noise = 5.0, gain = 1.5)
+
+# Plot image
+fig = Figure(size=(500,500),)
+ax = Axis(fig[1,1], aspect = DataAspect(), yreversed = true, xlabel = &quot;x&quot;, ylabel = &quot;y&quot;)
+
+hm = heatmap!(ax, img)
+Colorbar(fig[1,2], hm; height = Relative(0.75), valign = :center)
+fig</code></pre><img src="af215aa5.png" alt="Example block output"/><pre><code class="language-julia hljs"># Estimate without any mask
+r_unmasked = estimate_background(img)
+println(&quot;Unmasked:  bkg = &quot;, round(r_unmasked.bkg; digits=2),
+        &quot;  rms = &quot;, round(r_unmasked.bkg_rms; digits=2))
+
+# Build a source mask by thresholding at bkg + 3×rms
+src_mask = img .&gt; r_unmasked.bkg + 3 * r_unmasked.bkg_rms
+
+# Re-estimate with the mask
+r_masked = estimate_background(img; mask = src_mask)
+println(&quot;Masked:    bkg = &quot;, round(r_masked.bkg; digits=2),
+        &quot;  rms = &quot;, round(r_masked.bkg_rms; digits=2))
+println(&quot;True bkg:  200.00&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Unmasked:  bkg = 214.72  rms = 36.87
+Masked:    bkg = 202.4  rms = 32.65
+True bkg:  200.00</code></pre><h2 id="Spatially-varying-background-with-Background2D"><a class="docs-heading-anchor" href="#Spatially-varying-background-with-Background2D">Spatially varying background with Background2D</a><a id="Spatially-varying-background-with-Background2D-1"></a><a class="docs-heading-anchor-permalink" href="#Spatially-varying-background-with-Background2D" title="Permalink"></a></h2><p>When the background varies across the field — as is typical for wide-field cameras or when a large extended source is present — use <a href="#CrowdPhot.Background.Background2D"><code>Background2D</code></a>. The algorithm proceeds in four stages:</p><ol><li><strong>Tile</strong> the image into rectangular boxes of size <code>box_size</code>.</li><li><strong>Estimate</strong> the background (and RMS) in each box after masking and sigma clipping.  Boxes with fewer than <code>exclude_percentile</code>% valid pixels are excluded.</li><li><strong>Filter</strong> the resulting low-resolution mesh with a 2-D median filter of width <code>filter_size</code> to reduce sensitivity to individual contaminated boxes.</li><li><strong>Upsample</strong> the smoothed mesh back to the full image resolution using a bicubic Catmull-Rom interpolator.</li></ol><pre><code class="language-julia hljs">using CrowdPhot.Background
+
+b = Background2D(image, 64)
+# Access the full-resolution maps:
+b.background      # background model
+b.background_rms  # RMS model
+# or the low-resolution mesh:
+b.mesh_background</code></pre><h3 id="Choosing-box_size"><a class="docs-heading-anchor" href="#Choosing-box_size">Choosing <code>box_size</code></a><a id="Choosing-box_size-1"></a><a class="docs-heading-anchor-permalink" href="#Choosing-box_size" title="Permalink"></a></h3><p>The box size determines the spatial resolution of the background model. It should be:</p><ul><li><strong>Large enough</strong> that each box contains enough sky pixels to estimate the background reliably (typically ≥ 50–100 pixels per box after masking).</li><li><strong>Small enough</strong> to track real spatial variation in the background.</li></ul><p>Somewhere in the range of <code>image_width / 10 ≤ box_size ≤ image_width / 5</code> is often reasonable; you should inspect <code>b.mesh_background</code> to verify that the mesh looks smooth and sensible.</p><h3 id="Example:-spatially-varying-background"><a class="docs-heading-anchor" href="#Example:-spatially-varying-background">Example: spatially varying background</a><a id="Example:-spatially-varying-background-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-spatially-varying-background" title="Permalink"></a></h3><p>The example below simulates an image with a gradient background (brighter at the bottom) and embedded point sources, then estimates and subtracts it.</p><pre><code class="language-julia hljs">using CrowdPhot, CrowdPhot.Background, StableRNGs, CairoMakie
+
+rng = StableRNG(42)
+H, W = 256, 256
+
+# --- Build a gradient background image ---
+# True background: linear ramp from 150 (top) to 300 (bottom) ADU.
+true_bkg = [150.0 + 150.0 * (i - 1) / (H - 1) for i in 1:H, _ in 1:W]
+
+# Render stars on the gradient background with realistic noise.
+img = make_gaussians_image(100, (H, W); rng,
+    background = true_bkg, read_noise = 5.0, gain = 1.5)
+
+# --- Estimate the spatially varying background ---
+b = Background2D(img, 16; sigma = 3.0, filter_size = (5, 5))
+residual = img .- b.background
+
+# --- Make plot ---
+fig = Figure(size = (900, 400))
+
+ax1 = Axis(fig[1, 1]; title = &quot;Image&quot;, aspect = DataAspect())
+ax2 = Axis(fig[1, 2]; title = &quot;Background model&quot;, aspect = DataAspect())
+ax3 = Axis(fig[1, 3]; title = &quot;Residual&quot;, aspect = DataAspect())
+
+vmin, vmax = 140.0, 320.0
+heatmap!(ax1, img&#39;; colorrange = (vmin, vmax))
+heatmap!(ax2, b.background&#39;; colorrange = (vmin, vmax))
+hm = heatmap!(ax3, residual&#39;; colorrange = (-30.0, 30.0), colormap = :RdBu)
+Colorbar(fig[2, 3], hm; vertical = false, label = &quot;ADU&quot;)
+
+for ax in (ax1, ax2, ax3)
+    hidedecorations!(ax)
+end
+
+fig</code></pre><img src="69acced7.png" alt="Example block output"/><h3 id="Example:-comparing-estimators-on-the-same-image"><a class="docs-heading-anchor" href="#Example:-comparing-estimators-on-the-same-image">Example: comparing estimators on the same image</a><a id="Example:-comparing-estimators-on-the-same-image-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-comparing-estimators-on-the-same-image" title="Permalink"></a></h3><p>First, with a small 16 pixel box size:</p><pre><code class="language-julia hljs">rng2 = StableRNG(7)
+img2 = make_gaussians_image(50, (128, 128); rng = rng2, background = 200.0,
+    border = 0, read_noise = 5.0, gain = 1.5)
+colorrange = (170.0, 230.0)
+
+fig2 = Figure(size = (750, 520))
+
+ax_img = Axis(fig2[1, 1]; title = &quot;Image&quot;, aspect = DataAspect())
+heatmap!(ax_img, img2&#39;; colorrange, colormap = :grays)
+hidedecorations!(ax_img)
+
+estimators = (MeanBackground(), MedianBackground(), SExtractorBackground(),
+    MMMBackground(), BiweightLocationBackground())
+labels = (&quot;Mean&quot;, &quot;Median&quot;, &quot;SExtractor&quot;, &quot;MMM&quot;, &quot;Biweight&quot;)
+
+for i in eachindex(estimators)
+    b = Background2D(img2, 16; estimator = estimators[i], sigma = 3.0, filter_size = 1)
+    row = i ÷ 3 + 1
+    col = i % 3 + 1
+    ax = Axis(fig2[row, col]; title = labels[i], aspect = DataAspect())
+    heatmap!(ax, b.background&#39;; colormap = :grays, colorrange)
+    hidedecorations!(ax)
+end
+
+fig2</code></pre><img src="5ee95672.png" alt="Example block output"/><p>Repeating the measurement with a larger 21 pixel box size, which is less affected by contamination from chance arrangments of stars, but will fail to capture any real variations in sky below this scale.</p><pre><code class="language-julia hljs">fig3 = Figure(size = (750, 520))
+
+ax_img = Axis(fig3[1, 1]; title = &quot;Image&quot;, aspect = DataAspect())
+heatmap!(ax_img, img2&#39;; colorrange, colormap = :grays)
+hidedecorations!(ax_img)
+
+estimators = (MeanBackground(), MedianBackground(), SExtractorBackground(),
+    MMMBackground(), BiweightLocationBackground())
+labels = (&quot;Mean&quot;, &quot;Median&quot;, &quot;SExtractor&quot;, &quot;MMM&quot;, &quot;Biweight&quot;)
+
+for i in eachindex(estimators)
+    b = Background2D(img2, 21; estimator = estimators[i], sigma = 3.0, filter_size = 1)
+    row = i ÷ 3 + 1
+    col = i % 3 + 1
+    ax = Axis(fig3[row, col]; title = labels[i], aspect = DataAspect())
+    heatmap!(ax, b.background&#39;; colormap = :grays, colorrange)
+    hidedecorations!(ax)
+end
+
+fig3</code></pre><img src="908f2db7.png" alt="Example block output"/><h3 id="Example:-rotated-and-padded-image"><a class="docs-heading-anchor" href="#Example:-rotated-and-padded-image">Example: rotated and padded image</a><a id="Example:-rotated-and-padded-image-1"></a><a class="docs-heading-anchor-permalink" href="#Example:-rotated-and-padded-image" title="Permalink"></a></h3><p>CCD images that have been rotated (e.g., to align with a world-coordinate grid) and placed inside a larger frame padded with <code>NaN</code> are common in multi-extension FITS files and mosaic pipelines.  <code>Background2D</code> handles such images automatically through the <code>mask_coverage</code> keyword, which should be a matrix the same size as the input image where <code>true</code> values indicate a pixel is <strong>out of coverage</strong> and <code>false</code> indicate it is <strong>in coverage</strong>.</p><pre><code class="language-julia hljs">using CrowdPhot, CrowdPhot.Background, StableRNGs, CairoMakie
+
+rng = StableRNG(13)
+# 128×128 image with a gradient background (brighter toward the bottom).
+true_bkg = [180.0 + 120.0 * (i - 1) / 127 for i in 1:128, _ in 1:128]
+img = make_gaussians_image(40, (128, 128); rng,
+    background = true_bkg, read_noise = 5.0, gain = 1.5)
+
+# -- Rotate by 25° and embed in a larger NaN-padded frame --
+θ = deg2rad(25)
+cosθ, sinθ = cos(θ), sin(θ)
+H, W = size(img)
+cx, cy = (W + 1) / 2, (H + 1) / 2
+
+# Compute the bounding box of the rotated image.
+corners = [(1, 1), (1, W), (H, 1), (H, W)]
+xs = Float64[]
+ys = Float64[]
+for (i, j) in corners
+    push!(xs, cosθ * (j - cx) - sinθ * (i - cy) + cx)
+    push!(ys, sinθ * (j - cx) + cosθ * (i - cy) + cy)
+end
+xmin, xmax = floor(Int, minimum(xs)), ceil(Int, maximum(xs))
+ymin, ymax = floor(Int, minimum(ys)), ceil(Int, maximum(ys))
+
+H_new = ymax - ymin + 1
+W_new = xmax - xmin + 1
+rotated = fill(0.0, H_new, W_new)
+
+# Fill valid pixels with bilinear interpolation from the original image.
+for j_out in 1:W_new, i_out in 1:H_new
+    x = j_out + xmin - 1
+    y = i_out + ymin - 1
+    # Inverse rotation: where in the original image does (x, y) come from?
+    j_orig = cosθ * (x - cx) + sinθ * (y - cy) + cx
+    i_orig = -sinθ * (x - cx) + cosθ * (y - cy) + cy
+    i0, j0 = floor(Int, i_orig), floor(Int, j_orig)
+    if i0 &gt;= 1 &amp;&amp; i0 &lt; H &amp;&amp; j0 &gt;= 1 &amp;&amp; j0 &lt; W
+        di, dj = i_orig - i0, j_orig - j0
+        rotated[i_out, j_out] =
+            (1 - di) * (1 - dj) * img[i0, j0] +
+            (1 - di) * dj       * img[i0, j0 + 1] +
+            di       * (1 - dj) * img[i0 + 1, j0] +
+            di       * dj       * img[i0 + 1, j0 + 1]
+    end
+end
+
+# -- Mark pixels with values 0 as outside data coverage --
+coverage_mask = iszero.(rotated)
+
+# -- Estimate the spatially varying background --
+b = Background2D(rotated, 16; coverage_mask, sigma = 3.0, filter_size = (5, 5))
+
+# -- Two-panel plot --
+fig = Figure(size = (800, 400))
+
+ax1 = Axis(fig[1, 1]; title = &quot;Rotated image&quot;, aspect = DataAspect())
+ax2 = Axis(fig[1, 2]; title = &quot;Background model&quot;, aspect = DataAspect())
+
+vmin, vmax = 160.0, 320.0
+heatmap!(ax1, rotated&#39;; colorrange = (vmin, vmax))
+heatmap!(ax2, b.background&#39;; colorrange = (vmin, vmax))
+
+for ax in (ax1, ax2)
+    hidedecorations!(ax)
+end
+
+fig</code></pre><img src="af5cd6dc.png" alt="Example block output"/><p>And now we can look at the background-subtracted image</p><pre><code class="language-julia hljs">fig = Figure(size = (800, 400))
+ax1 = Axis(fig[1, 1]; title = &quot;Residual&quot;, aspect = DataAspect())
+heatmap!(ax1, (rotated .- b.background)&#39;; colorrange=(-40.0, 40.0))
+hidedecorations!(ax1)
+fig</code></pre><img src="55141660.png" alt="Example block output"/><h3 id="Tips"><a class="docs-heading-anchor" href="#Tips">Tips</a><a id="Tips-1"></a><a class="docs-heading-anchor-permalink" href="#Tips" title="Permalink"></a></h3><ul><li><p><strong>Source masks</strong> significantly improve accuracy at high source densities. Build an initial mask by thresholding at a few sigma above a first-pass background estimate, then re-run <code>Background2D</code>.</p></li><li><p><strong><code>filter_size</code></strong> must be odd (default <code>(3, 3)</code>).  Larger values (e.g., <code>(5, 5)</code>) smooth over mesh cells that are corrupted by bright isolated stars; but sizes larger than the spatial scale of genuine background variation will bias the estimate.</p></li><li><p><strong><code>exclude_percentile</code></strong> (default 10%) controls how many pixels per box must survive masking and sigma clipping for the box to be used.  Lower values allow poorly constrained boxes into the mesh; higher values force more interpolation.</p></li><li><p><strong>Edge handling</strong>: when the image dimensions are not exact multiples of <code>box_size</code>, the mesh extends to the next multiple via ceil division. Out-of-bounds pixels in partial edge boxes are treated as <code>NaN</code> and excluded automatically.  The output always has exactly the same size as the input, with no internal allocation of a padded image.</p></li></ul><h2 id="API-reference"><a class="docs-heading-anchor" href="#API-reference">API reference</a><a id="API-reference-1"></a><a class="docs-heading-anchor-permalink" href="#API-reference" title="Permalink"></a></h2><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.estimate_background"><a class="docstring-binding" href="#CrowdPhot.Background.estimate_background"><code>CrowdPhot.Background.estimate_background</code></a> — <span class="docstring-category">Function</span></summary><section><div><pre><code class="language-julia hljs">estimate_background(image;
+    estimator = SExtractorBackground(),
+    rms_estimator = StdRMS(),
+    mask = nothing,
+    sigma = 3.0,
+    maxiters = 10) -&gt; NamedTuple{(:bkg, :bkg_rms)}</code></pre><p>Estimate a global (scalar) background and background RMS for <code>image</code>.</p><p>Non-finite values are always excluded.  Where <code>mask</code> is provided, pixels at <code>true</code> positions are excluded before any other processing.  After masking, iterative sigma clipping is applied when <code>sigma</code> is not <code>nothing</code>.</p><p>Returns a <code>NamedTuple</code> <code>(bkg = …, bkg_rms = …)</code>.</p><p><strong>Arguments</strong></p><ul><li><code>estimator</code>: an <a href="#CrowdPhot.Background.AbstractBackgroundEstimator"><code>AbstractBackgroundEstimator</code></a> or any callable <code>f(v::AbstractArray) -&gt; scalar</code>.</li><li><code>rms_estimator</code>: an <a href="#CrowdPhot.Background.AbstractBackgroundRMSEstimator"><code>AbstractBackgroundRMSEstimator</code></a> or any callable.</li><li><code>mask</code>: <code>AbstractArray{Bool}</code> with the same shape as <code>image</code>; <code>true</code> excludes the pixel.  <code>nothing</code> (default) uses all finite pixels.</li><li><code>sigma</code>: sigma-clipping threshold (default 3.0).  Pass a scalar for symmetric clipping.  For asymmetric clipping, pass a length-2 tuple or vector, e.g. <code>sigma=(2.0, 5.0)</code>.  Set to <code>nothing</code> to disable clipping.</li><li><code>maxiters</code>: maximum number of sigma-clipping iterations.</li></ul><p><strong>Notes</strong></p><p>If you have a coverage mask of the type described by <a href="#CrowdPhot.Background.Background2D"><code>Background2D</code></a>, you should simply combine it with your bad-pixel mask of the interior points as this function only accepts a single <code>mask</code> keyword argument (e.g., <code>mask .= mask .| coverage_mask</code>). For scalar estimation (as this function performs) the distinction between the coverage mask and the user-provided <code>mask</code> is moot – pixels that are <code>true</code> in either mask are excluded from the estimation, so separating the two mask components would be redundant.</p><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; img = fill(100.0, 64, 64);
+
+julia&gt; r = estimate_background(img)
+(bkg = 100.0, bkg_rms = 0.0)
+
+julia&gt; r = estimate_background(img; estimator=MMMBackground(), rms_estimator=MADStdRMS())
+(bkg = 100.0, bkg_rms = 0.0)</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L377-L426">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.Background2D"><a class="docstring-binding" href="#CrowdPhot.Background.Background2D"><code>CrowdPhot.Background.Background2D</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">Background2D(image, box_size;
+    estimator = SExtractorBackground(),
+    rms_estimator = StdRMS(),
+    mask = nothing,
+    coverage_mask = nothing,
+    fill_value = 0,
+    filter_size = (3, 3),
+    exclude_percentile = 10.0,
+    sigma = 3.0,
+    maxiters = 10)::Background2D</code></pre><p>Estimate a spatially varying background by tiling <code>image</code> into boxes, estimating the background (and RMS) in each box, optionally median-filtering the mesh, and upsampling the result back to the original image size via a bicubic Catmull-Rom interpolator.</p><p><code>box_size</code> may be an integer (square boxes) or a <code>(rows, cols)</code> tuple and does not need to be a multiple of the image dimensions; partial edge boxes are included in the mesh.</p><p>A box is excluded from the mesh (and filled by interpolation from neighbors) when the fraction of valid (unmasked, finite, not sigma-clipped) pixels falls below <code>exclude_percentile / 100 * box_npixels</code>.</p><p>Non-finite image values are automatically excluded.  A warning is emitted when the image contains non-finite values that are not covered by <code>mask</code> or <code>coverage_mask</code>.</p><p><strong>Arguments</strong></p><ul><li><code>estimator</code>: background location estimator (default <a href="#CrowdPhot.Background.SExtractorBackground"><code>SExtractorBackground</code></a>).</li><li><code>rms_estimator</code>: background RMS estimator (default <a href="#CrowdPhot.Background.StdRMS"><code>StdRMS</code></a>).</li><li><code>mask</code>: <code>AbstractMatrix{Bool}</code> where <code>true</code> marks pixels to exclude (contaminated pixels — stars, cosmic rays, bad pixels).  Mesh cells excluded due to <code>mask</code> are filled by interpolation from neighboring cells.</li><li><code>coverage_mask</code>: <code>AbstractMatrix{Bool}</code> where <code>true</code> marks pixels outside the data region (e.g., blank areas in a mosaic, corners of a rotated image). These pixels are excluded from estimation, and mesh cells with zero non-coverage pixels are set to <code>fill_value</code> rather than being interpolated.</li><li><code>fill_value</code>: value assigned to out-of-coverage regions in the output maps (default <code>0</code>, giving <code>0.0</code> for floating-point images).</li><li><code>filter_size</code>: window size of the 2-D median filter applied to the mesh (must be odd; default <code>(3, 3)</code>; use <code>1</code> or <code>(1,1)</code> to skip filtering).</li><li><code>exclude_percentile</code>: boxes with fewer than this percent of valid pixels are excluded and filled by interpolation.</li><li><code>sigma</code>: sigma-clipping threshold (default 3.0).  Pass a scalar for symmetric clipping.  For asymmetric clipping, pass a length-2 tuple or vector, e.g. <code>sigma=(2.0, 5.0)</code>, to preserve a faint extended source while rejecting bright stars.  Set to <code>nothing</code> to disable clipping.</li><li><code>maxiters</code>: maximum number of sigma-clipping iterations.</li></ul><p><strong>Returns</strong></p><p>A <code>Background2D</code> struct containing the following fields.</p><ul><li><code>background</code>:  full-resolution background map (same size as the input image).</li><li><code>background_rms</code>: full-resolution background-RMS map.</li><li><code>mesh_background</code>: low-resolution per-box background estimates.</li><li><code>mesh_background_rms</code>: low-resolution per-box background-RMS estimates.</li><li><code>box_size</code>: the <code>(rows, cols)</code> box dimensions used.</li></ul><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; img = fill(200.0, 128, 128);
+
+julia&gt; b = Background2D(img, 32);
+
+julia&gt; b.background ≈ fill(200.0, 128, 128)
+true
+
+julia&gt; all(iszero, b.background_rms)
+true</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L678-L751">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.AbstractBackgroundEstimator"><a class="docstring-binding" href="#CrowdPhot.Background.AbstractBackgroundEstimator"><code>CrowdPhot.Background.AbstractBackgroundEstimator</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">AbstractBackgroundEstimator</code></pre><p>Supertype for all scalar background location estimators.</p><p>Concrete subtypes must implement <code>(::MyEstimator)(data::AbstractArray)</code>, returning a scalar background estimate for the pixel values in <code>data</code>.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L22-L29">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.AbstractBackgroundRMSEstimator"><a class="docstring-binding" href="#CrowdPhot.Background.AbstractBackgroundRMSEstimator"><code>CrowdPhot.Background.AbstractBackgroundRMSEstimator</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">AbstractBackgroundRMSEstimator</code></pre><p>Supertype for all background RMS (scatter) estimators.</p><p>Concrete subtypes must implement <code>(::MyEstimator)(data::AbstractArray)</code>, returning a scalar RMS estimate for the pixel values in <code>data</code>.</p></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L32-L39">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.MeanBackground"><a class="docstring-binding" href="#CrowdPhot.Background.MeanBackground"><code>CrowdPhot.Background.MeanBackground</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">MeanBackground()</code></pre><p>Estimate the background as the unweighted arithmetic mean of the pixel values.</p><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; MeanBackground()(fill(3.0, 10))
+3.0</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L129-L141">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.MedianBackground"><a class="docstring-binding" href="#CrowdPhot.Background.MedianBackground"><code>CrowdPhot.Background.MedianBackground</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">MedianBackground()</code></pre><p>Estimate the background as the sample median of the pixel values.</p><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; MedianBackground()(fill(3.0, 10))
+3.0</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L145-L157">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.SExtractorBackground"><a class="docstring-binding" href="#CrowdPhot.Background.SExtractorBackground"><code>CrowdPhot.Background.SExtractorBackground</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">SExtractorBackground()</code></pre><p>Background estimator modelled on the mode statistic used in SExtractor (Bertin &amp; Arnouts 1996).</p><p>When the pixel distribution is roughly symmetric the background is estimated as <code>2.5 × median − 1.5 × mean</code>.  If the distribution is strongly skewed (<code>|mean − median| / σ &gt; 0.3</code>) the median is returned instead, and when the standard deviation is zero the mean is returned.  This rule makes the estimator more resistant to source contamination than the mean while being roughly 30 % noisier than the clipped mean in clean sky regions.</p><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; SExtractorBackground()(fill(5.0, 20))
+5.0
+
+julia&gt; SExtractorBackground()([5.0, 5.1, 4.9, 5.0, 5.2, 4.8])
+5.0</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L161-L184">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.MMMBackground"><a class="docstring-binding" href="#CrowdPhot.Background.MMMBackground"><code>CrowdPhot.Background.MMMBackground</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">MMMBackground(; median_factor=3, mean_factor=2)</code></pre><p>Background estimator based on the MMM algorithm from DAOPHOT (Stetson 1987).</p><p>Returns <code>median_factor × median − mean_factor × mean</code>.  With the default coefficients this equals <code>3 × median − 2 × mean</code>.  The estimator assumes that source contamination introduces a positive skew to the pixel distribution, so it down-weights the mean relative to the median.</p><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; MMMBackground()(fill(7.0, 15))
+7.0
+
+julia&gt; MMMBackground(; median_factor=4, mean_factor=3)(fill(7.0, 15))
+7.0</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L197-L218">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.BiweightLocationBackground"><a class="docstring-binding" href="#CrowdPhot.Background.BiweightLocationBackground"><code>CrowdPhot.Background.BiweightLocationBackground</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">BiweightLocationBackground(; c=6.0)</code></pre><p>Estimate the background using the robust biweight location statistic (Tukey 1977; Beers, Flynn &amp; Gebhardt 1990).</p><p>The tuning constant <code>c</code> controls the rejection threshold: pixels whose standardised residual (normalized by the median absolute deviation) exceeds <code>c</code> receive zero weight.  <code>c = 6</code> is the conventional default.</p><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; BiweightLocationBackground()(fill(4.0, 20))
+4.0
+
+julia&gt; BiweightLocationBackground(; c=4.0)(fill(4.0, 20))
+4.0</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L235-L255">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.StdRMS"><a class="docstring-binding" href="#CrowdPhot.Background.StdRMS"><code>CrowdPhot.Background.StdRMS</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">StdRMS()</code></pre><p>Estimate the background RMS as the (population) standard deviation.</p><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; StdRMS()(fill(1.0, 10))
+0.0</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L269-L281">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.MADStdRMS"><a class="docstring-binding" href="#CrowdPhot.Background.MADStdRMS"><code>CrowdPhot.Background.MADStdRMS</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">MADStdRMS()</code></pre><p>Estimate the background RMS via the normalized median absolute deviation:</p><p class="math-container">\[\hat{\sigma} \approx 1.4826 \times \mathrm{MAD}\]</p><p>This is a robust scale estimate that is less sensitive to outliers than the standard deviation.</p><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; MADStdRMS()(fill(1.0, 10))
+0.0</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L285-L304">source</a></section></details></article><article><details class="docstring" open="true"><summary id="CrowdPhot.Background.BiweightScaleRMS"><a class="docstring-binding" href="#CrowdPhot.Background.BiweightScaleRMS"><code>CrowdPhot.Background.BiweightScaleRMS</code></a> — <span class="docstring-category">Type</span></summary><section><div><pre><code class="language-julia hljs">BiweightScaleRMS(; c=9.0)</code></pre><p>Estimate the background RMS as the biweight scale (square-root of the biweight midvariance; Beers, Flynn &amp; Gebhardt 1990).</p><p>The tuning constant <code>c = 9</code> is the standard default.</p><p><strong>Examples</strong></p><pre><code class="language-julia-repl hljs">julia&gt; using CrowdPhot.Background
+
+julia&gt; BiweightScaleRMS()(fill(2.0, 10))
+0.0</code></pre></div><a class="docs-sourcelink" target="_blank" href="https://github.com/crowdphot/CrowdPhot.jl/blob/2d61fa809269842b4f19e2ca52025a46f991f2b5/src/background/background.jl#L308-L323">source</a></section></details></article></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../tutorials/HST-DRC/">« HST ACS DRC</a><a class="docs-footer-nextpage" href="../detection/">Detection »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Friday 28 August 2026 23:14">Friday 28 August 2026</span>. Using Julia version 1.12.7.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>

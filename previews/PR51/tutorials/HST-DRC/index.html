@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>HST ACS DRC · CrowdPhot.jl</title><meta name="title" content="HST ACS DRC · CrowdPhot.jl"/><meta property="og:title" content="HST ACS DRC · CrowdPhot.jl"/><meta property="twitter:title" content="HST ACS DRC · CrowdPhot.jl"/><meta name="description" content="Documentation for CrowdPhot.jl."/><meta property="og:description" content="Documentation for CrowdPhot.jl."/><meta property="twitter:description" content="Documentation for CrowdPhot.jl."/><script data-outdated-warner src="../../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.63.2/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL="../.."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../../assets/documenter.js"></script><script src="../../search_index.js"></script><script src="../../siteinfo.js"></script><script src="../../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../../assets/themeswap.js"></script><link href="../../assets/documentercitations/citations-hover.css" rel="stylesheet" type="text/css"/><link href="../../assets/documentercitations/citations.css" rel="stylesheet" type="text/css"/><script src="../../assets/documentercitations/citations-data.js"></script><script src="../../assets/documentercitations/citations-hover.js"></script><script src="../../assets/documentercitations/citations-backlinks.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../../">CrowdPhot.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../../">Home</a></li><li><span class="tocitem">Getting Started</span><ul><li><a class="tocitem" href="../../pixel_conventions/">Pixel Coordinate Conventions</a></li></ul></li><li><span class="tocitem">Tutorials</span><ul><li class="is-active"><a class="tocitem" href>HST ACS DRC</a><ul class="internal"><li class="toplevel"><a class="tocitem" href="#Background-Estimation"><span>Background Estimation</span></a></li><li><a class="tocitem" href="#Source-Detection"><span>Source Detection</span></a></li><li><a class="tocitem" href="#Morphological-Measurements"><span>Morphological Measurements</span></a></li><li><a class="tocitem" href="#Morphology-Diagnostics"><span>Morphology Diagnostics</span></a></li><li><a class="tocitem" href="#Pick-Stars-for-PSF-Fitting"><span>Pick Stars for PSF Fitting</span></a></li><li><a class="tocitem" href="#Empirical-PSF-Construction"><span>Empirical PSF Construction</span></a></li><li><a class="tocitem" href="#Curve-of-Growth-and-Aperture-Correction"><span>Curve of Growth and Aperture Correction</span></a></li><li><a class="tocitem" href="#PSF-Fitting-Photometry"><span>PSF Fitting Photometry</span></a></li></ul></li></ul></li><li><a class="tocitem" href="../../background/">Background Estimation</a></li><li><a class="tocitem" href="../../detection/">Detection</a></li><li><a class="tocitem" href="../../morphology/">Centroid Refinement and Morphology</a></li><li><span class="tocitem">PSFs</span><ul><li><a class="tocitem" href="../../psf/psf_api/">PSF API</a></li><li><a class="tocitem" href="../../psf/parametric_models/">Parametric PSF Models</a></li><li><input class="collapse-toggle" id="menuitem-7-3" type="checkbox"/><label class="tocitem" for="menuitem-7-3"><span class="docs-label">Effective PSF Models</span><i class="docs-chevron"></i></label><ul class="collapsed"><li><a class="tocitem" href="../../psf/empirical/epsf_overview/">ePSF Overview</a></li><li><a class="tocitem" href="../../psf/empirical/image_psf/">ImagePSF</a></li></ul></li><li><input class="collapse-toggle" id="menuitem-7-4" type="checkbox"/><label class="tocitem" for="menuitem-7-4"><span class="docs-label">Spatially Varying PSF Models</span><i class="docs-chevron"></i></label><ul class="collapsed"><li><a class="tocitem" href="../../psf/variable/gridded_psf/">GriddedPSFModel</a></li></ul></li><li><a class="tocitem" href="../../psf/picking/">Picking PSF Stars</a></li></ul></li><li><span class="tocitem">Photometry</span><ul><li><a class="tocitem" href="../../photometry/psf_fitting/">PSF Fitting Photometry</a></li><li><a class="tocitem" href="../../photometry/curve_of_growth/">Curves of Growth</a></li></ul></li><li><span class="tocitem">Observatories</span><ul><li><a class="tocitem" href="../../observatories/roman/">Roman</a></li></ul></li><li><a class="tocitem" href="../../lm_fitter/">Levenberg-Marquardt Fitter</a></li><li><a class="tocitem" href="../../simulation/">Simulation</a></li><li><a class="tocitem" href="../../utilities/">Utilities</a></li><li><a class="tocitem" href="../../doc_index/">Index</a></li><li><a class="tocitem" href="../../refs/">References</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li><a class="is-disabled">Tutorials</a></li><li class="is-active"><a href>HST ACS DRC</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>HST ACS DRC</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/crowdphot/CrowdPhot.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/crowdphot/CrowdPhot.jl/blob/main/docs/src/tutorials/HST-DRC.md" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="HST-DRC"><a class="docs-heading-anchor" href="#HST-DRC">HST DRC</a><a id="HST-DRC-1"></a><a class="docs-heading-anchor-permalink" href="#HST-DRC" title="Permalink"></a></h1><p>Here we will run photometry on an HST/ACS DRC file which  is a high-level data product that has been calibrated, geometrically-corrected, and dither-combined by AstroDrizzle.</p><pre><code class="language-julia hljs">using CrowdPhot
+using FITSIO
+using LazyArtifacts
+using CairoMakie
+using Makie: LuptonAsinhScale
+using PlotUtils: zscale
+using Pkg
+
+# Load image from artifact system
+artifacts_toml = joinpath(pkgdir(CrowdPhot), &quot;docs&quot;, &quot;Artifacts.toml&quot;)
+artifact_dir = Pkg.Artifacts.ensure_artifact_installed(&quot;jbjl03010_drc&quot;, artifacts_toml)
+fits_path = joinpath(artifact_dir, &quot;jbjl03010_drc.fits&quot;)
+
+# Load relevant parts from FITS file
+hdr, sci_hdr, img, weights = FITS(fits_path) do fits
+    read_header(fits[1]), read_header(fits[2]), read(fits[2]), read(fits[3])
+end
+
+# Plot image
+fig = Figure(size=(700,700),)
+ax = Axis(fig[1,1]; aspect = DataAspect(),
+    xlabel = &quot;x&quot;, ylabel = &quot;y&quot;,
+    title=&quot;Leo A, HST F814W, Proposal ID 12273, PI: R. van der Marel&quot;,
+    titlesize = 20, yreversed = true)
+
+colorrange = zscale(img) # Use PlotUtils.zscale for reasonable color limits
+hm = image!(ax, img&#39;; colorrange, colorscale=LuptonAsinhScale())
+Colorbar(fig[1,2], hm; height = Relative(0.75), valign = :center)
+fig</code></pre><img src="695d27b5.png" alt="Example block output"/><h1 id="Background-Estimation"><a class="docs-heading-anchor" href="#Background-Estimation">Background Estimation</a><a id="Background-Estimation-1"></a><a class="docs-heading-anchor-permalink" href="#Background-Estimation" title="Permalink"></a></h1><p>DRZ files have already been background-subtracted, but we will will still run background estimation to get the noise (RMS) map.</p><pre><code class="language-julia hljs"># `img` is NaN in areas not covered, allowing us to make a coverage mask
+coverage_mask = isnan.(img)
+# Estimate 2-D background with 256 pixel mesh size
+bkg = Background2D(img, 256; coverage_mask, fill_value=NaN)
+img_sub = img .- bkg.background
+
+fig = Figure(size = (700, 300))
+ax1 = Axis(fig[1, 1]; title = &quot;Image&quot;, aspect = DataAspect(), yreversed = true)
+ax2 = Axis(fig[1, 2]; title = &quot;Background model&quot;, aspect = DataAspect(), yreversed = true)
+ax3 = Axis(fig[1, 3]; title = &quot;Residual&quot;, aspect = DataAspect(), yreversed = true)
+
+im1 = image!(ax1, img&#39;; colorrange)
+im2 = image!(ax2, bkg.background&#39;; colorrange)
+im3 = image!(ax3, img_sub&#39;; colorrange)
+# Colorbar(fig[2, 3], hm; vertical = false)
+for (i, im) in enumerate((im1, im2, im3))
+    Colorbar(fig[2, i], im; vertical = false)
+end
+for ax in (ax1, ax2, ax3)
+    hidedecorations!(ax)
+end
+
+fig</code></pre><img src="3c8be7c0.png" alt="Example block output"/><h2 id="Source-Detection"><a class="docs-heading-anchor" href="#Source-Detection">Source Detection</a><a id="Source-Detection-1"></a><a class="docs-heading-anchor-permalink" href="#Source-Detection" title="Permalink"></a></h2><p>We detect point sources with <a href="../../detection/#CrowdPhot.matched_filter"><code>matched_filter</code></a> using a circular Gaussian kernel with FWHM = 2.0 pixels, the approximate width of the ACS/WFC PSF at F814W.  For detection we use inverse-variance weights derived from the background RMS only; including source Poisson noise would make bright sources harder to detect by inflating their own noise estimate, which is incorrect for the detection null hypothesis.</p><pre><code class="language-julia hljs"># Convert to Float64 for consistency with the PSF kernel
+img_sub_f64 = Float64.(img_sub)
+
+# Inverse variance from background-only error; clip NaN regions to zero weight.
+inv_var_bkg = fill(0.0, size(img_sub_f64))
+valid = @. !isnan(bkg.background_rms) &amp; (bkg.background_rms &gt; 0)
+@. inv_var_bkg[valid] = 1 / bkg.background_rms[valid]^2
+
+# PSF FWHM for HST/ACS F814W (~2 pix)
+psf_fwhm = 2.0
+mf = matched_filter(img_sub_f64, psf_fwhm; inv_var = inv_var_bkg, sigma = 5.0)
+
+println(&quot;Detected $(length(mf.peaks)) sources at ≥ 5σ&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Detected 74536 sources at ≥ 5σ</code></pre><p>And now we can plot our detections on a small part of the image:</p><pre><code class="language-julia hljs">region_width = 500
+ny, nx = size(img_sub)
+y_start = 1500
+x_start = 1500
+y_range = y_start:min(ny, y_start + region_width - 1)
+x_range = x_start:min(nx, x_start + region_width - 1)
+
+region_img = img_sub[y_range, x_range]
+region_colorrange = zscale(region_img[isfinite.(region_img)])
+
+# CrowdPhot coordinates are image[y, x]; Makie overlays take (x, y).
+region_peaks = filter(mf.peaks) do peak
+    y, x = Tuple(peak)
+    y in y_range &amp;&amp; x in x_range
+end
+
+# Draw 4-pixel-diameter source circles in image-coordinate units.
+source_circles = map(region_peaks) do peak
+    y, x = Tuple(peak)
+    Circle(Point2f(x, y), 2)
+end
+
+fig = Figure(size = (700, 700))
+ax = Axis(fig[1, 1];
+    aspect = DataAspect(), yreversed = true,
+    xlabel = &quot;x&quot;, ylabel = &quot;y&quot;,
+    title = &quot;Detected sources in a 500×500 pixel region&quot;)
+
+hm = heatmap!(ax, x_range, y_range, region_img&#39;;
+    colorrange = region_colorrange, colorscale = LuptonAsinhScale(),
+    colormap = :grays, interpolate = false)
+poly!(ax, source_circles; color = (:limegreen, 0), strokecolor = :limegreen,
+    strokewidth = 1.2)
+Colorbar(fig[1, 2], hm; height = Relative(0.75), valign = :center)
+
+fig</code></pre><img src="9444eed4.png" alt="Example block output"/><h2 id="Morphological-Measurements"><a class="docs-heading-anchor" href="#Morphological-Measurements">Morphological Measurements</a><a id="Morphological-Measurements-1"></a><a class="docs-heading-anchor-permalink" href="#Morphological-Measurements" title="Permalink"></a></h2><p>Shape statistics want <strong>background-only</strong> inverse-variance weights. <code>mf</code> already carries them (<code>inv_var_bkg</code>, above), so pass it straight to <a href="../../morphology/#CrowdPhot.measure_star_shapes"><code>measure_star_shapes</code></a> and let the default apply. Do <strong>not</strong> substitute a map that includes source Poisson noise, that down-weights the bright core and biases statistics like the FWHM.</p><p><a href="../../morphology/#CrowdPhot.measure_star_shapes"><code>measure_star_shapes</code></a> extracts a cutout around each peak, computes sub-pixel centroids via <a href="../../morphology/#CrowdPhot.centroid_poly"><code>centroid_poly</code></a>, and measures aperture-based FWHM, ellipticity components, moment normalization, and rectangular aperture-sum diagnostics via <a href="../../morphology/#CrowdPhot.measure_star_shape"><code>measure_star_shape</code></a>.</p><p>It tapers the aperture moments with a Gaussian window matched to the detection kernel, which bounds the sky-noise contribution, so <code>half_width</code> only needs to be wide enough to contain the source.</p><pre><code class="language-julia hljs"># Measure morphology for all detected sources
+results = measure_star_shapes(mf; half_width = 2)
+keys(results[1])</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">(:peak_index, :pixel, :significance, :flux, :sharpness, :sharpness_err, :ellipticity_sq_resid, :ellipticity_sq_resid_err, :core, :centroid, :aperture, :psf_ref)</code></pre><h3 id="Flux-Diagnostics"><a class="docs-heading-anchor" href="#Flux-Diagnostics">Flux Diagnostics</a><a id="Flux-Diagnostics-1"></a><a class="docs-heading-anchor-permalink" href="#Flux-Diagnostics" title="Permalink"></a></h3><p>At this point in processing we have two quick flux diagnostics. The <code>flux</code> field holds the best estimate available at this stage, which at detection time is the matched-filter amplitude of the PSF template at the detected peak; it is intended to estimate the source flux when the source matches the detection kernel and the local background is handled by the zero-sum filter. It is not a full PSF fit, so blends, PSF mismatch, and structured backgrounds can bias it.</p><p>The <code>aperture.aperture_sum</code> is the unweighted sum of <code>image - background</code> over the small rectangular cutout used for shape measurement. It is useful because it is simple and tied to exactly the pixels used for the morphology, but it is not a robust circular aperture measurement. We have not performed any aperture correction here; it is calculated below after we construct a PSF model.</p><pre><code class="language-julia hljs"># Compute instrumental magnitudes from the rectangular count-rate aperture sum,
+# excluding stars with negative aperture sums.
+inst_mag = [
+    r.aperture.aperture_sum &gt; 0 ?
+        -2.5 * log10(r.aperture.aperture_sum) :
+        NaN
+    for r in results
+]
+
+# Compute instrumental magnitudes from the matched-filter flux estimate.
+mf_inst_mag = [
+    r.flux &gt; 0 ?
+        -2.5 * log10(r.flux) :
+        NaN
+    for r in results
+]
+
+# Filter to sources with valid measurements
+good = findall(eachindex(results)) do i
+    r = results[i]
+    r.aperture.fwhm.y &gt; 0 &amp;&amp;
+    r.aperture.fwhm.x &gt; 0 &amp;&amp;
+    isfinite(r.core.compactness_core) &amp;&amp;
+    isfinite(r.core.normalized_curvature) &amp;&amp;
+    r.aperture.moment_norm &gt; 0 &amp;&amp;
+    isfinite(inst_mag[i]) &amp;&amp;
+    isfinite(mf_inst_mag[i])
+end
+
+println(&quot;$(length(good)) / $(length(results)) sources have valid morphological measurements&quot;)
+
+# Compare ST magnitudes from the two quick flux estimates.
+stmag_zeropoint = -2.5 * log10(sci_hdr[&quot;PHOTFLAM&quot;]) + sci_hdr[&quot;PHOTZPT&quot;]
+aperture_mags = inst_mag[good] .+ stmag_zeropoint
+matched_filter_mags = mf_inst_mag[good] .+ stmag_zeropoint
+
+fig = Figure(size = (500, 430))
+ax = Axis(fig[1, 1];
+    xlabel = &quot;Aperture-sum ST magnitude&quot;,
+    ylabel = &quot;Matched-filter ST magnitude&quot;,
+    title = &quot;Flux Diagnostics&quot;)
+h = hexbin!(ax, aperture_mags, matched_filter_mags; bins = 80, colorscale = log10)
+# lo = minimum((minimum(aperture_mags), minimum(matched_filter_mags)))
+# hi = maximum((maximum(aperture_mags), maximum(matched_filter_mags)))
+lo, hi = 20, 30
+lines!(ax, [lo, hi], [lo, hi]; color = :black, linestyle = :dash)
+xlims!(ax, hi, lo)
+ylims!(ax, hi, lo)
+Colorbar(fig[1, 2], h; label = &quot;Counts&quot;)
+fig</code></pre><img src="373db38e.png" alt="Example block output"/><h2 id="Morphology-Diagnostics"><a class="docs-heading-anchor" href="#Morphology-Diagnostics">Morphology Diagnostics</a><a id="Morphology-Diagnostics-1"></a><a class="docs-heading-anchor-permalink" href="#Morphology-Diagnostics" title="Permalink"></a></h2><p>The panels below show how morphological measurements trend with <em>small-aperture</em> ST magnitude. We use the aperture magnitudes here as we used a simple Gaussian for our matched-filter detection pass, so the flux estimates based on that metric are likely to be biased. A quick-look estimate from the <a href="https://www.stsci.edu/files/live/sites/www/files/home/hst/instrumentation/acs/data-analysis/aperture-corrections/_documents/bohlin2016_wfc_ee-1.txt">encircled energy curves</a> suggests these cutout aperture magnitudes need a correction of roughly <span>$-0.4$</span> mag, making them brighter, which we apply below. <strong>This is not a robust aperture correction, we will discuss how to measure true calibrated magnitudes later.</strong></p><pre><code class="language-julia hljs">using Statistics
+
+# Reuse the aperture-sum ST magnitudes from the flux diagnostics above,
+# applying *APPROXIMATE* 0.4 mag aperture correction
+mags = aperture_mags .- 0.4
+
+# Unpack data from `results`, which has array-of-structs layout
+fwhm_y  = [results[i].aperture.fwhm.y for i in good]
+fwhm_x  = [results[i].aperture.fwhm.x for i in good]
+fwhm_theta = [results[i].aperture.fwhm.theta for i in good]
+e1 = [results[i].aperture.ellipticity1_aperture for i in good]
+e2 = [results[i].aperture.ellipticity2_aperture for i in good]
+e1_core = [results[i].core.ellipticity1_core for i in good]
+e2_core = [results[i].core.ellipticity2_core for i in good]
+compactness = [results[i].core.compactness_core for i in good]
+normalized_curvature = [results[i].core.normalized_curvature for i in good]
+sharpness = [results[i].sharpness for i in good]
+sig    = [results[i].significance for i in good]
+mf_flux = [results[i].flux for i in good]
+
+fig = Figure(size = (900, 1250))
+
+# Panel 1: FWHM y vs magnitude
+ax1 = Axis(fig[1, 1]; xlabel = &quot;Small-aperture ST magnitude&quot;,
+           ylabel = &quot;FWHM y (pix)&quot;, title = &quot;FWHM (y-axis)&quot;)
+mask = 0.0 .&lt;= fwhm_y .&lt;= 5
+scatter!(ax1, mags[mask], fwhm_y[mask]; markersize = 2, color = :black, rasterize = true)
+h1 = hexbin!(ax1, mags[mask], fwhm_y[mask]; bins = 80, threshold = 100, colorscale = log10)
+Colorbar(fig[1, 2], h1; label = &quot;Counts&quot;)
+
+# Panel 2: FWHM x vs magnitude
+ax2 = Axis(fig[1, 3]; xlabel = &quot;Small-aperture ST magnitude&quot;,
+           ylabel = &quot;FWHM x (pix)&quot;, title = &quot;FWHM (x-axis)&quot;)
+mask = 0.0 .&lt;= fwhm_x .&lt;= 5
+scatter!(ax2, mags[mask], fwhm_x[mask]; markersize = 2, color = :black, rasterize = true)
+h2 = hexbin!(ax2, mags[mask], fwhm_x[mask]; bins = 80, threshold = 100, colorscale = log10)
+Colorbar(fig[1, 4], h2; label = &quot;Counts&quot;)
+
+# Panel 3: e1 (axis-aligned ellipticity component) vs magnitude
+ax3 = Axis(fig[2, 1]; xlabel = &quot;Small-aperture ST magnitude&quot;,
+           ylabel = &quot;e1&quot;, title = &quot;ellipticity1_aperture&quot;)
+mask = -1 .&lt;= e1 .&lt;= 1 # Restrict range for plotting
+scatter!(ax3, mags[mask], e1[mask]; markersize = 2, color = :black, rasterize = true)
+h3 = hexbin!(ax3, mags[mask], e1[mask]; bins = 80, threshold = 100, colorscale = log10)
+Colorbar(fig[2, 2], h3; label = &quot;Counts&quot;)
+
+# Panel 4: e2 (45-degree ellipticity component) vs magnitude
+ax4 = Axis(fig[2, 3]; xlabel = &quot;Small-aperture ST magnitude&quot;,
+           ylabel = &quot;e2&quot;, title = &quot;ellipticity2_aperture&quot;)
+mask = -1 .&lt;= e2 .&lt;= 1 # Restrict range for plotting
+scatter!(ax4, mags[mask], e2[mask]; markersize = 2, color = :black, rasterize = true)
+h4 = hexbin!(ax4, mags[mask], e2[mask]; bins = 80, threshold = 100, colorscale = log10)
+Colorbar(fig[2, 4], h4; label = &quot;Counts&quot;)
+
+# Panel 5: normalized curvature vs magnitude
+ax5 = Axis(fig[3, 1]; xlabel = &quot;Small-aperture ST magnitude&quot;,
+           ylabel = &quot;normalized curvature&quot;, title = &quot;Normalized Core Curvature (2/FWHM²) / I_0&quot;)
+ylims!(ax5, -2, 10)
+mask = -2 .&lt;= normalized_curvature .&lt;= 10
+scatter!(ax5, mags[mask], normalized_curvature[mask]; markersize = 2, color = :black, rasterize = true)
+h5 = hexbin!(ax5, mags[mask], normalized_curvature[mask]; bins = 80, colorscale=log10, threshold = 100)
+Colorbar(fig[3, 2], h5; label = &quot;Counts&quot;)
+
+# Panel 6: compactness vs magnitude
+ax6 = Axis(fig[3, 3]; xlabel = &quot;Small-aperture ST magnitude&quot;,
+           ylabel = &quot;compactness&quot;, title = &quot;Compactness 1 / (σ_x² + σ_y²)&quot;)
+ylims!(ax6, 0, 5)
+mask = 0 .&lt;= compactness .&lt;= 5
+scatter!(ax6, mags[mask], compactness[mask]; markersize = 2, color = :black, rasterize = true)
+h6 = hexbin!(ax6, mags[mask], compactness[mask]; bins = 80, colorscale=log10, threshold = 100)
+Colorbar(fig[3, 4], h6; label = &quot;Counts&quot;)
+
+# Panel 7: Core vs Aperture e1
+ax7 = Axis(fig[4, 1]; xlabel = &quot;e1 aperture&quot;,
+           ylabel = &quot;e1 core&quot;, title = &quot;Core vs Aperture e1&quot;,
+           limits = ((-1, 1), (-1, 1)))
+mask = findall( (-1 .&lt; e1) .&amp; (e1 .&lt; 1) .&amp; (-1 .&lt; e1_core) .&amp; (e1_core .&lt; 1) )
+scatter!(ax7, e1[mask], e1_core[mask]; markersize = 2, color = :black, rasterize = true)
+h7 = hexbin!(ax7, e1[mask], e1_core[mask]; bins = 80, colorscale=log10, threshold = 100)
+Colorbar(fig[4, 2], h7; label = &quot;Counts&quot;)
+
+# Panel 8: Core vs Aperture e2
+ax8 = Axis(fig[4, 3]; xlabel = &quot;e2 aperture&quot;,
+           ylabel = &quot;e2 core&quot;, title = &quot;Core vs Aperture e2&quot;,
+           limits = ((-1, 1), (-1, 1)))
+mask = findall( (-1 .&lt; e2) .&amp; (e2 .&lt; 1) .&amp; (-1 .&lt; e2_core) .&amp; (e2_core .&lt; 1) )
+scatter!(ax8, e2[mask], e2_core[mask]; markersize = 2, color = :black, rasterize = true)
+h8 = hexbin!(ax8, e2[mask], e2_core[mask]; bins = 80, colorscale=log10, threshold = 100)
+Colorbar(fig[4, 4], h8; label = &quot;Counts&quot;)
+
+# Panel 9: median FWHM per magnitude bin
+mag_bins = range(minimum(mags), maximum(mags); length = 30)
+med_fwhm_y = Float64[]
+med_fwhm_x = Float64[]
+mag_centers = Float64[]
+for (lo, hi) in zip(mag_bins[1:end-1], mag_bins[2:end])
+    bin_idx = findall(m -&gt; lo &lt;= m &lt; hi, mags)
+    isempty(bin_idx) &amp;&amp; continue
+    push!(mag_centers, (lo + hi) / 2)
+    push!(med_fwhm_y, median(fwhm_y[bin_idx]))
+    push!(med_fwhm_x, median(fwhm_x[bin_idx]))
+end
+ax9 = Axis(fig[5, 1]; xlabel = &quot;Small-aperture ST magnitude&quot;,
+           ylabel = &quot;Median FWHM (pix)&quot;, title = &quot;Median FWHM by magnitude&quot;)
+scatterlines!(ax9, mag_centers, med_fwhm_y; label = &quot;y&quot;, color = :blue)
+scatterlines!(ax9, mag_centers, med_fwhm_x; label = &quot;x&quot;, color = :red)
+axislegend(ax9; position = :rt)
+
+# Panel 10: DAOPHOT SHARP vs magnitude.  Raw peak minus the mean of its
+# kernel-footprint neighbors, divided by the source&#39;s fitted central height.
+# Large for cosmic rays and hot pixels, small for blends and resolved
+# sources, tightly clustered for stars.
+ax10 = Axis(fig[5, 3]; xlabel = &quot;Small-aperture ST magnitude&quot;,
+            ylabel = &quot;sharpness&quot;, title = &quot;SHARP (DAOPHOT)&quot;)
+ylims!(ax10, -1, 3)
+mask = findall(x -&gt; -1 &lt; x &lt; 3, sharpness)
+scatter!(ax10, mags[mask], sharpness[mask]; markersize = 2, color = :black, rasterize = true)
+h10 = hexbin!(ax10, mags[mask], sharpness[mask]; bins = 80, colorscale = log10, threshold = 100)
+Colorbar(fig[5, 4], h10; label = &quot;Counts&quot;)
+
+fig</code></pre><img src="4fe1e5cd.png" alt="Example block output"/><h2 id="Pick-Stars-for-PSF-Fitting"><a class="docs-heading-anchor" href="#Pick-Stars-for-PSF-Fitting">Pick Stars for PSF Fitting</a><a id="Pick-Stars-for-PSF-Fitting-1"></a><a class="docs-heading-anchor-permalink" href="#Pick-Stars-for-PSF-Fitting" title="Permalink"></a></h2><p>We select stars suitable for PSF fitting with <code>pick_psf_stars</code>.  The function clips the instrumental-magnitude distribution to exclude very bright (potentially saturated) and very faint stars, applies a hard constraint on normalized core curvature, and then sigma-clips morphological parameters (<code>fwhm.y</code>, <code>fwhm.x</code>, <code>ellipticity1_aperture</code>, <code>ellipticity2_aperture</code>, <code>normalized_curvature</code>) within five instrumental-magnitude bins.</p><pre><code class="language-julia hljs"># Select the brightest 50 stars suitable for PSF fitting
+show_idx = CrowdPhot.PSF.pick_psf_stars(results, 50)
+println(&quot;$(length(show_idx)) stars selected for PSF fitting (from $(length(results)) total)&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">50 stars selected for PSF fitting (from 74536 total)</code></pre><p>We show image cutouts of the selected stars to visually confirm that the selection is reasonable. Note that the ePSF fitting routine includes mechanisms for rejecting provided PSF stars that do not help to improve the fit, so it is not as important to pre-filter the list of PSF stars as carefully as for other software.</p><pre><code class="language-julia hljs"># Extract cutouts with a 5-pixel half-width (11×11 pixels) for context
+half = 5
+ny, nx = size(img_sub)
+cutouts = map(show_idx) do i
+    y, x = Tuple(results[i].pixel)
+    yr = max(1, y - half):min(ny, y + half)
+    xr = max(1, x - half):min(nx, x + half)
+    img_sub[yr, xr]
+end
+
+# Compact grid — no axis labels, colorbars, or other decorations
+ncols = 10
+nrows = cld(length(show_idx), ncols)
+fig = Figure(size = (ncols * 70, nrows * 70))
+
+for (k, cutout) in enumerate(cutouts)
+    # Per-cutout zscale for robust contrast
+    fin = cutout[isfinite.(cutout)]
+    zmin, zmax = isempty(fin) ? (0.0, 1.0) : zscale(fin)
+
+    row = (k - 1) ÷ ncols + 1
+    col = (k - 1) % ncols + 1
+    ax = Axis(fig[row, col]; aspect = DataAspect())
+    heatmap!(ax, cutout&#39;;
+        colorrange = (zmin, zmax), colormap = :grays, interpolate = false)
+    hidedecorations!(ax)
+end
+
+colgap!(fig.layout, 1)
+rowgap!(fig.layout, 1)
+fig</code></pre><img src="4b0bfcbd.png" alt="Example block output"/><h2 id="Empirical-PSF-Construction"><a class="docs-heading-anchor" href="#Empirical-PSF-Construction">Empirical PSF Construction</a><a id="Empirical-PSF-Construction-1"></a><a class="docs-heading-anchor-permalink" href="#Empirical-PSF-Construction" title="Permalink"></a></h2><p>We now build an empirical PSF from the selected stars using <a href="../../psf/empirical/image_psf/#CrowdPhot.PSF.fit_psf-Tuple{Type{ImagePSF}, AbstractMatrix, Any, Any}"><code>fit_psf</code></a> with the Anderson &amp; King (2000) iterative residual-stacking method (<a href="../../refs/#Anderson2000" id="Anderson2000-cite-1">Anderson and King [1]</a>). Stars outside the cutout boundary are dropped (<code>drop_edge=true</code>), and the ePSF is supersampled at 4× the detector pixel scale.</p><pre><code class="language-julia hljs"># Select bright, morphologically-clean stars
+n_psf = 2000
+psf_idx = CrowdPhot.PSF.pick_psf_stars(results, n_psf; mag_quantiles=(0.00, 0.95))
+
+# Use sub-pixel centroids from the morphology measurements
+psf_y = [results[i].centroid.y for i in psf_idx]
+psf_x = [results[i].centroid.x for i in psf_idx]
+
+# Build the empirical PSF
+psf_rad = 6
+psf, fit_result = CrowdPhot.PSF.fit_psf(
+    CrowdPhot.PSF.ImagePSF, img_sub_f64, psf_y, psf_x;
+    psf_rad = psf_rad,
+    fit_rad = 4,
+    oversampling = 4,
+    smooth = true,
+    recenter = true,
+)
+
+n_used = sum(fit_result.used)
+println(&quot;$(n_used) / $(n_psf) stars used in $(fit_result.iterations) iterations&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">1966 / 2000 stars used in 6 iterations</code></pre><p>The returned <code>ImagePSF</code> stores the PSF on an oversampled grid.  We convert the grid axes to detector-pixel offsets from the PSF center for display. Note that we use a non-linear colorscale to accentuate the PSF features outside the core. Thick contours show ePSF levels of 0.001, 0.01, and 0.1.</p><pre><code class="language-julia hljs">os_y, os_x = psf.oversampling
+ny_os, nx_os = size(psf.data)
+
+# Oversampled grid indices relative to the PSF origin, scaled to detector pixels
+dy_os = (1:ny_os) .- psf.origin.y
+dx_os = (1:nx_os) .- psf.origin.x
+y_pix = dy_os ./ os_y
+x_pix = dx_os ./ os_x
+
+fig = Figure(size = (700, 600))
+ax = Axis(fig[1, 1];
+    aspect = DataAspect(),
+    xlabel = &quot;Δx (pix)&quot;, ylabel = &quot;Δy (pix)&quot;,
+    title = &quot;Empirical PSF — $(n_used) stars, $(os_y)× oversampled&quot;,
+    yreversed = true)
+
+zmin, zmax = zscale(psf.data[psf.data .&gt; 0]; contrast=0.05)
+psf_hm = heatmap!(ax, x_pix, y_pix, psf.data&#39;;
+    colorrange = (zmin, zmax), colormap = :grays, interpolate = false, colorscale=LuptonAsinhScale(0.0025, 5.0))
+contour!(ax, x_pix, y_pix, psf.data&#39;;
+    levels = logrange(1e-3,1e-1;length=3), color=:red, linewidth = 3)
+contour!(ax, x_pix, y_pix, psf.data&#39;;
+    levels = logrange(1e-3,1e-1;length=9), color=:red, linewidth = 1)
+Colorbar(fig[1, 2], psf_hm; label = &quot;relative flux&quot;, height = Relative(0.8), valign = :center)
+
+fig</code></pre><img src="1076afa0.png" alt="Example block output"/><h2 id="Curve-of-Growth-and-Aperture-Correction"><a class="docs-heading-anchor" href="#Curve-of-Growth-and-Aperture-Correction">Curve of Growth and Aperture Correction</a><a id="Curve-of-Growth-and-Aperture-Correction-1"></a><a class="docs-heading-anchor-permalink" href="#Curve-of-Growth-and-Aperture-Correction" title="Permalink"></a></h2><p>We compute the encircled-energy curve from the empirical PSF using <a href="../../photometry/curve_of_growth/#CrowdPhot.curve_of_growth-Union{Tuple{T}, Tuple{AbstractMatrix{T}, Real, Real, AbstractVector{&lt;:Real}}} where T"><code>curve_of_growth</code></a>.  The radii are chosen to stay within the PSF support (<span>$\pm 6$</span> detector pixels from center).  We also load the <a href="../../photometry/curve_of_growth/#CrowdPhot.reference_cog"><code>reference_cog</code></a> for ACS/WFC F814W from <a href="../../refs/#Bohlin2016" id="Bohlin2016-cite-1">Bohlin [2]</a> to compare our measured PSF against the standard reference.</p><pre><code class="language-julia hljs"># Radii in detector pixels, staying within the PSF cutout extent (psf_rad = 6).
+radii = 0.5:0.25:5.5
+
+# Compute and normalize the curve of growth from our empirical PSF.
+cog = curve_of_growth(psf, radii)
+cog_norm = normalize(cog; method = :sum)
+
+# Load the reference encircled-energy curve for ACS/WFC F814W.
+ref = reference_cog(:WFC, :F814W)
+
+# Key encircled-energy radii from our measured PSF.
+rhalf = radius_at_energy(cog_norm, 0.5)
+r80 = radius_at_energy(cog_norm, 0.80)
+rhalf_ref = radius_at_energy(ref, 0.5)
+r80_ref = radius_at_energy(ref, 0.80)
+println(&quot;Half-light radius: measured $(round(rhalf; digits=2)) pix, reference $(round(rhalf_ref; digits=2)) pix&quot;)
+println(&quot;80% EE radius: measured $(round(r80; digits=2)) pix, reference $(round(r80_ref; digits=2)) pix&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Half-light radius: measured 1.39 pix, reference 1.62 pix
+80% EE radius: measured 2.39 pix, reference 3.5 pix</code></pre><p>The reference curve is a time-averaged PSF model.  Comparing our measured EE to the reference tells us whether the PSF in our drizzle-interpolated image is broader or sharper than the reference. We multiply our measured EE by the value of the reference EE in the last radial bin so their shapes can be more easily compared visually.</p><pre><code class="language-julia hljs"># Reference EE at last radius value
+max_rad_EE = encircled_energy(reference_cog(:WFC, :F814W), last(radii))
+
+fig = Figure(size = (600, 450))
+ax = Axis(fig[1, 1];
+    xlabel = &quot;Radius (pixels)&quot;, ylabel = &quot;Encircled energy fraction&quot;,
+    title = &quot;Encircled Energy — ACS/WFC F814W&quot;,
+    limits = ((0, 6), (0, 1.05)))
+
+lines!(ax, cog_norm.radii, cog_norm.flux .* max_rad_EE;
+    linewidth = 2, color = :black, label = &quot;Measured ePSF&quot;)
+lines!(ax, ref.radii, ref.flux;
+    linewidth = 2, color = :red, linestyle = :dash, label = &quot;Bohlin (2016)&quot;)
+
+axislegend(ax; position = :rb)
+
+fig</code></pre><img src="eaaa2f79.png" alt="Example block output"/><p>After renormalizing to match the reference EE curve in the last radial bin, our EE curve for our ePSF fit matches the reference well. We can now calculate the aperture correction to put our measured PSF magnitudes onto the correct infinite-aperture convention for which the HST zeropoints are defined. We evaluate the reference EE curve at <code>psf_rad</code> here because this is radius to which the flux of our ePSF model has been normalized.</p><pre><code class="language-julia hljs">aper_corr = 2.5 * log10(encircled_energy(reference_cog(:WFC, :F814W), psf_rad))</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">-0.149954612480842</code></pre><h2 id="PSF-Fitting-Photometry"><a class="docs-heading-anchor" href="#PSF-Fitting-Photometry">PSF Fitting Photometry</a><a id="PSF-Fitting-Photometry-1"></a><a class="docs-heading-anchor-permalink" href="#PSF-Fitting-Photometry" title="Permalink"></a></h2><p>We prepare to fit our detected sources by preparing the total error map using <a href="../../utilities/#CrowdPhot.calc_total_error"><code>calc_total_error</code></a> to add the source Poisson term to the background RMS. The data are in <span>$\mathrm{e}^- / \mathrm{s}$</span> (<span>$\mathtt{BUNIT} = \mathrm{ELECTRONS}/\mathrm{S}$</span>), so the effective gain is the exposure time, <span>$g_{\mathrm{eff}} = \mathtt{EXPTIME}$</span>, which converts to countable units (electrons).</p><pre><code class="language-julia hljs"># Extract exposure time from the primary header for the effective gain.
+exptime = hdr[&quot;EXPTIME&quot;]
+
+# Total 1-sigma error including source Poisson noise, for the PSF fit below.
+total_err = calc_total_error.(img_sub_f64, bkg.background_rms, exptime)
+
+# Build inverse-variance map with NaN regions clipped to zero weight.
+inv_var = fill(0.0, size(img_sub_f64))
+valid_total = @. isfinite(total_err) &amp; (total_err &gt; 0)
+@. inv_var[valid_total] = 1 / total_err[valid_total]^2;</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">16439853-element view(::Vector{Float64}, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14  …  17909646, 17909647, 17909648, 17909649, 17909650, 17909651, 17909652, 17909653, 17909654, 17909655]) with eltype Float64:
+ 79242.1484375
+ 79243.328125
+ 79244.546875
+ 79245.7578125
+ 79247.0078125
+ 79125.98723058794
+ 78571.89288062886
+ 78081.8097431729
+ 74779.50220549015
+ 79253.5703125
+     ⋮
+ 64205.3108345508
+ 68536.58642283238
+ 65255.44546303333
+ 69314.6015625
+ 69313.0390625
+ 65321.764568831786
+ 69309.921875
+ 69308.3515625
+ 69306.78125</code></pre><p>We now run <a href="../../photometry/psf_fitting/#CrowdPhot.fit_all_stars_multipass"><code>fit_all_stars_multipass</code></a> on a 250×250 region, using the empirical PSF we just constructed.  It owns the background and detection as well as the fit: each pass re-estimates the background from the current residual, detects anything the model is still missing, and re-fits every source one at a time against the residual of all the others.  We pass it the <em>raw</em> cutout and the sources we already detected in this region as a warm start. After the final pass the residual image should be nearly empty – only noise should remain where the sources used to be.  We fix each source&#39;s local background pedestal to 0, since the pipeline&#39;s own background model already handles this uncrowded field (<span>$\sim2$</span> stars per square arcsecond).</p><pre><code class="language-julia hljs"># Select a 250×250 sub-region (lower-right corner of the earlier 500×500 region)
+y1, y2 = 1750, min(ny, 1999)
+x1, x2 = 1750, min(nx, 1999)
+phot_y_range = y1:y2
+phot_x_range = x1:x2
+
+# Select all sources whose pixel positions fall within this region
+region_idx = findall(eachindex(results)) do i
+    y, x = Tuple(results[i].pixel)
+    y in phot_y_range &amp;&amp; x in phot_x_range
+end
+region_sources = results[region_idx]
+println(&quot;$(length(region_sources)) sources in the display region&quot;)
+
+# Cutout coordinates start at 1, so shift the warm-start catalog to match.
+img_cut = Float64.(img[phot_y_range, phot_x_range])
+warm = (; y = [s.centroid.y - (y1 - 1) for s in region_sources],
+          x = [s.centroid.x - (x1 - 1) for s in region_sources],
+          flux = [s.flux for s in region_sources])
+
+# Multi-pass background -&gt; detect -&gt; fit
+mp = fit_all_stars_multipass(img_cut, psf, warm, 3;
+    inv_var = inv_var[phot_y_range, phot_x_range], fixed = (; bkg = 0.0),
+    max_iter = 3, min_iter = 3,
+    # blend gating, to prevent bright-star fragmentation
+    blend_threshold_initial = 10.0, blend_threshold = 5.0, blend_passes = 1)
+phot_result = mp.phot
+
+n_good = length(phot_result.flux)
+println(&quot;$n_good sources in the final catalog after $(mp.n_detection_passes) detection passes&quot;)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">340 sources in the display region
+557 sources in the final catalog after 3 detection passes</code></pre><p>The <a href="../../photometry/psf_fitting/#CrowdPhot.MultiPassPhotResult"><code>MultiPassPhotResult</code></a> stores the final residual image, <code>image - background - model</code>, after all source models have been subtracted.  Below we compare the original image to the residual for this 250×250 region.  Where sources have been successfully subtracted, the residual shows only noise.</p><pre><code class="language-julia hljs">orig_region = img_sub[phot_y_range, phot_x_range]
+resid_region = phot_result.residual
+region_colorrange = zscale(orig_region[isfinite.(orig_region)])
+
+# Circle every source in the final catalog, including those found by the
+# detection passes.  Catalog positions are cutout-local, so shift them back.
+phot_circles = map(zip(phot_result.y, phot_result.x)) do (y, x)
+    Circle(Point2f(x + (x1 - 1), y + (y1 - 1)), 2)
+end
+
+fig = Figure(size = (500, 900))
+ax1 = Axis(fig[1, 1];
+    aspect = DataAspect(), yreversed = true,
+    title = &quot;Original&quot;)
+ax2 = Axis(fig[2, 1];
+    aspect = DataAspect(), yreversed = true,
+    title = &quot;Residual ($n_good stars subtracted)&quot;)
+
+hm1 = heatmap!(ax1, phot_x_range, phot_y_range, orig_region&#39;;
+    colorrange = region_colorrange, colorscale = LuptonAsinhScale(),
+    colormap = :grays, interpolate = false)
+hm2 = heatmap!(ax2, phot_x_range, phot_y_range, resid_region&#39;;
+    colorrange = region_colorrange, colorscale = LuptonAsinhScale(),
+    colormap = :grays, interpolate = false)
+
+# Overlay detection circles on both panels
+poly!(ax1, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
+    strokewidth = 1.2)
+poly!(ax2, phot_circles; color = (:limegreen, 0), strokecolor = :limegreen,
+    strokewidth = 1.2)
+
+Colorbar(fig[1, 2], hm1; height = Relative(0.8), valign = :center)
+Colorbar(fig[2, 2], hm2; height = Relative(0.8), valign = :center)
+rowgap!(fig.layout, 0)
+
+fig</code></pre><img src="c71387ff.png" alt="Example block output"/><p>We now examine the photometric quality of the PSF-fit results.  Instrumental magnitudes are computed from the fitted fluxes and placed on the STMAG system using the PHOTFLAM and PHOTZPT header keywords and the aperture correction derived above is applied. For descriptions of the goodness-of-fit statistics, see <a href="../../photometry/psf_fitting/#CrowdPhot.MultiPassPhotResult"><code>CrowdPhot.MultiPassPhotResult</code></a>.</p><pre><code class="language-julia hljs"># Every returned source was fit; pair each with the nearest morphology
+# measurement from the region, when there is one within a pixel.
+nearest = map(eachindex(phot_result.y)) do j
+    d = [hypot(warm.y[i] - phot_result.y[j], warm.x[i] - phot_result.x[j]) for i in eachindex(warm.y)]
+    i = argmin(d)
+    d[i] &lt; 1 ? i : 0
+end
+good = nearest .&gt; 0
+
+# Compute ST magnitudes from PSF-fit fluxes
+psf_mags = -2.5 .* log10.(phot_result.flux[good]) .+ stmag_zeropoint .+ aper_corr
+psf_mag_errs = (2.5 / log(10)) .* phot_result.flux_err[good] ./ phot_result.flux[good]
+
+# Centroids from measure_star_shapes for the same sources
+morph_y = warm.y[nearest[good]]
+morph_x = warm.x[nearest[good]]
+fit_y = phot_result.y[good]
+fit_x = phot_result.x[good]
+fit_y_err = phot_result.y_err[good]
+fit_x_err = phot_result.x_err[good]
+
+# Centroid offset between the two measurement techniques
+centroid_offset = @. hypot(morph_y - fit_y, morph_x - fit_x)
+
+# Fitting statistics returned from `fit_all_stars_multipass`
+chisq = phot_result.chisq[good]
+qfit = phot_result.qfit[good]
+qfit_z = phot_result.qfit_z[good]
+crowding = phot_result.crowding[good]
+
+fig = Figure(size = (900, 1500))
+
+# Panel 1: magnitude error vs magnitude
+ax1 = Axis(fig[1, 1];
+    xlabel = &quot;PSF-fit ST magnitude&quot;, ylabel = &quot;σ_mag&quot;,
+    title = &quot;Photometric errors&quot;)
+scatter!(ax1, psf_mags, psf_mag_errs; markersize = 4, color = :black)
+
+# Panel 2: centroid errors vs magnitude
+ax2 = Axis(fig[1, 2];
+    xlabel = &quot;PSF-fit ST magnitude&quot;, ylabel = &quot;σ (pix)&quot;,
+    title = &quot;Centroid errors&quot;)
+scatter!(ax2, psf_mags, fit_y_err; markersize = 4, color = :royalblue, label = &quot;y&quot;)
+scatter!(ax2, psf_mags, fit_x_err; markersize = 4, color = :crimson, label = &quot;x&quot;)
+axislegend(ax2; position = :lt)
+
+# Panel 3: centroid offset (morphology vs PSF fit) vs magnitude
+ax3 = Axis(fig[2, 1];
+    xlabel = &quot;PSF-fit ST magnitude&quot;,
+    ylabel = &quot;Centroid offset (pix)&quot;,
+    title = &quot;Centroid offset: quadratic (`measure_star_shapes`) vs PSF fit&quot;)
+scatter!(ax3, psf_mags, centroid_offset; markersize = 4, color = :black)
+ylims!(ax3, 0.0, 0.5)
+
+# Panel 4: Reduced χ² vs magnitude
+ax4 = Axis(fig[2,2];
+    xlabel = &quot;PSF-fit ST magnitude&quot;,
+    ylabel = &quot;Reduced χ²&quot;,
+    title = &quot;Reduced χ²&quot;)
+scatter!(ax4, psf_mags, chisq; markersize=4, color = :black)
+ylims!(ax4, 0.0, 5.0)
+
+# Panel 5: qfit
+ax5 = Axis(fig[3,1];
+    xlabel = &quot;PSF-fit ST magnitude&quot;,
+    ylabel = &quot;qfit&quot;,
+    title = &quot;qfit&quot;)
+scatter!(ax5, psf_mags, qfit; markersize=4, color = :black)
+hlines!(ax5, 0.2; linestyle = :dash, color = :red)
+
+# Panel 6: qfit_z
+ax6 = Axis(fig[3,2];
+    xlabel = &quot;PSF-fit ST magnitude&quot;,
+    ylabel = &quot;qfit_z&quot;,
+    title = &quot;qfit_z&quot;)
+scatter!(ax6, psf_mags, qfit_z; markersize=4, color = :black)
+
+# Panel 7: Crowding
+ax7 = Axis(fig[4,1];
+    xlabel = &quot;PSF-fit ST magnitude&quot;,
+    ylabel = &quot;crowding&quot;,
+    title = &quot;DOLPHOT crowding&quot;)
+scatter!(ax7, psf_mags, crowding; markersize=4, color = :black)
+
+fig</code></pre><img src="eb0e1d21.png" alt="Example block output"/></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../../pixel_conventions/">« Pixel Coordinate Conventions</a><a class="docs-footer-nextpage" href="../../background/">Background Estimation »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.19.0 on <span class="colophon-date" title="Friday 25 September 2026 20:30">Friday 25 September 2026</span>. Using Julia version 1.13.0.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
