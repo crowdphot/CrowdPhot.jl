@@ -287,7 +287,7 @@ end
                 d1 = min(d1, @inbounds red[w, 1])
                 d2 = min(d2, @inbounds red[w, 2])
             end
-            rms6 = (isodd(n6) ? d1 : d1 / 2 + d2 / 2) * T(CrowdPhot.mad_constant)
+            rms6 = (isodd(n6) ? d1 : d1 / 2 + d2 / 2) * T(CrowdPhot._mad_constant)
         end
         excluded = @inbounds(ist[4]) == 0 || n6 == 0 || n6 < min_valid
         mi = (g - 1) % size(mbkg, 1) + 1
